@@ -1,9 +1,9 @@
 use agent_contracts::tool::{ToolSpecView, ToolStateStore};
+use agent_types::current_time_ms;
 use agent_types::tool::{
     FinalToolCall, ToolExecutionError, ToolExecutionResult, ToolLifecycleRecord,
     ToolLifecycleStatus,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct NoOpToolStateStore;
 
@@ -33,11 +33,4 @@ impl ToolStateStore for NoOpToolStateStore {
     fn store_type(&self) -> &'static str {
         "noop"
     }
-}
-
-fn current_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_millis() as u64
 }

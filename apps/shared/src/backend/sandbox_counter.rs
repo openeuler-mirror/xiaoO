@@ -1,3 +1,4 @@
+use agent_types::current_time_ms;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use once_cell::sync::Lazy;
 use pbkdf2::pbkdf2_hmac;
@@ -503,13 +504,6 @@ impl SandboxCounter {
             }
         })
     }
-}
-
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

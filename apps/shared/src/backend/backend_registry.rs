@@ -1,3 +1,4 @@
+use agent_types::current_time_ms;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -382,13 +383,6 @@ impl BackendRegistry {
             super::AtomicSaveError::Serialize(msg) => BackendRegistryError::Parse { message: msg },
         })
     }
-}
-
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

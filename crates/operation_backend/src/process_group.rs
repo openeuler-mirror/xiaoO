@@ -57,6 +57,26 @@ pub fn unregister_pgid(pgid: i32) {
 #[cfg(not(unix))]
 pub fn unregister_pgid(_pgid: i32) {}
 
+/// Send a signal to every process in a process group (negative PGID
+/// targets the group). `ESRCH` is tolerated silently: it means the group
+/// is already gone. Any other failure is logged as a warning.
+#[cfg(unix)]
+fn signal_group(pgid: i32, signal_name: &str, signal: i32) {
+    let result = unsafe { libc::kill(-pgid, signal) };
+    if result != 0 {
+        let err = std::io::Error::last_os_error();
+        // ESRCH means no such process - group might already be empty
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            tracing::warn!(
+                "Failed to send {} to process group {}: {}",
+                signal_name,
+                pgid,
+                err
+            );
+        }
+    }
+}
+
 /// Terminate a specific process group (synchronous version).
 ///
 /// Sends SIGTERM, waits 300ms, then sends SIGKILL to ensure all processes
@@ -78,29 +98,12 @@ pub fn terminate_process_group(pgid: i32) -> Result<(), String> {
 
     tracing::debug!("Terminating process group: {}", pgid);
 
-    // Send SIGTERM to all processes in the group (negative PGID targets the group)
-    let result = unsafe { libc::kill(-pgid, libc::SIGTERM) };
-    if result != 0 {
-        let err = std::io::Error::last_os_error();
-        // ESRCH means no such process - group might already be empty
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            tracing::warn!("Failed to send SIGTERM to process group {}: {}", pgid, err);
-        }
-    }
-
-    // Wait for graceful termination
+    // Wait for graceful termination, then force-kill any remaining
+    // processes. `send_sigkill_to_group` also unregisters the pgid.
+    send_sigterm_to_group(pgid);
     std::thread::sleep(Duration::from_millis(300));
+    send_sigkill_to_group(pgid);
 
-    // Send SIGKILL to any remaining processes
-    let result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
-    if result != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            tracing::warn!("Failed to send SIGKILL to process group {}: {}", pgid, err);
-        }
-    }
-
-    unregister_pgid(pgid);
     Ok(())
 }
 
@@ -108,6 +111,24 @@ pub fn terminate_process_group(pgid: i32) -> Result<(), String> {
 pub fn terminate_process_group(_pgid: i32) -> Result<(), String> {
     Err("Process groups are only supported on Unix systems".to_string())
 }
+
+/// Terminate a specific process group (async version).
+///
+/// Same SIGTERM → 300ms grace → SIGKILL sequence as
+/// [`terminate_process_group`], but awaits the grace period instead of
+/// blocking the thread. Non-positive pgids are ignored.
+#[cfg(unix)]
+pub async fn terminate_process_group_async(pgid: i32) {
+    if pgid <= 0 {
+        return;
+    }
+    send_sigterm_to_group(pgid);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    send_sigkill_to_group(pgid);
+}
+
+#[cfg(not(unix))]
+pub async fn terminate_process_group_async(_pgid: i32) {}
 
 /// Send SIGTERM to a process group without waiting.
 ///
@@ -118,13 +139,7 @@ pub fn send_sigterm_to_group(pgid: i32) {
     if pgid <= 0 {
         return;
     }
-    let result = unsafe { libc::kill(-pgid, libc::SIGTERM) };
-    if result != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            tracing::warn!("Failed to send SIGTERM to process group {}: {}", pgid, err);
-        }
-    }
+    signal_group(pgid, "SIGTERM", libc::SIGTERM);
 }
 
 /// Send SIGKILL to a process group.
@@ -135,13 +150,7 @@ pub fn send_sigkill_to_group(pgid: i32) {
     if pgid <= 0 {
         return;
     }
-    let result = unsafe { libc::kill(-pgid, libc::SIGKILL) };
-    if result != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            tracing::warn!("Failed to send SIGKILL to process group {}: {}", pgid, err);
-        }
-    }
+    signal_group(pgid, "SIGKILL", libc::SIGKILL);
     unregister_pgid(pgid);
 }
 

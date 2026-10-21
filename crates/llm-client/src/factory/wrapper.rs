@@ -572,172 +572,12 @@ impl LlmProviderWrapper {
         runtime_view: Option<&dyn RuntimeView>,
         request: &LlmRequest,
     ) -> Result<LlmResponse, LlmError> {
-        let runtime_view = runtime_view.or(self.default_runtime_view.as_deref());
-        // Lazy clone: only copy the request when pre-hooks are configured
-        // (they may mutate it). Otherwise pass the original by reference,
-        // avoiding an O(message-history) clone per LLM call.
-        let has_pre_hooks = self.has_enabled_pre_hooks(runtime_view);
-        let mut effective_request: Option<LlmRequest> = if has_pre_hooks {
-            Some(request.clone())
-        } else {
-            None
-        };
-        let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
-        let mut trace_span = begin_trace_span(
+        self.run_scoped_lifecycle::<std::future::Pending<()>>(
             runtime_view,
-            &self.capabilities().model_name,
-            effective_request_ref,
-            false,
+            request,
+            ScopedCall::Complete,
         )
-        .await;
-        let mut pre_hook_count = 0;
-        let mut post_hook_count = 0;
-        let mut error_hook_count = 0;
-        let mut pre_hook_error = None;
-        let mut post_hook_error = None;
-        let mut error_hook_error = None;
-
-        if has_pre_hooks {
-            if let Some(rv) = runtime_view {
-                let (count, error) = self
-                    .run_pre_hook_phase(rv, &mut effective_request, trace_span.as_ref(), false)
-                    .await;
-                pre_hook_count = count;
-                pre_hook_error = error;
-            }
-        }
-
-        let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
-
-        // Always record the (possibly pre-hook-transformed) request payload so
-        // the web UI can render prompts/history even when no pre-hooks ran.
-        if !has_pre_hooks {
-            update_trace_span(
-                runtime_view,
-                trace_span.as_ref(),
-                merge_trace_fields(
-                    json!({
-                        "phase": "pre_hooks_done",
-                        "pre_hook_count": pre_hook_count,
-                        "pre_hook_error": pre_hook_error,
-                    }),
-                    effective_request_trace_fields(effective_request_ref),
-                ),
-            )
-            .await;
-        }
-
-        match self.complete_with_retry(effective_request_ref).await {
-            Ok(mut response) => {
-                update_trace_span(
-                    runtime_view,
-                    trace_span.as_ref(),
-                    json!({
-                        "phase": "provider_completed",
-                    }),
-                )
-                .await;
-
-                if runtime_view.is_some() {
-                    match self
-                        .run_post_hook_sequence(runtime_view, effective_request_ref, &mut response)
-                        .await
-                    {
-                        Ok(results) => {
-                            post_hook_count = results.len();
-                        }
-                        Err(e) => {
-                            post_hook_error = Some(e.to_string());
-                            tracing::warn!("llm post-hook phase failed: {}", e);
-                        }
-                    }
-                }
-
-                end_trace_span(
-                    runtime_view,
-                    &mut trace_span,
-                    agent_contracts::TraceOutcome::Ok,
-                    merge_trace_fields(
-                        json!({
-                            "phase": "finished",
-                            "pre_hook_count": pre_hook_count,
-                            "post_hook_count": post_hook_count,
-                            "error_hook_count": error_hook_count,
-                            "pre_hook_error": pre_hook_error,
-                            "post_hook_error": post_hook_error,
-                            "error_hook_error": error_hook_error,
-                            "recovered": false,
-                        }),
-                        response_trace_fields(&response),
-                    ),
-                )
-                .await;
-                Ok(response)
-            }
-            Err(error) => {
-                if runtime_view.is_some() {
-                    match self
-                        .run_error_hook_sequence(runtime_view, effective_request_ref, &error)
-                        .await
-                    {
-                        Ok(results) => {
-                            error_hook_count = results.len();
-                            for result in results {
-                                if let ErrorLlmHookResult::Recover { response } = result {
-                                    end_trace_span(
-                                        runtime_view,
-                                        &mut trace_span,
-                                        agent_contracts::TraceOutcome::Ok,
-                                        merge_trace_fields(
-                                            json!({
-                                                "phase": "finished",
-                                                "pre_hook_count": pre_hook_count,
-                                                "post_hook_count": post_hook_count,
-                                                "error_hook_count": error_hook_count,
-                                                "pre_hook_error": pre_hook_error,
-                                                "post_hook_error": post_hook_error,
-                                                "error_hook_error": error_hook_error,
-                                                "recovered": true,
-                                                "original_error_kind": llm_error_kind(&error),
-                                                "original_error_message": error.to_string(),
-                                            }),
-                                            response_trace_fields(&response),
-                                        ),
-                                    )
-                                    .await;
-                                    return Ok(response);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error_hook_error = Some(e.to_string());
-                            tracing::warn!("llm error-hook phase failed: {}", e);
-                        }
-                    }
-                }
-
-                end_trace_span(
-                    runtime_view,
-                    &mut trace_span,
-                    trace_outcome_for_error(&error),
-                    merge_trace_fields(
-                        json!({
-                            "phase": "finished",
-                            "pre_hook_count": pre_hook_count,
-                            "post_hook_count": post_hook_count,
-                            "error_hook_count": error_hook_count,
-                            "pre_hook_error": pre_hook_error,
-                            "post_hook_error": post_hook_error,
-                            "error_hook_error": error_hook_error,
-                            "recovered": false,
-                        }),
-                        error_trace_fields(&error),
-                    ),
-                )
-                .await;
-                Err(error)
-            }
-        }
+        .await
     }
 
     pub async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
@@ -781,6 +621,29 @@ impl LlmProviderWrapper {
     where
         Fut: std::future::Future<Output = ()>,
     {
+        self.run_scoped_lifecycle(
+            runtime_view,
+            request,
+            ScopedCall::StreamWithCancel { on_chunk, cancel },
+        )
+        .await
+    }
+
+    /// Shared hook + trace lifecycle for the scoped `complete*` entry
+    /// points: lazy request clone, pre-hook phase, provider call, post /
+    /// error hook phases, and span bookkeeping. `call` picks the provider
+    /// request style (plain vs. streamed-with-cancellation); everything
+    /// else is identical between the two paths.
+    async fn run_scoped_lifecycle<Fut>(
+        &self,
+        runtime_view: Option<&dyn RuntimeView>,
+        request: &LlmRequest,
+        call: ScopedCall<'_, Fut>,
+    ) -> Result<LlmResponse, LlmError>
+    where
+        Fut: std::future::Future<Output = ()>,
+    {
+        let is_stream = matches!(call, ScopedCall::StreamWithCancel { .. });
         let runtime_view = runtime_view.or(self.default_runtime_view.as_deref());
         // Lazy clone: only copy the request when pre-hooks are configured
         // (they may mutate it). Otherwise pass the original by reference,
@@ -796,7 +659,7 @@ impl LlmProviderWrapper {
             runtime_view,
             &self.capabilities().model_name,
             effective_request_ref,
-            true,
+            is_stream,
         )
         .await;
         let mut pre_hook_count = 0;
@@ -805,24 +668,12 @@ impl LlmProviderWrapper {
         let mut pre_hook_error = None;
         let mut post_hook_error = None;
         let mut error_hook_error = None;
-        let stream_stats = Mutex::new(StreamTraceStats::default());
-        let traced_on_chunk = |chunk: StreamChunk| {
-            if let Ok(mut stats) = stream_stats.lock() {
-                stats.chunk_count += 1;
-                if let Some(text) = chunk.delta_text.as_ref() {
-                    stats.text_bytes += text.len();
-                }
-                if chunk.delta_tool_call.is_some() {
-                    stats.saw_tool_call_delta = true;
-                }
-            }
-            on_chunk(chunk);
-        };
+        let stream_stats = is_stream.then(|| Mutex::new(StreamTraceStats::default()));
 
         if has_pre_hooks {
             if let Some(rv) = runtime_view {
                 let (count, error) = self
-                    .run_pre_hook_phase(rv, &mut effective_request, trace_span.as_ref(), true)
+                    .run_pre_hook_phase(rv, &mut effective_request, trace_span.as_ref(), is_stream)
                     .await;
                 pre_hook_count = count;
                 pre_hook_error = error;
@@ -851,17 +702,43 @@ impl LlmProviderWrapper {
             .await;
         }
 
-        // biased: poll the stream first, so a response that completed at the
-        // same instant cancellation fired is still delivered in full instead
-        // of being discarded for a synthesized partial.
-        let stream_result = tokio::select! {
-            biased;
-            result = self.complete_stream_with_retry(effective_request_ref, &traced_on_chunk) => result,
-            _ = cancel => Err(LlmError::Cancelled),
+        let outcome = match call {
+            ScopedCall::Complete => {
+                ScopedCallOutcome::Response(self.complete_with_retry(effective_request_ref).await)
+            }
+            ScopedCall::StreamWithCancel { on_chunk, cancel } => {
+                let traced_on_chunk = |chunk: StreamChunk| {
+                    if let Some(stats) = stream_stats.as_ref() {
+                        if let Ok(mut stats) = stats.lock() {
+                            stats.chunk_count += 1;
+                            if let Some(text) = chunk.delta_text.as_ref() {
+                                stats.text_bytes += text.len();
+                            }
+                            if chunk.delta_tool_call.is_some() {
+                                stats.saw_tool_call_delta = true;
+                            }
+                        }
+                    }
+                    on_chunk(chunk);
+                };
+                // biased: poll the stream first, so a response that completed at the
+                // same instant cancellation fired is still delivered in full instead
+                // of being discarded for a synthesized partial.
+                tokio::select! {
+                    biased;
+                    result = self.complete_stream_with_retry(effective_request_ref, &traced_on_chunk) => match result {
+                        // A provider-side Cancelled is treated like the user
+                        // cancellation here: both skip error hooks.
+                        Err(LlmError::Cancelled) => ScopedCallOutcome::Cancelled,
+                        other => ScopedCallOutcome::Response(other),
+                    },
+                    _ = cancel => ScopedCallOutcome::Cancelled,
+                }
+            }
         };
 
-        match stream_result {
-            Ok(mut response) => {
+        match outcome {
+            ScopedCallOutcome::Response(Ok(mut response)) => {
                 update_trace_span(
                     runtime_view,
                     trace_span.as_ref(),
@@ -881,54 +758,44 @@ impl LlmProviderWrapper {
                         }
                         Err(e) => {
                             post_hook_error = Some(e.to_string());
-                            tracing::warn!("llm post-hook phase failed (stream): {}", e);
+                            tracing::warn!(
+                                "llm post-hook phase failed{}: {}",
+                                hook_phase_label(is_stream),
+                                e
+                            );
                         }
                     }
                 }
-
-                let stream_trace_fields = match stream_stats.into_inner() {
-                    Ok(stats) => stream_trace_fields(&stats),
-                    Err(poisoned) => {
-                        let stats: StreamTraceStats = poisoned.into_inner();
-                        stream_trace_fields(&stats)
-                    }
-                };
 
                 end_trace_span(
                     runtime_view,
                     &mut trace_span,
                     agent_contracts::TraceOutcome::Ok,
-                    merge_trace_fields(
-                        merge_trace_fields(
-                            json!({
-                                "phase": "finished",
-                                "pre_hook_count": pre_hook_count,
-                                "post_hook_count": post_hook_count,
-                                "error_hook_count": error_hook_count,
-                                "pre_hook_error": pre_hook_error,
-                                "post_hook_error": post_hook_error,
-                                "error_hook_error": error_hook_error,
-                                "recovered": false,
-                            }),
-                            response_trace_fields(&response),
-                        ),
-                        stream_trace_fields,
+                    finish_trace_fields(
+                        json!({
+                            "phase": "finished",
+                            "pre_hook_count": pre_hook_count,
+                            "post_hook_count": post_hook_count,
+                            "error_hook_count": error_hook_count,
+                            "pre_hook_error": pre_hook_error,
+                            "post_hook_error": post_hook_error,
+                            "error_hook_error": error_hook_error,
+                            "recovered": false,
+                        }),
+                        response_trace_fields(&response),
+                        stream_stats.as_ref(),
                     ),
                 )
                 .await;
                 Ok(response)
             }
-            Err(LlmError::Cancelled) => {
+            ScopedCallOutcome::Cancelled => {
                 // User cancellation: close the span with the cancelled
                 // outcome and the stream stats accumulated so far. Error
                 // hooks are deliberately skipped — a cancelled call has
                 // nothing to recover, and a `Recover` result would
                 // fabricate a response for a stream the caller believes
                 // it aborted.
-                let stream_trace_fields = match stream_stats.into_inner() {
-                    Ok(stats) => stream_trace_fields(&stats),
-                    Err(poisoned) => stream_trace_fields(&poisoned.into_inner()),
-                };
                 end_trace_span(
                     runtime_view,
                     &mut trace_span,
@@ -944,13 +811,16 @@ impl LlmProviderWrapper {
                             "error_kind": "cancelled",
                             "error_message": "llm stream cancelled mid-flight",
                         }),
-                        stream_trace_fields,
+                        stream_stats
+                            .as_ref()
+                            .map(stream_trace_fields_of)
+                            .unwrap_or_else(|| json!({})),
                     ),
                 )
                 .await;
                 Err(LlmError::Cancelled)
             }
-            Err(error) => {
+            ScopedCallOutcome::Response(Err(error)) => {
                 if runtime_view.is_some() {
                     match self
                         .run_error_hook_sequence(runtime_view, effective_request_ref, &error)
@@ -960,34 +830,25 @@ impl LlmProviderWrapper {
                             error_hook_count = results.len();
                             for result in results {
                                 if let ErrorLlmHookResult::Recover { response } = result {
-                                    let stream_trace_fields = match stream_stats.into_inner() {
-                                        Ok(stats) => stream_trace_fields(&stats),
-                                        Err(poisoned) => {
-                                            stream_trace_fields(&poisoned.into_inner())
-                                        }
-                                    };
-
                                     end_trace_span(
                                         runtime_view,
                                         &mut trace_span,
                                         agent_contracts::TraceOutcome::Ok,
-                                        merge_trace_fields(
-                                            merge_trace_fields(
-                                                json!({
-                                                    "phase": "finished",
-                                                    "pre_hook_count": pre_hook_count,
-                                                    "post_hook_count": post_hook_count,
-                                                    "error_hook_count": error_hook_count,
-                                                    "pre_hook_error": pre_hook_error,
-                                                    "post_hook_error": post_hook_error,
-                                                    "error_hook_error": error_hook_error,
-                                                    "recovered": true,
-                                                    "original_error_kind": llm_error_kind(&error),
-                                                    "original_error_message": error.to_string(),
-                                                }),
-                                                response_trace_fields(&response),
-                                            ),
-                                            stream_trace_fields,
+                                        finish_trace_fields(
+                                            json!({
+                                                "phase": "finished",
+                                                "pre_hook_count": pre_hook_count,
+                                                "post_hook_count": post_hook_count,
+                                                "error_hook_count": error_hook_count,
+                                                "pre_hook_error": pre_hook_error,
+                                                "post_hook_error": post_hook_error,
+                                                "error_hook_error": error_hook_error,
+                                                "recovered": true,
+                                                "original_error_kind": llm_error_kind(&error),
+                                                "original_error_message": error.to_string(),
+                                            }),
+                                            response_trace_fields(&response),
+                                            stream_stats.as_ref(),
                                         ),
                                     )
                                     .await;
@@ -997,38 +858,32 @@ impl LlmProviderWrapper {
                         }
                         Err(e) => {
                             error_hook_error = Some(e.to_string());
-                            tracing::warn!("llm error-hook phase failed (stream): {}", e);
+                            tracing::warn!(
+                                "llm error-hook phase failed{}: {}",
+                                hook_phase_label(is_stream),
+                                e
+                            );
                         }
                     }
                 }
-
-                let stream_trace_fields = match stream_stats.into_inner() {
-                    Ok(stats) => stream_trace_fields(&stats),
-                    Err(poisoned) => {
-                        let stats: StreamTraceStats = poisoned.into_inner();
-                        stream_trace_fields(&stats)
-                    }
-                };
 
                 end_trace_span(
                     runtime_view,
                     &mut trace_span,
                     trace_outcome_for_error(&error),
-                    merge_trace_fields(
-                        merge_trace_fields(
-                            json!({
-                                "phase": "finished",
-                                "pre_hook_count": pre_hook_count,
-                                "post_hook_count": post_hook_count,
-                                "error_hook_count": error_hook_count,
-                                "pre_hook_error": pre_hook_error,
-                                "post_hook_error": post_hook_error,
-                                "error_hook_error": error_hook_error,
-                                "recovered": false,
-                            }),
-                            error_trace_fields(&error),
-                        ),
-                        stream_trace_fields,
+                    finish_trace_fields(
+                        json!({
+                            "phase": "finished",
+                            "pre_hook_count": pre_hook_count,
+                            "post_hook_count": post_hook_count,
+                            "error_hook_count": error_hook_count,
+                            "pre_hook_error": pre_hook_error,
+                            "post_hook_error": post_hook_error,
+                            "error_hook_error": error_hook_error,
+                            "recovered": false,
+                        }),
+                        error_trace_fields(&error),
+                        stream_stats.as_ref(),
                     ),
                 )
                 .await;
@@ -1047,6 +902,60 @@ impl LlmProviderWrapper {
 
     pub fn capabilities(&self) -> &ProviderCapabilities {
         self.inner.capabilities()
+    }
+}
+
+/// How the provider call is executed inside
+/// [`LlmProviderWrapper::run_scoped_lifecycle`].
+enum ScopedCall<'a, Fut> {
+    /// Plain (non-streaming) call via `complete_with_retry`.
+    Complete,
+    /// Streaming call via `complete_stream_with_retry`, raced against a
+    /// caller-supplied cancellation future.
+    StreamWithCancel {
+        on_chunk: &'a (dyn Fn(StreamChunk) + Send + Sync),
+        cancel: Fut,
+    },
+}
+
+/// Outcome of the provider call itself, distinguishing a user cancellation
+/// (which skips error hooks and closes the span as cancelled) from a
+/// provider response or error.
+enum ScopedCallOutcome {
+    Response(Result<LlmResponse, LlmError>),
+    Cancelled,
+}
+
+/// `""` for plain calls, `" (stream)"` for streaming calls — the only
+/// wording difference between the two scoped hook paths.
+fn hook_phase_label(is_stream: bool) -> &'static str {
+    if is_stream {
+        " (stream)"
+    } else {
+        ""
+    }
+}
+
+/// Compute the trace fields for the accumulated stream stats, recovering
+/// from a poisoned lock (both branches expose the same data).
+fn stream_trace_fields_of(stats: &Mutex<StreamTraceStats>) -> serde_json::Value {
+    let stats = stats
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    stream_trace_fields(&stats)
+}
+
+/// Merge the per-phase JSON payload and the per-outcome fields, then the
+/// streaming stats when the call was a stream.
+fn finish_trace_fields(
+    base: serde_json::Value,
+    payload: serde_json::Value,
+    stream_stats: Option<&Mutex<StreamTraceStats>>,
+) -> serde_json::Value {
+    let merged = merge_trace_fields(base, payload);
+    match stream_stats.map(stream_trace_fields_of) {
+        Some(stream_fields) => merge_trace_fields(merged, stream_fields),
+        None => merged,
     }
 }
 

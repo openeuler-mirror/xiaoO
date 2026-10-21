@@ -332,18 +332,7 @@ impl LocalBackendPolicy {
         }
         let mut readable = options.roots.readable_roots.clone();
         let mut writable = options.roots.writable_roots.clone();
-        for grant in grants {
-            match grant.capability {
-                SandboxPermissionCapability::Read | SandboxPermissionCapability::ExecCwd => {
-                    push_unique_path(&mut readable, grant.path);
-                }
-                SandboxPermissionCapability::ExecRuntime => {}
-                SandboxPermissionCapability::Write => {
-                    push_unique_path(&mut readable, grant.path.clone());
-                    push_unique_path(&mut writable, grant.path);
-                }
-            }
-        }
+        merge_grants_into_roots(&mut readable, &mut writable, grants);
 
         let mut args = Vec::new();
         for root in &readable {
@@ -491,18 +480,11 @@ impl MacosSeatbeltProfile {
             writable_roots: config.writable_roots.clone(),
             allow_network: config.allow_network,
         };
-        for grant in grants {
-            match grant.capability {
-                SandboxPermissionCapability::Read | SandboxPermissionCapability::ExecCwd => {
-                    push_unique_path(&mut profile.readable_roots, grant.path);
-                }
-                SandboxPermissionCapability::ExecRuntime => {}
-                SandboxPermissionCapability::Write => {
-                    push_unique_path(&mut profile.readable_roots, grant.path.clone());
-                    push_unique_path(&mut profile.writable_roots, grant.path);
-                }
-            }
-        }
+        merge_grants_into_roots(
+            &mut profile.readable_roots,
+            &mut profile.writable_roots,
+            grants,
+        );
         profile
     }
 
@@ -575,18 +557,11 @@ impl LinuxBubblewrapProfile {
             writable_roots: config.writable_roots.clone(),
             allow_network: config.allow_network,
         };
-        for grant in grants {
-            match grant.capability {
-                SandboxPermissionCapability::Read | SandboxPermissionCapability::ExecCwd => {
-                    push_unique_path(&mut profile.readable_roots, grant.path);
-                }
-                SandboxPermissionCapability::ExecRuntime => {}
-                SandboxPermissionCapability::Write => {
-                    push_unique_path(&mut profile.readable_roots, grant.path.clone());
-                    push_unique_path(&mut profile.writable_roots, grant.path);
-                }
-            }
-        }
+        merge_grants_into_roots(
+            &mut profile.readable_roots,
+            &mut profile.writable_roots,
+            grants,
+        );
         profile
     }
 
@@ -862,6 +837,28 @@ fn profile_string(path: &Path) -> String {
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths.iter().any(|existing| existing == &path) {
         paths.push(path);
+    }
+}
+
+/// Fold permission grants into the readable/writable root sets: `Read` and
+/// `ExecCwd` grants extend the readable roots, `Write` grants extend both,
+/// and `ExecRuntime` grants carry no path component.
+fn merge_grants_into_roots(
+    readable: &mut Vec<PathBuf>,
+    writable: &mut Vec<PathBuf>,
+    grants: impl IntoIterator<Item = SandboxPermissionGrant>,
+) {
+    for grant in grants {
+        match grant.capability {
+            SandboxPermissionCapability::Read | SandboxPermissionCapability::ExecCwd => {
+                push_unique_path(readable, grant.path);
+            }
+            SandboxPermissionCapability::ExecRuntime => {}
+            SandboxPermissionCapability::Write => {
+                push_unique_path(readable, grant.path.clone());
+                push_unique_path(writable, grant.path);
+            }
+        }
     }
 }
 

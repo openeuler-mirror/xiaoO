@@ -3,6 +3,7 @@ use agent_contracts::backend::{
     BackendInstance, BackendLifecycle, BackendLifecycleReason, BackendPath, BackendProvider,
     BackendResourceLimits, OperationBackend, OperationBackendBuildError, OperationError,
 };
+use agent_types::current_time_ms;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -154,13 +155,6 @@ fn new_backend_id() -> BackendId {
 
 fn expires_at_ms_from_timeout(timeout_secs: u64) -> u64 {
     current_time_ms().saturating_add(timeout_secs.saturating_mul(1000))
-}
-
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Error from [`atomic_save_json`].

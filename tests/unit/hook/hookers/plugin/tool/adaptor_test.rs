@@ -1,263 +1,18 @@
 use super::*;
-use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use super::super::super::interaction::{
     parse_plugin_command_response, AskUserDirective, PluginAskUserRequest, PluginCommandResponse,
 };
+use super::super::super::test_support::{TestAgentContext, TestRuntimeView};
 
-use agent_contracts::events::tool_events::ToolEventSink;
-use agent_contracts::hook::registry::HookerRegistry;
-use agent_contracts::interaction::handle::InteractionHandle;
-use agent_contracts::runtime::agent_context::{AgentContext, ConversationView};
-use agent_contracts::runtime::runtime_view::RuntimeView;
-use agent_contracts::tool::state::ToolStateStore;
-use agent_contracts::trace::{TraceOutcome, TraceRecorder, TraceSpanHandle, TraceSpanKind};
-use agent_types::common::{AgentMetadata, WorkspaceRef};
-use agent_types::events::ToolLifecycleEvent;
 use agent_types::hook::HookInvokePrimary;
 use agent_types::interaction::types::InteractionSource;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::tool::FinalToolCall;
-use agent_types::ChatMessage;
 
-struct TestConversation;
-
-impl ConversationView for TestConversation {
-    fn recent_messages(&self, _limit: usize) -> Vec<ChatMessage> {
-        Vec::new()
-    }
-
-    fn message_count(&self) -> usize {
-        0
-    }
-}
-
-struct TestAgentContext {
-    conversation: TestConversation,
-    workspace: WorkspaceRef,
-    metadata: AgentMetadata,
-}
-
-impl TestAgentContext {
-    fn new() -> Self {
-        Self {
-            conversation: TestConversation,
-            workspace: WorkspaceRef {
-                root: PathBuf::from("/tmp"),
-            },
-            metadata: AgentMetadata {
-                agent_id: "test-agent".to_string(),
-                model: "test-model".to_string(),
-                session_id: Some("session-1".to_string()),
-                task_label: None,
-            },
-        }
-    }
-
-    fn with_workspace_and_session(workspace: PathBuf, session_id: Option<String>) -> Self {
-        Self {
-            conversation: TestConversation,
-            workspace: WorkspaceRef { root: workspace },
-            metadata: AgentMetadata {
-                agent_id: "test-agent".to_string(),
-                model: "test-model".to_string(),
-                session_id,
-                task_label: None,
-            },
-        }
-    }
-}
-
-impl AgentContext for TestAgentContext {
-    fn conversation(&self) -> &dyn ConversationView {
-        &self.conversation
-    }
-
-    fn workspace(&self) -> &WorkspaceRef {
-        &self.workspace
-    }
-
-    fn metadata(&self) -> &AgentMetadata {
-        &self.metadata
-    }
-}
-
-struct TestInteractionHandle {
-    response: InteractionResponse,
-    requests: Mutex<Vec<InteractionRequest>>,
-}
-
-impl TestInteractionHandle {
-    fn new(response: InteractionResponse) -> Self {
-        Self {
-            response,
-            requests: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn recorded_requests(&self) -> Vec<InteractionRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl InteractionHandle for TestInteractionHandle {
-    async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
-        self.requests.lock().unwrap().push(request.clone());
-        self.response.clone()
-    }
-}
-
-struct TestHookerRegistry;
-
-impl HookerRegistry for TestHookerRegistry {
-    fn get(&self, _id: &HookerId) -> Option<&dyn Hooker> {
-        None
-    }
-
-    fn list(&self) -> Vec<&dyn Hooker> {
-        Vec::new()
-    }
-
-    fn list_for_hook_point(&self, _hook_point: &HookPointId) -> Vec<&dyn Hooker> {
-        Vec::new()
-    }
-
-    fn is_enabled(&self, _id: &HookerId) -> bool {
-        false
-    }
-
-    fn policy_for(&self, _id: &HookerId) -> Option<&serde_json::Value> {
-        None
-    }
-}
-
-struct TestToolStateStore;
-
-impl ToolStateStore for TestToolStateStore {
-    fn begin(
-        &self,
-        _call: &FinalToolCall,
-        _spec: &dyn agent_contracts::tool::spec::ToolSpecView,
-    ) -> agent_types::tool::ToolLifecycleRecord {
-        panic!("unused in adaptor test")
-    }
-
-    fn update(&self, _record: &agent_types::tool::ToolLifecycleRecord) {
-        panic!("unused in adaptor test")
-    }
-
-    fn finish(
-        &self,
-        _record: &agent_types::tool::ToolLifecycleRecord,
-        _result: &agent_types::tool::execution_types::ToolExecutionResult,
-    ) {
-        panic!("unused in adaptor test")
-    }
-
-    fn fail(&self, _record: &agent_types::tool::ToolLifecycleRecord, _error: &ToolExecutionError) {
-        panic!("unused in adaptor test")
-    }
-}
-
-struct TestToolEventSink;
-
-impl ToolEventSink for TestToolEventSink {
-    fn emit(&self, _event: ToolLifecycleEvent) {}
-}
-
-struct TestTraceRecorder;
-
-#[async_trait]
-impl TraceRecorder for TestTraceRecorder {
-    async fn begin_span(
-        &self,
-        _kind: TraceSpanKind,
-        _name: Cow<'static, str>,
-        _fields: Value,
-    ) -> TraceSpanHandle {
-        panic!("unused in adaptor test")
-    }
-
-    async fn update_span(&self, _span: &TraceSpanHandle, _fields: Value) {
-        panic!("unused in adaptor test")
-    }
-
-    async fn end_span(&self, _span: TraceSpanHandle, _outcome: TraceOutcome, _fields: Value) {
-        panic!("unused in adaptor test")
-    }
-
-    async fn finalize_trace(&self, _outcome: TraceOutcome, _fields: Value) {
-        panic!("unused in adaptor test")
-    }
-
-    async fn force_finalize_trace(&self, _outcome: TraceOutcome, _fields: Value) {
-        panic!("unused in adaptor test")
-    }
-}
-
-struct TestRuntimeView {
-    state_store: TestToolStateStore,
-    tool_events: TestToolEventSink,
-    trace_recorder: TestTraceRecorder,
-    agent_context: TestAgentContext,
-    interaction: TestInteractionHandle,
-    hookers: TestHookerRegistry,
-}
-
-impl TestRuntimeView {
-    fn new(response: InteractionResponse) -> Self {
-        Self {
-            state_store: TestToolStateStore,
-            tool_events: TestToolEventSink,
-            trace_recorder: TestTraceRecorder,
-            agent_context: TestAgentContext::new(),
-            interaction: TestInteractionHandle::new(response),
-            hookers: TestHookerRegistry,
-        }
-    }
-
-    fn with_agent_context(agent_context: TestAgentContext) -> Self {
-        Self {
-            state_store: TestToolStateStore,
-            tool_events: TestToolEventSink,
-            trace_recorder: TestTraceRecorder,
-            agent_context,
-            interaction: TestInteractionHandle::new(InteractionResponse::Confirmed {
-                allowed: false,
-            }),
-            hookers: TestHookerRegistry,
-        }
-    }
-}
-
-impl RuntimeView for TestRuntimeView {
-    fn state_store(&self) -> &dyn ToolStateStore {
-        &self.state_store
-    }
-
-    fn tool_events(&self) -> &dyn ToolEventSink {
-        &self.tool_events
-    }
-
-    fn trace_recorder(&self) -> &dyn TraceRecorder {
-        &self.trace_recorder
-    }
-
-    fn agent_context(&self) -> &dyn AgentContext {
-        &self.agent_context
-    }
-
-    fn interaction(&self) -> &dyn InteractionHandle {
-        &self.interaction
-    }
-
-    fn hookers(&self) -> &dyn HookerRegistry {
-        &self.hookers
-    }
-}
+// The shared scaffold (TestRuntimeView / TestAgentContext and friends)
+// lives in `test_support.rs`, mounted at `crates/hook/src/hookers/plugin/mod.rs`.
 
 #[tokio::test]
 async fn ask_user_round_trip_returns_final_pre_result() {
@@ -304,7 +59,7 @@ else:
         format!("python3 {}", script_path.display()),
         Value::Null,
     );
-    let runtime = TestRuntimeView::new(InteractionResponse::Text {
+    let runtime = TestRuntimeView::with_interaction_response(InteractionResponse::Text {
         value: Some("alice".to_string()),
         display_value: None,
     });
@@ -525,7 +280,7 @@ json.dump(
         format!("python3 {}", script_path.display()),
         Value::Null,
     );
-    let runtime = TestRuntimeView::new(InteractionResponse::Text {
+    let runtime = TestRuntimeView::with_interaction_response(InteractionResponse::Text {
         value: None,
         display_value: None,
     });

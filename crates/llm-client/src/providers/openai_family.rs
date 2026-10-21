@@ -344,6 +344,253 @@ impl OpenAiFamilyProvider {
                 .unwrap_or_default(),
         })
     }
+
+    /// Dispatch to the endpoint request matching the call style.
+    async fn try_endpoint(
+        &self,
+        url: &str,
+        request: &LlmRequest,
+        call: &EndpointCall<'_>,
+    ) -> Result<LlmResponse, LlmError> {
+        match call {
+            EndpointCall::Complete => self.try_single_endpoint(url, request).await,
+            EndpointCall::Stream(on_chunk) => {
+                self.try_stream_endpoint(url, request, on_chunk).await
+            }
+        }
+    }
+
+    /// Shared endpoint selection flow for `complete` and `complete_stream`:
+    /// try the cached endpoint URL first (retrying up to 3 times on
+    /// retryable network errors), then walk the URL-fallback candidates
+    /// until one succeeds. `call` selects the endpoint request style and
+    /// only affects log wording beyond that.
+    async fn run_with_url_fallback(
+        &self,
+        request: &LlmRequest,
+        call: EndpointCall<'_>,
+    ) -> Result<LlmResponse, LlmError> {
+        let label = match &call {
+            EndpointCall::Complete => "",
+            EndpointCall::Stream(_) => " for streaming",
+        };
+
+        let cached_url = self
+            .cached_endpoint_url
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+
+        if let Some(url) = cached_url {
+            match &call {
+                EndpointCall::Complete => {
+                    tracing::debug!(
+                        url,
+                        "Using cached endpoint URL from previous successful call"
+                    );
+                }
+                EndpointCall::Stream(_) => {
+                    tracing::debug!(url, "Using cached endpoint URL for streaming request");
+                }
+            }
+
+            match self.try_endpoint(&url, request, &call).await {
+                Ok(response) => {
+                    tracing::debug!(url, "Cached URL succeeded{}", label);
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if is_configuration_error(&error) {
+                        tracing::error!(
+                            error = error.to_string(),
+                            url,
+                            "Cached URL failed with configuration error{} - not retrying",
+                            label
+                        );
+                        return Err(error);
+                    }
+
+                    if is_retryable_network_error(&error) {
+                        tracing::warn!(
+                            error = error.to_string(),
+                            url,
+                            "Cached URL failed with retryable network error{} - will retry 3 times with 1s interval",
+                            label
+                        );
+
+                        for attempt in 1..=3 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+                            tracing::info!(
+                                url,
+                                attempt,
+                                total_attempts = 3,
+                                "Retrying cached URL{}",
+                                label
+                            );
+
+                            match self.try_endpoint(&url, request, &call).await {
+                                Ok(response) => {
+                                    tracing::info!(
+                                        url,
+                                        attempt,
+                                        "✓ Cached URL retry succeeded{}",
+                                        label
+                                    );
+                                    return Ok(response);
+                                }
+                                Err(retry_error) => {
+                                    if is_configuration_error(&retry_error) {
+                                        tracing::error!(
+                                            error = retry_error.to_string(),
+                                            url,
+                                            attempt,
+                                            "Retry failed with configuration error{} - stopping retries",
+                                            label
+                                        );
+                                        return Err(retry_error);
+                                    }
+
+                                    if attempt < 3 {
+                                        tracing::warn!(
+                                            error = retry_error.to_string(),
+                                            url,
+                                            attempt,
+                                            "Retry attempt failed{} - will retry again",
+                                            label
+                                        );
+                                    } else {
+                                        tracing::error!(
+                                            error = retry_error.to_string(),
+                                            url,
+                                            attempt,
+                                            "All 3 retry attempts failed{} - returning error",
+                                            label
+                                        );
+                                        return Err(retry_error);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Non-retryable error: RateLimited or other issues
+                        if matches!(error, LlmError::RateLimited { .. }) {
+                            tracing::error!(
+                                error = error.to_string(),
+                                url,
+                                "Rate limited{} - quota exhausted or policy triggered, not retrying",
+                                label
+                            );
+                        } else {
+                            tracing::error!(
+                                error = error.to_string(),
+                                url,
+                                "Cached URL failed with non-retryable error{} - returning error",
+                                label
+                            );
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            original_base = &self.api_base,
+            "No cached URL available{} - starting URL fallback to find working endpoint",
+            label
+        );
+
+        let base_candidates = build_base_url_candidates(&self.api_base);
+        let final_urls = build_final_candidates(&base_candidates);
+
+        let mut attempts = Vec::new();
+
+        for (idx, url) in final_urls.iter().enumerate() {
+            match self.try_endpoint(url, request, &call).await {
+                Ok(response) => {
+                    tracing::info!(
+                        url,
+                        attempt_number = idx + 1,
+                        total_candidates = final_urls.len(),
+                        "✓ URL fallback succeeded{} - caching this URL for future calls",
+                        label
+                    );
+
+                    if let Ok(mut guard) = self.cached_endpoint_url.write() {
+                        *guard = Some(url.clone());
+                    }
+
+                    return Ok(response);
+                }
+                Err(error) => {
+                    attempts.push(UrlAttemptRecord {
+                        index: idx,
+                        url: url.clone(),
+                        error: error.to_string(),
+                    });
+
+                    let is_phase1 = idx < base_candidates.len();
+                    let has_more_candidates = idx + 1 < final_urls.len();
+
+                    if has_more_candidates && should_try_next_candidate(&error) {
+                        if is_phase1 {
+                            tracing::warn!(
+                                "Phase 1 candidate #{} failed: {} - trying next candidate",
+                                idx + 1,
+                                url
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Phase 2 candidate #{} failed with endpoint error: {} - trying next",
+                                idx + 1,
+                                url
+                            );
+                        }
+                        continue;
+                    }
+
+                    if is_configuration_error(&error) {
+                        tracing::error!(
+                            error = error.to_string(),
+                            url,
+                            "Configuration/parameter error detected{} - not trying more URLs",
+                            label
+                        );
+                        return Err(error);
+                    }
+
+                    // Last candidate exhausted with a uniform HTTP 401: surface
+                    // the real "Unauthorized" error so the caller gets an
+                    // actionable cause instead of the wrapped
+                    // "All N candidates failed" summary.
+                    if !has_more_candidates && is_http_unauthorized_error(&error) {
+                        tracing::error!(
+                            url,
+                            error = error.to_string(),
+                            "All candidates returned HTTP 401{} - surfacing real auth error instead of wrapped URL fallback",
+                            label
+                        );
+                        return Err(error);
+                    }
+
+                    let error_msg = build_url_fallback_error_message(&attempts);
+                    return Err(LlmError::ApiError(error_msg));
+                }
+            }
+        }
+
+        // Reachable only when `final_urls` is empty (no candidates generated).
+        let error_msg = build_url_fallback_error_message(&attempts);
+
+        Err(LlmError::ApiError(error_msg))
+    }
+}
+
+/// Which endpoint request style a provider call drives.
+enum EndpointCall<'a> {
+    Complete,
+    Stream(&'a (dyn Fn(StreamChunk) + Send + Sync)),
 }
 
 /// OpenAI 兼容端点上 `reasoning_effort` 取值存在已知差异的模型家族，
@@ -411,186 +658,8 @@ fn reasoning_effort_for_model(
 #[async_trait]
 impl LlmProvider for OpenAiFamilyProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-        let cached_url = self
-            .cached_endpoint_url
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-
-        if let Some(url) = cached_url {
-            tracing::debug!(
-                url,
-                "Using cached endpoint URL from previous successful call"
-            );
-
-            match self.try_single_endpoint(&url, request).await {
-                Ok(response) => {
-                    tracing::debug!(url, "Cached URL succeeded");
-                    return Ok(response);
-                }
-                Err(error) => {
-                    if is_configuration_error(&error) {
-                        tracing::error!(
-                            error = error.to_string(),
-                            url,
-                            "Cached URL failed with configuration error - not retrying"
-                        );
-                        return Err(error);
-                    }
-
-                    if is_retryable_network_error(&error) {
-                        tracing::warn!(
-                            error = error.to_string(),
-                            url,
-                            "Cached URL failed with retryable network error - will retry 3 times with 1s interval"
-                        );
-
-                        for attempt in 1..=3 {
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-                            tracing::info!(url, attempt, total_attempts = 3, "Retrying cached URL");
-
-                            match self.try_single_endpoint(&url, request).await {
-                                Ok(response) => {
-                                    tracing::info!(url, attempt, "✓ Cached URL retry succeeded");
-                                    return Ok(response);
-                                }
-                                Err(retry_error) => {
-                                    if is_configuration_error(&retry_error) {
-                                        tracing::error!(
-                                            error = retry_error.to_string(),
-                                            url,
-                                            attempt,
-                                            "Retry failed with configuration error - stopping retries"
-                                        );
-                                        return Err(retry_error);
-                                    }
-
-                                    if attempt < 3 {
-                                        tracing::warn!(
-                                            error = retry_error.to_string(),
-                                            url,
-                                            attempt,
-                                            "Retry attempt failed - will retry again"
-                                        );
-                                    } else {
-                                        tracing::error!(
-                                            error = retry_error.to_string(),
-                                            url,
-                                            attempt,
-                                            "All 3 retry attempts failed - returning error"
-                                        );
-                                        return Err(retry_error);
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Non-retryable error: RateLimited or other issues
-                        if matches!(error, LlmError::RateLimited { .. }) {
-                            tracing::error!(
-                                error = error.to_string(),
-                                url,
-                                "Rate limited - quota exhausted or policy triggered, not retrying"
-                            );
-                        } else {
-                            tracing::error!(
-                                error = error.to_string(),
-                                url,
-                                "Cached URL failed with non-retryable error - returning error"
-                            );
-                        }
-                        return Err(error);
-                    }
-                }
-            }
-        }
-
-        tracing::info!(
-            original_base = &self.api_base,
-            "No cached URL available - starting URL fallback to find working endpoint"
-        );
-
-        let base_candidates = build_base_url_candidates(&self.api_base);
-        let final_urls = build_final_candidates(&base_candidates);
-
-        let mut attempts = Vec::new();
-
-        for (idx, url) in final_urls.iter().enumerate() {
-            match self.try_single_endpoint(url, request).await {
-                Ok(response) => {
-                    tracing::info!(
-                        url,
-                        attempt_number = idx + 1,
-                        total_candidates = final_urls.len(),
-                        "✓ URL fallback succeeded - caching this URL for future calls"
-                    );
-
-                    if let Ok(mut guard) = self.cached_endpoint_url.write() {
-                        *guard = Some(url.clone());
-                    }
-
-                    return Ok(response);
-                }
-                Err(error) => {
-                    attempts.push(UrlAttemptRecord {
-                        index: idx,
-                        url: url.clone(),
-                        error: error.to_string(),
-                    });
-
-                    let is_phase1 = idx < base_candidates.len();
-                    let has_more_candidates = idx + 1 < final_urls.len();
-
-                    if has_more_candidates && should_try_next_candidate(&error) {
-                        if is_phase1 {
-                            tracing::warn!(
-                                "Phase 1 candidate #{} failed: {} - trying next candidate",
-                                idx + 1,
-                                url
-                            );
-                        } else {
-                            tracing::warn!(
-                                "Phase 2 candidate #{} failed with endpoint error: {} - trying next",
-                                idx + 1,
-                                url
-                            );
-                        }
-                        continue;
-                    }
-
-                    if is_configuration_error(&error) {
-                        tracing::error!(
-                            error = error.to_string(),
-                            url,
-                            "Configuration/parameter error detected - not trying more URLs"
-                        );
-                        return Err(error);
-                    }
-
-                    // Last candidate exhausted with a uniform HTTP 401: surface
-                    // the real "Unauthorized" error so the caller gets an
-                    // actionable cause instead of the wrapped
-                    // "All N candidates failed" summary.
-                    if !has_more_candidates && is_http_unauthorized_error(&error) {
-                        tracing::error!(
-                            url,
-                            error = error.to_string(),
-                            "All candidates returned HTTP 401 - surfacing real auth error instead of wrapped URL fallback"
-                        );
-                        return Err(error);
-                    }
-
-                    let error_msg = build_url_fallback_error_message(&attempts);
-                    return Err(LlmError::ApiError(error_msg));
-                }
-            }
-        }
-
-        // Reachable only when `final_urls` is empty (no candidates generated).
-        let error_msg = build_url_fallback_error_message(&attempts);
-
-        Err(LlmError::ApiError(error_msg))
+        self.run_with_url_fallback(request, EndpointCall::Complete)
+            .await
     }
 
     async fn complete_stream(
@@ -598,192 +667,8 @@ impl LlmProvider for OpenAiFamilyProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        let cached_url = self
-            .cached_endpoint_url
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
-
-        if let Some(url) = cached_url {
-            tracing::debug!(url, "Using cached endpoint URL for streaming request");
-
-            match self.try_stream_endpoint(&url, request, on_chunk).await {
-                Ok(response) => {
-                    tracing::debug!(url, "Cached URL succeeded for streaming");
-                    return Ok(response);
-                }
-                Err(error) => {
-                    if is_configuration_error(&error) {
-                        tracing::error!(
-                            error = error.to_string(),
-                            url,
-                            "Cached URL failed with configuration error for streaming - not retrying"
-                        );
-                        return Err(error);
-                    }
-
-                    if is_retryable_network_error(&error) {
-                        tracing::warn!(
-                            error = error.to_string(),
-                            url,
-                            "Cached URL failed with retryable network error for streaming - will retry 3 times with 1s interval"
-                        );
-
-                        for attempt in 1..=3 {
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-                            tracing::info!(
-                                url,
-                                attempt,
-                                total_attempts = 3,
-                                "Retrying cached URL for streaming"
-                            );
-
-                            match self.try_stream_endpoint(&url, request, on_chunk).await {
-                                Ok(response) => {
-                                    tracing::info!(
-                                        url,
-                                        attempt,
-                                        "✓ Cached URL retry succeeded for streaming"
-                                    );
-                                    return Ok(response);
-                                }
-                                Err(retry_error) => {
-                                    if is_configuration_error(&retry_error) {
-                                        tracing::error!(
-                                            error = retry_error.to_string(),
-                                            url,
-                                            attempt,
-                                            "Retry failed with configuration error for streaming - stopping retries"
-                                        );
-                                        return Err(retry_error);
-                                    }
-
-                                    if attempt < 3 {
-                                        tracing::warn!(
-                                            error = retry_error.to_string(),
-                                            url,
-                                            attempt,
-                                            "Retry attempt failed for streaming - will retry again"
-                                        );
-                                    } else {
-                                        tracing::error!(
-                                            error = retry_error.to_string(),
-                                            url,
-                                            attempt,
-                                            "All 3 retry attempts failed for streaming - returning error"
-                                        );
-                                        return Err(retry_error);
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Non-retryable error: RateLimited or other issues
-                        if matches!(error, LlmError::RateLimited { .. }) {
-                            tracing::error!(
-                                error = error.to_string(),
-                                url,
-                                "Rate limited for streaming - quota exhausted or policy triggered, not retrying"
-                            );
-                        } else {
-                            tracing::error!(
-                                error = error.to_string(),
-                                url,
-                                "Cached URL failed with non-retryable error for streaming - returning error"
-                            );
-                        }
-                        return Err(error);
-                    }
-                }
-            }
-        }
-
-        tracing::info!(
-            original_base = &self.api_base,
-            "No cached URL available for streaming - starting URL fallback to find working endpoint"
-        );
-
-        let base_candidates = build_base_url_candidates(&self.api_base);
-        let final_urls = build_final_candidates(&base_candidates);
-
-        let mut attempts = Vec::new();
-
-        for (idx, url) in final_urls.iter().enumerate() {
-            match self.try_stream_endpoint(url, request, on_chunk).await {
-                Ok(response) => {
-                    tracing::info!(
-                        url,
-                        attempt_number = idx + 1,
-                        total_candidates = final_urls.len(),
-                        "✓ URL fallback succeeded for streaming - caching this URL for future calls"
-                    );
-
-                    if let Ok(mut guard) = self.cached_endpoint_url.write() {
-                        *guard = Some(url.clone());
-                    }
-
-                    return Ok(response);
-                }
-                Err(error) => {
-                    attempts.push(UrlAttemptRecord {
-                        index: idx,
-                        url: url.clone(),
-                        error: error.to_string(),
-                    });
-
-                    let is_phase1 = idx < base_candidates.len();
-                    let has_more_candidates = idx + 1 < final_urls.len();
-
-                    if has_more_candidates && should_try_next_candidate(&error) {
-                        if is_phase1 {
-                            tracing::warn!(
-                                "Phase 1 candidate #{} failed: {} - trying next candidate",
-                                idx + 1,
-                                url
-                            );
-                        } else {
-                            tracing::warn!(
-                                "Phase 2 candidate #{} failed with endpoint error: {} - trying next",
-                                idx + 1,
-                                url
-                            );
-                        }
-                        continue;
-                    }
-
-                    if is_configuration_error(&error) {
-                        tracing::error!(
-                            error = error.to_string(),
-                            url,
-                            "Configuration/parameter error detected for streaming - not trying more URLs"
-                        );
-                        return Err(error);
-                    }
-
-                    // Last candidate exhausted with a uniform HTTP 401: surface
-                    // the real "Unauthorized" error so the caller gets an
-                    // actionable cause instead of the wrapped
-                    // "All N candidates failed" summary.
-                    if !has_more_candidates && is_http_unauthorized_error(&error) {
-                        tracing::error!(
-                            url,
-                            error = error.to_string(),
-                            "All candidates returned HTTP 401 for streaming - surfacing real auth error instead of wrapped URL fallback"
-                        );
-                        return Err(error);
-                    }
-
-                    let error_msg = build_url_fallback_error_message(&attempts);
-                    return Err(LlmError::ApiError(error_msg));
-                }
-            }
-        }
-
-        // Reachable only when `final_urls` is empty (no candidates generated).
-        let error_msg = build_url_fallback_error_message(&attempts);
-
-        Err(LlmError::ApiError(error_msg))
+        self.run_with_url_fallback(request, EndpointCall::Stream(on_chunk))
+            .await
     }
 
     fn capabilities(&self) -> &ProviderCapabilities {

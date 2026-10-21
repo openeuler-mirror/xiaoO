@@ -1,6 +1,7 @@
 mod catalog;
 mod executor;
 mod manifest;
+mod path_util;
 mod spec;
 mod tool_source;
 
