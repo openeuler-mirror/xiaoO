@@ -11,10 +11,7 @@ pub(crate) struct OllamaModelCatalog {
 impl OllamaModelCatalog {
     pub(crate) fn new(api_base: String) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            client: super::model_catalog_http_client(Duration::from_secs(30)),
             api_base,
         }
     }

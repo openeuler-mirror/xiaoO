@@ -21,8 +21,9 @@ impl OllamaProvider {
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
+                .danger_accept_invalid_certs(crate::http::tls_verification_disabled())
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+                .unwrap_or_else(crate::http::client_build_failed),
             base_url,
             capabilities: ProviderCapabilities {
                 supports_streaming: true,

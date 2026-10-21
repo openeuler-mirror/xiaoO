@@ -68,10 +68,7 @@ impl OpenRouterCatalog {
         Self {
             url,
             cache_path,
-            http: reqwest::Client::builder()
-                .timeout(FETCH_TIMEOUT)
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http: super::model_catalog_http_client(FETCH_TIMEOUT),
             memory: RwLock::new(None),
         }
     }
