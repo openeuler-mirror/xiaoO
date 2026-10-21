@@ -13,6 +13,10 @@ pub struct WriteBytesRequest {
     pub path: BackendPath,
     pub content: Vec<u8>,
     pub mode: WriteMode,
+    /// Additional data for a single invocation. This information originates
+    /// from the pre-tool-call plugin; individual backends can parse and
+    /// process the fields relevant to them.
+    pub extra: Option<serde_json::Value>,
 }
 
 /// How to write a file.
@@ -63,6 +67,19 @@ pub trait OperationFileSystem: Send + Sync {
 
     /// Create directory and all parent directories.
     async fn create_dir_all(&self, path: &BackendPath) -> Result<(), OperationError>;
+
+    /// Create directory and all parent directories, carrying per-invocation
+    /// plugin data. The default delegates to [`Self::create_dir_all`]
+    /// (ignoring `extra`); backends that can act on the plugin data — e.g.
+    /// externalizing the mutation into a subprocess — override this.
+    async fn create_dir_all_with_extra(
+        &self,
+        path: &BackendPath,
+        extra: Option<&serde_json::Value>,
+    ) -> Result<(), OperationError> {
+        let _ = extra;
+        self.create_dir_all(path).await
+    }
 
     /// Create a temporary path (file or directory).
     async fn temp_path(&self, request: TempPathRequest) -> Result<BackendPath, OperationError>;

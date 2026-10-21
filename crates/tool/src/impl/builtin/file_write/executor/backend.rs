@@ -190,7 +190,9 @@ impl ToolExecutor for FileWriteExecutor {
                 timed(
                     "file_write create_dir_all",
                     DEFAULT_FS_TIMEOUT_MS,
-                    backend.files().create_dir_all(&parent),
+                    backend
+                        .files()
+                        .create_dir_all_with_extra(&parent, call.extra.as_ref()),
                 )
                 .await
                 .map_err(|e| ToolExecutionError::ExecutionFailed {
@@ -206,6 +208,7 @@ impl ToolExecutor for FileWriteExecutor {
                 path: resolved.clone(),
                 content: input.content.as_bytes().to_vec(),
                 mode: write_mode,
+                extra: call.extra.clone(),
             }),
         )
         .await
@@ -254,3 +257,7 @@ impl ToolExecutor for FileWriteExecutor {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../../../../tests/unit/tool/impl/builtin/file_write/executor/backend_test.rs"]
+mod tests;

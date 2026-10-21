@@ -69,6 +69,7 @@ fn write_outside_writable_root_is_denied() {
             path: BackendPath::from_raw(file.display().to_string()),
             content: b"change".to_vec(),
             mode: WriteMode::Overwrite,
+            extra: None,
         }));
 
     assert!(matches!(

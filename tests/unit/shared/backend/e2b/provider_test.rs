@@ -39,6 +39,7 @@ async fn live_structured_grep_executes_command_with_args() {
                 path: smoke_path,
                 content: b"watt = watts = W = Quantity(\"watt\")\n".to_vec(),
                 mode: WriteMode::Overwrite,
+                extra: None,
             })
             .await
             .map_err(|error| format!("write smoke fixture: {error}"))?;

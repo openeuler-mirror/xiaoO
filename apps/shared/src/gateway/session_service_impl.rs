@@ -2205,6 +2205,8 @@ impl SessionControlPlane for CoreBackedSessionService {
                 path: BackendPath::from_raw(request.path),
                 content,
                 mode: WriteMode::Overwrite,
+                // Host-internal checkpoint write, not a tool mutation.
+                extra: None,
             })
             .await
             .map_err(|error| SessionServiceError::CoreRun {
