@@ -1,10 +1,10 @@
 use agent_contracts::runtime::RuntimeView;
+use agent_types::current_time_ms;
 use agent_types::events::ToolLifecycleEvent;
 use agent_types::tool::{
     FinalToolCall, ToolExecutionError, ToolExecutionResult, ToolExecutorOutput,
     ToolLifecycleRecord, ToolLifecycleStatus,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::state::{ExecutorPhaseResult, ToolExecutionState};
 use super::ToolCallImpl;
@@ -86,11 +86,4 @@ impl ToolCallImpl {
     pub(super) fn emit_tool_event(&self, runtime: &dyn RuntimeView, event: ToolLifecycleEvent) {
         runtime.tool_events().emit(event);
     }
-}
-
-fn current_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_millis() as u64
 }

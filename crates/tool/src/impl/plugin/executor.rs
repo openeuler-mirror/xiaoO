@@ -12,6 +12,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 use super::manifest::{LoadedDeclarativeTool, StdinMode, StdoutMode};
+use super::path_util::expand_tilde;
 use super::spec::DeclarativeToolSpec;
 
 pub struct DeclarativeToolExecutor {
@@ -62,18 +63,8 @@ impl DeclarativeToolExecutor {
         })
     }
 
-    fn expand_tilde_path(value: &str) -> Option<PathBuf> {
-        if value == "~" {
-            return std::env::var_os("HOME").map(PathBuf::from);
-        }
-
-        value.strip_prefix("~/").and_then(|suffix| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(suffix))
-        })
-    }
-
     fn resolve_command_token(&self, value: &str) -> String {
-        if let Some(expanded) = Self::expand_tilde_path(value) {
+        if let Some(expanded) = expand_tilde(value) {
             return expanded.to_string_lossy().into_owned();
         }
 
@@ -89,7 +80,7 @@ impl DeclarativeToolExecutor {
     }
 
     fn resolve_arg_token(&self, value: &str) -> String {
-        if let Some(expanded) = Self::expand_tilde_path(value) {
+        if let Some(expanded) = expand_tilde(value) {
             return expanded.to_string_lossy().into_owned();
         }
 

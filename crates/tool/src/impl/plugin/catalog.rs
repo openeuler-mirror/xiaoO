@@ -13,6 +13,7 @@ use super::manifest::{
     DeclarativeToolManifest, EffectSection, ExecSection, LoadedDeclarativeTool, OutputSection,
     StdinMode, StdoutMode,
 };
+use super::path_util::expand_tilde;
 use super::spec::DeclarativeToolSpec;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -449,11 +450,9 @@ fn file_hash(path: &Path) -> String {
 
 fn find_command(command: &str, tool_dir: &Path) -> Option<PathBuf> {
     let candidate = if command == "~" || command.starts_with("~/") {
-        let home = std::env::var_os("HOME").map(PathBuf::from)?;
-        command
-            .strip_prefix("~/")
-            .map(|suffix| home.join(suffix))
-            .unwrap_or(home)
+        // `expand_tilde` returns None here only when $HOME is unset, in
+        // which case the tilde command cannot be resolved at all.
+        expand_tilde(command)?
     } else {
         let path = Path::new(command);
         if path.is_absolute() {

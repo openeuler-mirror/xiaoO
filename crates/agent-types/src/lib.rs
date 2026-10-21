@@ -17,7 +17,9 @@ pub use chat::{
     ChatSystemTransformResult, CommandContext, CommandExecuteBeforeInput,
     CommandExecuteBeforeResult, ModelRef,
 };
-pub use common::{AgentId, AgentMetadata, BuildError, HookerId, ToolId, ToolName, WorkspaceRef};
+pub use common::{
+    current_time_ms, AgentId, AgentMetadata, BuildError, HookerId, ToolId, ToolName, WorkspaceRef,
+};
 pub use compression::CompressionMeta;
 pub use context::{
     BudgetError, FeatureFlags, PromptBuildError, PromptBuildResult, TokenBudgetConfig,

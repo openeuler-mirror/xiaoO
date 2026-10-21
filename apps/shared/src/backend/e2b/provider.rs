@@ -3,6 +3,7 @@ use agent_contracts::backend::{
     BackendPath, BackendProviderKind, BackendResourceAllocation, BackendRuntimeCapabilities,
     OperationBackend, OperationError,
 };
+use agent_types::current_time_ms;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -916,13 +917,6 @@ fn new_e2b_http_client() -> Result<reqwest::Client, BackendError> {
         .map_err(|error| BackendError::BuildFailed {
             message: format!("failed to build e2b HTTP client: {error}"),
         })
-}
-
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn encode_path_segment(value: &str) -> String {

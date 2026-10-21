@@ -291,16 +291,7 @@ impl OperationExec for LocalExec {
 /// Kill the child's process group. On Unix: SIGTERM, brief grace, SIGKILL.
 /// On non-Unix: no-op (caller must `child.kill()` separately).
 async fn kill_process_group(pgid: i32) {
-    #[cfg(unix)]
-    {
-        crate::process_group::send_sigterm_to_group(pgid);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        crate::process_group::send_sigkill_to_group(pgid);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pgid;
-    }
+    crate::process_group::terminate_process_group_async(pgid).await;
 }
 
 /// Reap the child with a bounded wait. If it doesn't exit within
@@ -609,14 +600,7 @@ impl LocalExec {
     }
 
     async fn kill_process_group(child: &mut tokio::process::Child, pgid: i32) {
-        #[cfg(unix)]
-        {
-            if pgid > 0 {
-                crate::process_group::send_sigterm_to_group(pgid);
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                crate::process_group::send_sigkill_to_group(pgid);
-            }
-        }
+        crate::process_group::terminate_process_group_async(pgid).await;
         let _ = child.wait().await;
     }
 }
