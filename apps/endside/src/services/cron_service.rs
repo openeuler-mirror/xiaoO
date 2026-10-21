@@ -34,7 +34,9 @@ pub struct CronJobEntry {
     pub retry_delay_secs: u64,
 }
 
-/// Result of reading the full cron configuration.
+/// Cron configuration from `config.toml`: where `jobs.toml` lives and the
+/// defaults applied when parsing it. Carries no parsed jobs — those are
+/// returned separately by [`load_cron_snapshot`].
 #[derive(Debug, Clone)]
 pub struct CronConfigSnapshot {
     /// Path to jobs.toml.
@@ -43,8 +45,16 @@ pub struct CronConfigSnapshot {
     pub cron_section_present: bool,
     /// Default timeout from global config.
     pub default_timeout_secs: u64,
-    /// Parsed jobs.
-    pub jobs: Vec<CronJobEntry>,
+}
+
+/// Parameters for writing jobs back to `jobs.toml` via [`write_jobs`].
+#[derive(Debug, Clone)]
+pub struct WriteJobsParams {
+    /// Path to jobs.toml.
+    pub jobs_file: PathBuf,
+    /// Global default timeout; per-job values equal to it are elided on
+    /// serialization.
+    pub default_timeout_secs: u64,
 }
 
 // ── TOML representation ────────────────────────────────────────
@@ -79,9 +89,6 @@ struct JobToml {
 struct CronSectionRaw {
     #[serde(default = "default_cron_jobs_dir")]
     jobs_dir: String,
-    #[serde(default = "default_max_concurrent")]
-    #[allow(dead_code)]
-    max_concurrent_jobs: usize,
     #[serde(default = "default_cron_timeout")]
     default_timeout_secs: u64,
 }
@@ -93,20 +100,20 @@ fn default_cron_jobs_dir() -> String {
         .into_owned()
 }
 
-fn default_max_concurrent() -> usize {
-    3
-}
-
 fn default_cron_timeout() -> u64 {
     3600
 }
 
 // ── Public API ──────────────────────────────────────────────────
 
-/// Load the full cron configuration snapshot from the current config.
+/// Load the cron configuration and the parsed jobs from the current config.
 ///
-/// `config_path` is the path to `config.toml`.
-pub fn load_cron_snapshot(config_path: &Path) -> anyhow::Result<CronConfigSnapshot> {
+/// `config_path` is the path to `config.toml`. Returns the configuration
+/// snapshot plus the jobs parsed from `jobs.toml` (empty if the file does
+/// not exist yet).
+pub fn load_cron_snapshot(
+    config_path: &Path,
+) -> anyhow::Result<(CronConfigSnapshot, Vec<CronJobEntry>)> {
     let config_content = fs::read_to_string(config_path)
         .map_err(|e| anyhow::anyhow!("failed to read config.toml: {e}"))?;
 
@@ -132,16 +139,18 @@ pub fn load_cron_snapshot(config_path: &Path) -> anyhow::Result<CronConfigSnapsh
         Vec::new()
     };
 
-    Ok(CronConfigSnapshot {
-        jobs_file,
-        cron_section_present,
-        default_timeout_secs,
+    Ok((
+        CronConfigSnapshot {
+            jobs_file,
+            cron_section_present,
+            default_timeout_secs,
+        },
         jobs,
-    })
+    ))
 }
 
 /// Write the given jobs back to `jobs.toml`.
-pub fn write_jobs(snapshot: &CronConfigSnapshot, jobs: &[CronJobEntry]) -> anyhow::Result<()> {
+pub fn write_jobs(params: &WriteJobsParams, jobs: &[CronJobEntry]) -> anyhow::Result<()> {
     let toml_jobs: Vec<JobToml> = jobs
         .iter()
         .map(|j| JobToml {
@@ -150,7 +159,7 @@ pub fn write_jobs(snapshot: &CronConfigSnapshot, jobs: &[CronJobEntry]) -> anyho
             cron: j.cron_raw.clone(),
             prompt: j.prompt.clone(),
             agent_role: j.agent_role.clone(),
-            timeout_secs: if j.timeout_secs == snapshot.default_timeout_secs {
+            timeout_secs: if j.timeout_secs == params.default_timeout_secs {
                 None
             } else {
                 Some(j.timeout_secs)
@@ -171,7 +180,7 @@ pub fn write_jobs(snapshot: &CronConfigSnapshot, jobs: &[CronJobEntry]) -> anyho
 
     let jobs_toml = JobsToml { job: toml_jobs };
 
-    let parent = snapshot
+    let parent = params
         .jobs_file
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid jobs file path"))?;
@@ -180,7 +189,7 @@ pub fn write_jobs(snapshot: &CronConfigSnapshot, jobs: &[CronJobEntry]) -> anyho
     let content = toml::to_string_pretty(&jobs_toml)
         .map_err(|e| anyhow::anyhow!("failed to serialize jobs.toml: {e}"))?;
 
-    fs::write(&snapshot.jobs_file, &content)
+    fs::write(&params.jobs_file, &content)
         .map_err(|e| anyhow::anyhow!("failed to write jobs.toml: {e}"))?;
 
     Ok(())

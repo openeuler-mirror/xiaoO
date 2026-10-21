@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -32,16 +31,6 @@ impl DedupStateStore {
         self.states.insert(path, state);
     }
 
-    #[allow(dead_code)]
-    pub fn remove_read_state(&mut self, path: &str) -> Option<FileReadState> {
-        self.states.remove(path)
-    }
-
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.states.clear();
-    }
-
     pub fn is_file_unchanged(
         &self,
         path: &str,
@@ -60,15 +49,6 @@ impl DedupStateStore {
             None => false,
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn get_file_mtime(path: &Path) -> Option<i64> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as i64)
 }
 
 // Millisecond resolution, not seconds: dedup now suppresses *full* re-reads (not

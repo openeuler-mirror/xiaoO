@@ -57,7 +57,7 @@ fn key_identifier_is_hashed_and_deterministic() {
 }
 
 #[tokio::test]
-async fn test_check_and_reserve_at_limit() {
+async fn reservation_beyond_limit_is_rejected() {
     let (_dir, counter) = temp_counter();
     let key = SandboxCounterKey::new("e2b", "test-limit");
 
@@ -84,7 +84,7 @@ async fn test_check_and_reserve_at_limit() {
 }
 
 #[tokio::test]
-async fn test_confirm_and_release() {
+async fn confirm_creation_then_release_tracks_count() {
     let (_dir, counter) = temp_counter();
     let key = SandboxCounterKey::new("e2b", "test-confirm");
 
@@ -106,7 +106,7 @@ async fn test_confirm_and_release() {
 }
 
 #[tokio::test]
-async fn test_pending_counts() {
+async fn pending_reservation_counts_until_cancelled() {
     let (_dir, counter) = temp_counter();
     let key = SandboxCounterKey::new("e2b", "test-pending");
 
@@ -140,7 +140,7 @@ async fn test_pending_counts() {
 }
 
 #[tokio::test]
-async fn test_in_process_lock_protection() {
+async fn concurrent_reservations_never_exceed_the_limit() {
     let (_dir, counter) = temp_counter();
     let counter = Arc::new(counter);
     let key = SandboxCounterKey::new("e2b", "test-concurrent");
@@ -170,7 +170,7 @@ async fn test_in_process_lock_protection() {
 }
 
 #[tokio::test]
-async fn test_stale_pending_reservations_are_gc_on_load() {
+async fn stale_pending_reservations_are_gc_on_load() {
     let (_dir, counter) = temp_counter();
     let key = SandboxCounterKey::new("e2b", "test-stale-gc");
 
@@ -215,7 +215,7 @@ async fn test_stale_pending_reservations_are_gc_on_load() {
 }
 
 #[tokio::test]
-async fn test_fresh_pending_reservations_survive_gc() {
+async fn fresh_pending_reservations_survive_gc() {
     let (_dir, counter) = temp_counter();
     let key = SandboxCounterKey::new("e2b", "test-fresh-pending");
 
@@ -237,7 +237,7 @@ async fn test_fresh_pending_reservations_survive_gc() {
 }
 
 #[tokio::test]
-async fn test_confirm_after_pending_gc_does_not_breach_limit() {
+async fn confirm_after_pending_gc_does_not_breach_limit() {
     // A slow build (> PENDING_RESERVATION_TTL_MS) has its reservation
     // GC'd, the freed slot is reused until the pool is full, then the
     // slow build completes and calls confirm_creation. `counts` must
@@ -327,7 +327,7 @@ async fn test_confirm_after_pending_gc_does_not_breach_limit() {
 }
 
 #[tokio::test]
-async fn test_confirm_after_pending_gc_increments_when_under_limit() {
+async fn confirm_after_pending_gc_increments_when_under_limit() {
     // When the reservation was GC'd but the pool is NOT full,
     // confirm_creation should still increment the confirmed count so
     // the real sandbox is tracked.

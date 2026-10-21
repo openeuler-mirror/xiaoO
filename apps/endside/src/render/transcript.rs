@@ -632,9 +632,6 @@ pub(crate) fn build_transcript_cache(
     prev: Option<TranscriptRenderCache>,
     renders: Vec<Option<CachedMessageRender>>,
 ) -> TranscriptRenderCache {
-    #[cfg(debug_assertions)]
-    let _start = std::time::Instant::now();
-
     // Take ownership of the previous cache's message blocks so non-dirty
     // messages can be MOVED into the new cache (zero `Line` clone). Each slot
     // is `Option` so we can `take()` exactly one block per non-dirty message.
@@ -895,13 +892,6 @@ pub(crate) fn build_transcript_cache(
         absolute_visual_row += block.visual_lines.len();
         absolute_logical_row += block.lines.len();
         message_blocks.push(block);
-    }
-
-    #[cfg(debug_assertions)]
-    {
-        let _elapsed = _start.elapsed();
-        // Suppress unused variable warning - used implicitly
-        let _ = _elapsed;
     }
 
     TranscriptRenderCache {

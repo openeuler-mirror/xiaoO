@@ -80,7 +80,7 @@ impl AppRuntimeFactory {
         existing_tool_manifest: Option<Vec<ToolSpecSnapshot>>,
         operation_backend: Arc<dyn OperationBackend>,
     ) -> Result<AppRuntimeAssembly, AppRuntimeFactoryError> {
-        let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl::new());
+        let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl);
         // Defense-in-depth: every code path that resolves a session runtime
         // should have already injected a real `ContextManager` (daemon:
         // `build_compression_pipeline`, local CLI: ditto). If a caller forgets
@@ -146,10 +146,6 @@ impl AppRuntimeFactory {
                     "trace config must serialize to a JSON object",
                 ))
             })?;
-            trace_config_obj.insert(
-                "agent_id".to_string(),
-                Value::String(resolved.descriptor.agent_id.0.clone()),
-            );
             trace_config_obj.insert(
                 "workspace_root".to_string(),
                 Value::String(resolved.descriptor.workspace_root.display().to_string()),

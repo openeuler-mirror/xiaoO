@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_base_candidates_without_v1() {
+fn plain_base_expands_to_v1_and_v4_variants() {
     let candidates = build_base_url_candidates("http://api.test.com");
     assert_eq!(candidates.len(), 3);
     assert_eq!(candidates[0], "http://api.test.com");
@@ -10,7 +10,7 @@ fn test_base_candidates_without_v1() {
 }
 
 #[test]
-fn test_final_candidates_base_first() {
+fn final_candidates_list_bare_bases_before_endpoint_appended_urls() {
     let bases = vec![
         "http://api.test.com".to_string(),
         "http://api.test.com/v1".to_string(),
@@ -20,38 +20,38 @@ fn test_final_candidates_base_first() {
     assert_eq!(final_urls.len(), 4);
     assert_eq!(
         final_urls[0], "http://api.test.com",
-        "#1 原始base（不拼接endpoint）"
+        "original base, no endpoint appended"
     );
     assert_eq!(
         final_urls[1], "http://api.test.com/v1",
-        "#2 补/v1 base（不拼接endpoint）"
+        "v1-patched base, no endpoint appended"
     );
     assert_eq!(
         final_urls[2], "http://api.test.com/chat/completions",
-        "#3 原始base + endpoint"
+        "original base + endpoint"
     );
     assert_eq!(
         final_urls[3], "http://api.test.com/v1/chat/completions",
-        "#4 补/v1 base + endpoint"
+        "v1-patched base + endpoint"
     );
 }
 
 #[test]
-fn test_base_candidates_with_v1() {
+fn v1_base_is_used_as_is_without_duplication() {
     let candidates = build_base_url_candidates("http://api.test.com/v1");
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0], "http://api.test.com/v1");
 }
 
 #[test]
-fn test_base_candidates_with_api_v1() {
+fn api_v1_base_is_used_as_is_without_duplication() {
     let candidates = build_base_url_candidates("http://example.com/api/v1");
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0], "http://example.com/api/v1");
 }
 
 #[test]
-fn test_endpoint_paths_without_v1() {
+fn plain_base_gets_bare_and_v1_endpoint_paths() {
     let paths = build_endpoint_paths("http://example.com");
     assert_eq!(paths.len(), 2);
     assert_eq!(paths[0], "/chat/completions");
@@ -59,14 +59,14 @@ fn test_endpoint_paths_without_v1() {
 }
 
 #[test]
-fn test_endpoint_paths_with_v1() {
+fn v1_base_gets_only_the_bare_endpoint_path() {
     let paths = build_endpoint_paths("http://example.com/v1");
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0], "/chat/completions");
 }
 
 #[test]
-fn test_no_v4_v1_combination() {
+fn no_v4_v1_combination() {
     let bases = build_base_url_candidates("http://api.test.com");
     let paths = build_endpoint_paths(&bases[2]);
 
@@ -79,7 +79,7 @@ fn test_no_v4_v1_combination() {
 }
 
 #[test]
-fn test_final_candidates_combination() {
+fn final_candidates_cross_every_base_with_endpoint_paths_in_order() {
     let bases = vec![
         "http://example.com".to_string(),
         "http://example.com/v1".to_string(),
@@ -95,7 +95,7 @@ fn test_final_candidates_combination() {
 }
 
 #[test]
-fn test_final_candidates_dedup() {
+fn final_candidates_dedup() {
     let bases = vec!["http://example.com/v1".to_string()];
 
     let final_urls = build_final_candidates(&bases);
@@ -122,7 +122,7 @@ fn full_chat_completions_endpoint_is_not_extended_again() {
 }
 
 #[test]
-fn test_endpoint_path_error_detection() {
+fn transport_and_parse_errors_qualify_as_endpoint_errors_auth_and_cancel_do_not() {
     let http_error = LlmError::HttpError("Connection failed".to_string());
     assert!(is_endpoint_path_error(&http_error));
 
@@ -156,7 +156,7 @@ fn test_endpoint_path_error_detection() {
 }
 
 #[test]
-fn test_http_401_is_endpoint_error_to_continue_fallback() {
+fn http_401_is_endpoint_error_to_continue_fallback() {
     // Rationale: see `is_endpoint_path_error`. The error is built through
     // the real `map_api_status_error` pipeline so this test stays in sync
     // with the wire-level message format.
@@ -185,7 +185,7 @@ fn test_http_401_is_endpoint_error_to_continue_fallback() {
 }
 
 #[test]
-fn test_http_status_code_parses_structured_prefix() {
+fn http_status_code_parses_structured_prefix() {
     // Production ApiError messages are produced by `map_api_status_error`
     // as `"HTTP {status}: {body}"`. The prefix parser must extract the
     // numeric code from there and ignore HTTP-status substrings that only
@@ -210,7 +210,7 @@ fn test_http_status_code_parses_structured_prefix() {
 }
 
 #[test]
-fn test_http_404_with_invalid_keyword_is_endpoint_error() {
+fn http_404_with_invalid_keyword_is_endpoint_error() {
     // Test case from user: "HTTP 404 Not Found: Invalid URL (POST /v1)"
     // This error should be treated as endpoint path error (try other URLs),
     // NOT as configuration error (stop immediately), even though it contains "Invalid"
@@ -229,7 +229,7 @@ fn test_http_404_with_invalid_keyword_is_endpoint_error() {
 }
 
 #[test]
-fn test_http_400_with_invalid_keyword_is_config_error() {
+fn http_400_with_invalid_keyword_is_config_error() {
     // Contrast with HTTP 400: truly a configuration error
 
     let error_msg = "API error: HTTP 400 Bad Request: Invalid parameter";
@@ -246,7 +246,7 @@ fn test_http_400_with_invalid_keyword_is_config_error() {
 }
 
 #[test]
-fn test_http_400_url_error_is_endpoint_error() {
+fn http_400_url_error_is_endpoint_error() {
     // Some APIs report an incomplete endpoint as HTTP 400 rather than 404.
     for message in [
         "url error",
@@ -272,7 +272,7 @@ fn test_http_400_url_error_is_endpoint_error() {
 }
 
 #[test]
-fn test_error_message_generation() {
+fn fallback_error_message_lists_every_failed_attempt() {
     let attempts = vec![
         UrlAttemptRecord {
             index: 0,
@@ -309,7 +309,7 @@ fn rate_limited_is_not_retryable() {
 }
 
 #[test]
-fn test_http_502_is_retryable() {
+fn http_502_is_retryable() {
     // HTTP 502 Bad Gateway - temporary server failure, should retry
     let error_msg = "API error: HTTP 502 Bad Gateway";
     let error = LlmError::ApiError(error_msg.to_string());
@@ -318,7 +318,7 @@ fn test_http_502_is_retryable() {
 }
 
 #[test]
-fn test_http_503_is_retryable() {
+fn http_503_is_retryable() {
     // HTTP 503 Service Unavailable - temporary server failure, should retry
     let error_msg = "API error: HTTP 503 Service Unavailable";
     let error = LlmError::ApiError(error_msg.to_string());
@@ -327,7 +327,7 @@ fn test_http_503_is_retryable() {
 }
 
 #[test]
-fn test_http_504_is_retryable() {
+fn http_504_is_retryable() {
     // HTTP 504 Gateway Timeout - temporary server failure, should retry
     let error_msg = "API error: HTTP 504 Gateway Timeout";
     let error = LlmError::ApiError(error_msg.to_string());
@@ -336,7 +336,7 @@ fn test_http_504_is_retryable() {
 }
 
 #[test]
-fn test_http_500_is_not_retryable() {
+fn http_500_is_not_retryable() {
     // HTTP 500 Internal Server Error - might be persistent, not retryable here
     let error_msg = "API error: HTTP 500 Internal Server Error";
     let error = LlmError::ApiError(error_msg.to_string());

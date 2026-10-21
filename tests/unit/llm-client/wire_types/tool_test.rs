@@ -1,7 +1,21 @@
 use super::*;
 
+// Test-only constructor for `WireTool`.
+impl WireTool {
+    fn function(name: String, description: String, parameters: serde_json::Value) -> Self {
+        Self {
+            tool_type: "function".to_string(),
+            function: WireToolFunction {
+                name,
+                description: Some(description),
+                parameters: Some(parameters),
+            },
+        }
+    }
+}
+
 #[test]
-fn test_tool_serialization() {
+fn tool_serialization_includes_type_name_and_description() {
     let params = serde_json::json!({
         "type": "object",
         "properties": {
@@ -21,7 +35,7 @@ fn test_tool_serialization() {
 }
 
 #[test]
-fn test_tool_choice_serialization() {
+fn tool_choice_serializes_string_and_function_variants() {
     let choice = WireToolChoice::auto();
     let json = serde_json::to_string(&choice).unwrap();
     assert_eq!(json, r#""auto""#);
@@ -41,7 +55,7 @@ fn test_tool_choice_serialization() {
 }
 
 #[test]
-fn test_tool_call_serialization() {
+fn tool_call_serialization_keeps_id_type_and_function() {
     let tool_call = WireToolCall {
         id: "call_abc123".to_string(),
         call_type: "function".to_string(),
@@ -58,7 +72,7 @@ fn test_tool_call_serialization() {
 }
 
 #[test]
-fn test_tool_call_delta_serialization() {
+fn tool_call_delta_serialization_keeps_index_and_id() {
     let delta = WireToolCallDelta {
         index: 0,
         id: Some("call_abc123".to_string()),

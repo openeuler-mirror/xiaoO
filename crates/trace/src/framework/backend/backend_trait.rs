@@ -56,12 +56,4 @@ pub(crate) trait TraceBackend: Send + Sync {
         outcome: TraceOutcome,
         fields: Value,
     );
-
-    async fn force_finalize_trace(
-        &self,
-        occurred_at_ms: u64,
-        final_parent_span_id: Option<String>,
-        outcome: TraceOutcome,
-        fields: Value,
-    );
 }

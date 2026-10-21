@@ -1,6 +1,12 @@
 use super::constants::MAX_NUM_RESULTS;
 use super::input::WebSearchInput;
 
+pub mod error_code {
+    pub const QUERY_EMPTY: u32 = 1001;
+    pub const NUM_RESULTS_OUT_OF_RANGE: u32 = 1002;
+    pub const CONTEXT_MAX_CHARACTERS_EMPTY: u32 = 1003;
+}
+
 pub struct ValidationResult {
     pub result: bool,
     pub message: Option<String>,
@@ -12,7 +18,7 @@ pub fn validate_input(input: &WebSearchInput) -> ValidationResult {
         return ValidationResult {
             result: false,
             message: Some("query must not be empty".to_string()),
-            error_code: Some(1001),
+            error_code: Some(error_code::QUERY_EMPTY),
         };
     }
 
@@ -24,7 +30,7 @@ pub fn validate_input(input: &WebSearchInput) -> ValidationResult {
                     "num_results must be between 1 and {} (got {})",
                     MAX_NUM_RESULTS, num_results
                 )),
-                error_code: Some(1002),
+                error_code: Some(error_code::NUM_RESULTS_OUT_OF_RANGE),
             };
         }
     }
@@ -34,7 +40,7 @@ pub fn validate_input(input: &WebSearchInput) -> ValidationResult {
             return ValidationResult {
                 result: false,
                 message: Some("context_max_characters must be greater than 0".to_string()),
-                error_code: Some(1003),
+                error_code: Some(error_code::CONTEXT_MAX_CHARACTERS_EMPTY),
             };
         }
     }

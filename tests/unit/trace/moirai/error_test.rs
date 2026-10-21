@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_from_rusqlite_error() {
+fn rusqlite_error_converts_to_storage_variant() {
     let db_error = rusqlite::Error::ExecuteReturnedResults;
     let converted: MoiraiError = db_error.into();
 
@@ -15,7 +15,7 @@ fn test_from_rusqlite_error() {
 }
 
 #[test]
-fn test_from_serde_error() {
+fn serde_error_converts_to_serialization_variant() {
     let json_str = "{invalid json}";
     let serde_error: serde_json::Error =
         serde_json::from_str::<serde_json::Value>(json_str).unwrap_err();
@@ -31,7 +31,7 @@ fn test_from_serde_error() {
 }
 
 #[test]
-fn test_error_display() {
+fn display_prefixes_each_variant_with_its_kind() {
     // Test Storage variant
     let storage_err = MoiraiError::Storage("db connection failed".to_string());
     assert_eq!(

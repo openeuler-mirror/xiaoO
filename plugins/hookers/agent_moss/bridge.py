@@ -15,7 +15,8 @@ AgentMoss 的前身，已迁出为独立常驻服务）。
       4. 将 AnalyzeResponse 映射为 PreHookResult JSON：
            {"result": "allow", "reason": "..."}
            {"result": "deny",  "reason": "..."}
-      5. stdout 输出 PreHookResult JSON（退出码始终 0，hook 模式约定）
+      5. stdout 输出 PreHookResult JSON（正常路径退出码 0；空 stdin / JSON
+         解析失败时退出码 2）
 
   - AgentMoss 作为常驻 HTTP 服务（systemd unit / pip 装后自启），比每次
     spawn audit.py 子进程快得多（无 venv 启动/import 开销，无 ThreadPoolExecutor
@@ -196,7 +197,7 @@ def _resolve_service_url() -> str:
     if _URL_ENV:
         _cached_service_url = _URL_ENV
         return _cached_service_url
-    # 2. 用户显式设了 PORT（非默认），直接用，不探测
+    # 2. 用户设了 AGENT_MOSS_PORT（不论是否为默认值），直接用，不探测
     if os.getenv("AGENT_MOSS_PORT") is not None:
         _cached_service_url = f"http://{_HOST}:{_PORT}"
         return _cached_service_url

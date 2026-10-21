@@ -100,18 +100,6 @@ impl TraceRecorder for TraceRecorderImpl {
             .finalize_trace(current_time_ms(), final_parent_span_id, outcome, fields)
             .await
     }
-
-    async fn force_finalize_trace(&self, outcome: TraceOutcome, fields: Value) {
-        let mut chronology_state = self.chronology_state.lock().await;
-        if chronology_state.finalized {
-            return;
-        }
-        let final_parent_span_id = chronology_state.tail_span_id.clone();
-        chronology_state.finalized = true;
-        self.backend
-            .force_finalize_trace(current_time_ms(), final_parent_span_id, outcome, fields)
-            .await
-    }
 }
 
 fn current_time_ms() -> u64 {

@@ -85,12 +85,6 @@ pub struct SubagentCoordinator {
 }
 
 impl SubagentCoordinator {
-    pub fn new() -> Self {
-        Self {
-            config: SubagentCoordinatorConfig::default(),
-        }
-    }
-
     pub fn with_config(config: SubagentCoordinatorConfig) -> Self {
         Self { config }
     }

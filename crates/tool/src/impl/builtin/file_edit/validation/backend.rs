@@ -74,12 +74,6 @@ impl ValidationResult {
 const NOTEBOOK_EXTENSION: &str = "ipynb";
 
 /// Checks if a file extension indicates a notebook file.
-///
-/// # Arguments
-/// * `path` - The file path to check
-///
-/// # Returns
-/// * `true` if the file is a notebook file, `false` otherwise
 fn is_notebook_file(path: &str) -> bool {
     Path::new(path)
         .extension()
@@ -89,24 +83,11 @@ fn is_notebook_file(path: &str) -> bool {
 }
 
 /// Counts occurrences of a string in content.
-///
-/// # Arguments
-/// * `content` - The content to search
-/// * `search_string` - The string to count
-///
-/// # Returns
-/// * Number of occurrences
 fn count_occurrences(content: &str, search_string: &str) -> usize {
     content.match_indices(search_string).count()
 }
 
 /// Validates that old_string doesn't match new_string.
-///
-/// # Arguments
-/// * `input` - The FileEditInput to validate
-///
-/// # Returns
-/// * `ValidationResult` indicating success or failure
 fn validate_no_change(input: &FileEditInput) -> ValidationResult {
     if input.old_string == input.new_string {
         return ValidationResult::error(
@@ -118,12 +99,6 @@ fn validate_no_change(input: &FileEditInput) -> ValidationResult {
 }
 
 /// Validates that the file is not a notebook file.
-///
-/// # Arguments
-/// * `expanded_path` - The expanded file path
-///
-/// # Returns
-/// * `ValidationResult` indicating success or failure
 fn validate_not_notebook(expanded_path: &str) -> ValidationResult {
     if is_notebook_file(expanded_path) {
         return ValidationResult::error(
@@ -229,13 +204,6 @@ pub fn validate_input_backend(
 /// Validates that old_string exists in the file content.
 ///
 /// Uses find_actual_string to handle quote normalization.
-///
-/// # Arguments
-/// * `content` - The file content
-/// * `input` - The FileEditInput with old_string
-///
-/// # Returns
-/// * `ValidationResult` indicating success or failure
 fn validate_old_string_exists(content: &str, input: &FileEditInput) -> ValidationResult {
     let actual_string = find_actual_string(content, &input.old_string);
     if actual_string.is_none() {
@@ -251,13 +219,6 @@ fn validate_old_string_exists(content: &str, input: &FileEditInput) -> Validatio
 ///
 /// If replace_all is false and there are multiple occurrences,
 /// this is considered ambiguous.
-///
-/// # Arguments
-/// * `content` - The file content
-/// * `input` - The FileEditInput with old_string and replace_all flag
-///
-/// # Returns
-/// * `ValidationResult` indicating success or failure
 fn validate_ambiguous_match(content: &str, input: &FileEditInput) -> ValidationResult {
     if input.replace_all {
         return ValidationResult::ok();

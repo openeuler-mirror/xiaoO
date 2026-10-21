@@ -125,34 +125,28 @@ fn parses_tool_call_running_event() {
 }
 
 #[test]
-fn parses_loop_end_event() {
-    // Backward-compat: older daemons omit the summary fields
-    // (each is `#[serde(default)]`).
+fn parses_loop_end_event_without_summary_fields() {
+    // Older daemons send only `agent_id`.
     let parsed =
         parse_sse_frame("event: loop_end\ndata: {\"type\":\"loop_end\",\"agent_id\":\"child-1\"}")
             .expect("parse")
             .expect("event");
 
     match parsed {
-        RemoteSseEvent::LoopEnd {
-            agent_id,
-            turn_count,
-            total_tokens,
-            stop_reason,
-        } => {
+        RemoteSseEvent::LoopEnd { agent_id } => {
             assert_eq!(agent_id, "child-1");
-            assert_eq!(turn_count, 0);
-            assert_eq!(total_tokens, 0);
-            assert!(stop_reason.is_empty());
         }
         other => panic!("unexpected event: {other:?}"),
     }
 }
 
-/// Forward-compat: a newer daemon includes the summary fields on
-/// `loop_end` and the TUI should populate them.
+/// Forward-compat: newer daemons attach summary fields
+/// (`turn_count` / `total_tokens` / `stop_reason`) to `loop_end`. The TUI
+/// reads the summary via its own `loop_summary` sink, so these are unknown
+/// fields on `RemoteSseEvent::LoopEnd` and must be silently ignored rather
+/// than break deserialization.
 #[test]
-fn parses_loop_end_with_summary() {
+fn parses_loop_end_event_with_summary_fields_ignoring_them() {
     let parsed = parse_sse_frame(
         "event: loop_end\ndata: {\"type\":\"loop_end\",\"agent_id\":\"child-1\",\"turn_count\":2,\"total_tokens\":512,\"stop_reason\":\"end_turn\"}",
     )
@@ -160,16 +154,8 @@ fn parses_loop_end_with_summary() {
     .expect("event");
 
     match parsed {
-        RemoteSseEvent::LoopEnd {
-            agent_id,
-            turn_count,
-            total_tokens,
-            stop_reason,
-        } => {
+        RemoteSseEvent::LoopEnd { agent_id } => {
             assert_eq!(agent_id, "child-1");
-            assert_eq!(turn_count, 2);
-            assert_eq!(total_tokens, 512);
-            assert_eq!(stop_reason, "end_turn");
         }
         other => panic!("unexpected event: {other:?}"),
     }

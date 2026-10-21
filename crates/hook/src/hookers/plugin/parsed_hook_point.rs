@@ -1,8 +1,7 @@
-use agent_types::common::{AgentId, BuildError};
+use agent_types::common::BuildError;
 use agent_types::hook::HookPointId;
 
 pub(crate) struct ParsedPluginHookPoint {
-    pub(crate) agent: AgentId,
     pub(crate) action: PluginHookAction,
     pub(crate) stage: PluginHookStage,
 }
@@ -42,7 +41,6 @@ pub(crate) fn parse_plugin_hook_point(
     }
 
     Ok(ParsedPluginHookPoint {
-        agent: AgentId(agent.to_string()),
         action: PluginHookAction(action.to_lowercase()),
         stage: PluginHookStage(stage.to_lowercase()),
     })

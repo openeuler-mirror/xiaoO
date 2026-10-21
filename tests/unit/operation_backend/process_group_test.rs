@@ -3,7 +3,7 @@ use crate::test_support::process_group_test_lock;
 
 #[test]
 #[cfg(unix)]
-fn test_register_unregister_pgid() {
+fn registered_pgid_is_tracked_until_unregistered() {
     let _guard = process_group_test_lock().lock().unwrap();
     register_pgid(12345);
     {
@@ -21,7 +21,7 @@ fn test_register_unregister_pgid() {
 
 #[test]
 #[cfg(unix)]
-fn test_kill_all_process_groups() {
+fn kill_all_process_groups_clears_registry() {
     let _guard = process_group_test_lock().lock().unwrap();
     register_pgid(11111);
     register_pgid(22222);
@@ -40,7 +40,7 @@ fn test_kill_all_process_groups() {
 }
 
 #[test]
-fn test_terminate_invalid_pgid() {
+fn terminating_invalid_pgid_returns_error() {
     let result = terminate_process_group(-1);
     #[cfg(unix)]
     assert!(result.is_err());

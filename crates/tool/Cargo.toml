@@ -19,6 +19,7 @@ trace = { path = "../trace" }
 operation_backend = { path = "../operation_backend" }
 async-trait.workspace = true
 thiserror.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

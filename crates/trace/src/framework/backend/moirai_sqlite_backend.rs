@@ -34,13 +34,6 @@ impl MoiraiSqliteBackend {
                 field: "db_path".to_string(),
             })?;
         let db_path = expand_tilde(db_path_raw);
-        let agent_id = config
-            .agent_id
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| BuildError::MissingRequiredField {
-                field: "agent_id".to_string(),
-            })?;
 
         if let Some(parent) = Path::new(&db_path).parent() {
             std::fs::create_dir_all(parent).map_err(|error| BuildError::DependencyError {
@@ -65,7 +58,6 @@ impl MoiraiSqliteBackend {
                 .clone()
         };
         let context = AgentContext::new_user_with_explicit_trace(
-            agent_id,
             trace_id,
             None,
             storage,
@@ -250,62 +242,6 @@ impl TraceBackend for MoiraiSqliteBackend {
 
         *finalized = true;
     }
-
-    async fn force_finalize_trace(
-        &self,
-        _occurred_at_ms: u64,
-        final_parent_span_id: Option<String>,
-        outcome: TraceOutcome,
-        fields: Value,
-    ) {
-        let mut finalized = self.trace_finalized.lock().await;
-        if *finalized {
-            return;
-        }
-
-        let active_spans = self.active_spans.lock().await;
-        let active_span_ids: Vec<String> = active_spans.iter().cloned().collect();
-        drop(active_spans);
-
-        for span_id in &active_span_ids {
-            let force_closed_fields = merge_json_fields(
-                serde_json::json!({
-                    "abnormal_closed": true,
-                    "force_finalize": true,
-                }),
-                fields.clone(),
-            );
-            self.context
-                .update_span_at(span_id, force_closed_fields, _occurred_at_ms as i64)
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("moirai force_finalize update failed for span {span_id}: {error}")
-                });
-            self.context
-                .end_span_at(span_id, _occurred_at_ms as i64)
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("moirai force_finalize end failed for span {span_id}: {error}")
-                });
-        }
-
-        let mut active_spans = self.active_spans.lock().await;
-        active_spans.clear();
-        drop(active_spans);
-
-        let message = fields
-            .get("message")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        let success = matches!(outcome, TraceOutcome::Ok);
-
-        self.context
-            .end_with_parent(success, message.as_deref(), final_parent_span_id)
-            .await
-            .unwrap_or_else(|error| panic!("moirai force trace finalization failed: {error}"));
-
-        *finalized = true;
-    }
 }
 
 impl Drop for MoiraiSqliteBackend {
@@ -315,8 +251,8 @@ impl Drop for MoiraiSqliteBackend {
         //
         // This covers the case where the owning future (e.g. a session
         // worker mid-turn) is cancelled while the daemon/runtime is
-        // shutting down, so the async `finalize_trace`/`force_finalize_trace`
-        // path never runs. The end span is not written to storage, but an
+        // shutting down, so the async `finalize_trace` path never runs.
+        // The end span is not written to storage, but an
         // abandoned trace has no meaningful end data anyway and its spans
         // are already flushed incrementally (immediate_flush=true). When
         // finalization did run, `ended` is already `true` and this is a

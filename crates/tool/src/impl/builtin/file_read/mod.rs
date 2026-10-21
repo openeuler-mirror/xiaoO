@@ -11,7 +11,7 @@ pub mod tokenizer;
 pub mod validation;
 
 pub use constants::PDF_MAX_PAGES_PER_READ;
-pub use dedup::{get_file_mtime, DedupStateStore, FileReadState};
+pub use dedup::{DedupStateStore, FileReadState};
 pub use device::is_blocked_device_path;
 pub(crate) use discovered_tool::discover_file_read;
 pub use executor::FileReadExecutor;

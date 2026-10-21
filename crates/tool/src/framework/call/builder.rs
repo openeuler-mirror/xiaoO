@@ -66,8 +66,6 @@ impl ToolCallBuilderImpl {
                     ),
                 })?;
 
-        let _ = visible_spec.id();
-
         let final_call = FinalToolCall {
             call_id: raw_tool_call.call_id,
             tool_name: raw_tool_call.tool_name,
@@ -119,8 +117,6 @@ impl ToolCallBuilder for ToolCallBuilderImpl {
                         raw_tool_call.tool_name
                     ),
                 })?;
-
-        let _ = visible_spec.id();
 
         let final_call = FinalToolCall {
             call_id: raw_tool_call.call_id,

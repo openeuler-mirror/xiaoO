@@ -103,7 +103,6 @@ impl LoopEventSink for ChannelLoopEventSink {
         }
         let _ = self.updates_tx.send(SessionTurnUpdate::LoopEnd {
             agent_id: agent_id.clone(),
-            summary: summary.clone(),
         });
     }
 }

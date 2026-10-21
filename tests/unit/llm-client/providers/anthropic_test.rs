@@ -15,7 +15,7 @@ fn make_provider_for_model(model: &str) -> AnthropicProvider {
 }
 
 #[test]
-fn test_parse_content_block_delta() {
+fn text_delta_yields_content_chunk() {
     let mut current_event = None;
     AnthropicProvider::parse_anthropic_stream_line(
         &mut current_event,
@@ -32,7 +32,7 @@ fn test_parse_content_block_delta() {
 }
 
 #[test]
-fn test_parse_message_delta() {
+fn message_delta_carries_stop_reason_and_completion_tokens() {
     let mut current_event = None;
     AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: message_delta")
         .unwrap();
@@ -48,7 +48,7 @@ fn test_parse_message_delta() {
 }
 
 #[test]
-fn test_parse_message_start_usage() {
+fn message_start_carries_prompt_tokens() {
     let mut current_event = None;
     AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: message_start")
         .unwrap();
@@ -85,7 +85,7 @@ fn merge_usage_keeps_prompt_and_completion_totals() {
 }
 
 #[test]
-fn test_parse_message_stop() {
+fn message_stop_emits_no_chunk() {
     let mut current_event = None;
     AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: message_stop")
         .unwrap();
@@ -98,7 +98,7 @@ fn test_parse_message_stop() {
 }
 
 #[test]
-fn test_parse_input_json_delta_as_tool_call() {
+fn input_json_delta_surfaces_as_partial_tool_call() {
     let mut current_event = None;
     AnthropicProvider::parse_anthropic_stream_line(
         &mut current_event,
@@ -121,7 +121,7 @@ fn test_parse_input_json_delta_as_tool_call() {
 }
 
 #[test]
-fn test_parse_content_block_stop() {
+fn content_block_stop_emits_empty_chunk() {
     let mut current_event = None;
     AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: content_block_stop")
         .unwrap();
@@ -334,7 +334,7 @@ fn refusal_maps_to_content_filter_and_uses_explanation_text() {
 }
 
 #[test]
-fn test_parse_unknown_event() {
+fn unknown_event_yields_empty_chunk_without_error() {
     let mut current_event = None;
     AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: unknown_event")
         .unwrap();
@@ -349,7 +349,7 @@ fn test_parse_unknown_event() {
 }
 
 #[test]
-fn test_parse_malformed_data() {
+fn malformed_data_yields_empty_chunk_without_error() {
     let mut current_event = None;
     AnthropicProvider::parse_anthropic_stream_line(
         &mut current_event,
@@ -365,7 +365,7 @@ fn test_parse_malformed_data() {
 }
 
 #[test]
-fn test_parse_empty_line() {
+fn empty_line_yields_empty_chunk_without_error() {
     let mut current_event = None;
     let result = AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "").unwrap();
     assert!(result.is_some());
@@ -374,7 +374,7 @@ fn test_parse_empty_line() {
 }
 
 #[test]
-fn test_multiple_content_deltas() {
+fn successive_text_deltas_each_carry_their_own_fragment() {
     let mut current_event = None;
 
     AnthropicProvider::parse_anthropic_stream_line(

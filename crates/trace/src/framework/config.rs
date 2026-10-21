@@ -13,7 +13,6 @@ pub(crate) fn default_db_path() -> String {
 pub(crate) struct TraceRecorderConfig {
     pub(crate) storage_backend: String,
     pub(crate) db_path: Option<String>,
-    pub(crate) agent_id: Option<String>,
 }
 
 impl Default for TraceRecorderConfig {
@@ -21,7 +20,6 @@ impl Default for TraceRecorderConfig {
         Self {
             storage_backend: BACKEND_TYPE_MOIRAI_SQLITE.to_string(),
             db_path: Some(default_db_path()),
-            agent_id: None,
         }
     }
 }
@@ -43,12 +41,10 @@ impl TraceRecorderConfig {
 
                 let db_path =
                     parse_optional_string(&map, "db_path")?.or_else(|| Some(default_db_path()));
-                let agent_id = parse_optional_string(&map, "agent_id")?;
 
                 Ok(Self {
                     storage_backend,
                     db_path,
-                    agent_id,
                 })
             }
             _ => Err(BuildError::InvalidConfig {

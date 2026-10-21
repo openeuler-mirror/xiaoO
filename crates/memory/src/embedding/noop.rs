@@ -21,10 +21,6 @@ impl EmbeddingProvider for NoopEmbedding {
     async fn embed(&self, texts: &[&str]) -> MemoryResult<Vec<Vec<f32>>> {
         Ok(texts.iter().map(|_| Vec::new()).collect())
     }
-
-    async fn embed_one(&self, _text: &str) -> MemoryResult<Vec<f32>> {
-        Ok(Vec::new())
-    }
 }
 
 #[cfg(test)]

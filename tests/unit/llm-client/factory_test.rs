@@ -2,7 +2,7 @@ use super::config::LlmProviderConfig;
 use super::create::create_llm_provider;
 
 #[test]
-fn test_config_builder() {
+fn config_builder_sets_provider_key_and_model() {
     let config = LlmProviderConfig::new("openai", "gpt-4o").with_api_key("test-key");
     assert_eq!(config.provider, "openai");
     assert_eq!(config.api_key, Some("test-key".into()));
@@ -10,14 +10,14 @@ fn test_config_builder() {
 }
 
 #[test]
-fn test_unknown_provider() {
+fn unknown_provider_is_rejected() {
     let config = LlmProviderConfig::new("unknown", "some-model");
     let result = create_llm_provider(&config, None, None);
     assert!(result.is_err());
 }
 
 #[test]
-fn test_missing_api_key() {
+fn missing_api_key_is_rejected() {
     temp_env::with_var_unset("OPENAI_API_KEY", || {
         let config = LlmProviderConfig::new("openai", "gpt-4o");
         let result = create_llm_provider(&config, None, None);
@@ -26,14 +26,14 @@ fn test_missing_api_key() {
 }
 
 #[test]
-fn test_ollama_no_key_required() {
+fn ollama_requires_no_api_key() {
     let config = LlmProviderConfig::new("ollama", "llama3");
     let result = create_llm_provider(&config, None, None);
     assert!(result.is_ok());
 }
 
 #[test]
-fn test_openai_compatible_requires_api_base() {
+fn openai_compatible_requires_api_base() {
     let config =
         LlmProviderConfig::new("openai-compatible", "custom-model").with_api_key("test-key");
     let result = create_llm_provider(&config, None, None);
@@ -368,13 +368,6 @@ mod wrapper_tests {
         }
 
         async fn finalize_trace(
-            &self,
-            _outcome: agent_contracts::TraceOutcome,
-            _fields: serde_json::Value,
-        ) {
-        }
-
-        async fn force_finalize_trace(
             &self,
             _outcome: agent_contracts::TraceOutcome,
             _fields: serde_json::Value,

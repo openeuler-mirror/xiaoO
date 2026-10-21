@@ -180,10 +180,6 @@ impl GrepExecutor {
         args
     }
 
-    fn validate_scope_options(_input: &GrepInput) -> Result<(), String> {
-        Ok(())
-    }
-
     async fn resolve_search_target(
         path: Option<&str>,
         backend: &dyn agent_contracts::backend::OperationBackend,
@@ -285,9 +281,8 @@ impl GrepExecutor {
         // Backends without an `exec_streaming` override fall back to the
         // trait default: full-buffer `exec()` then iterate lines through
         // the sink. They lose the early-kill benefit but still bound the
-        // `Vec<String>` returned here, so the downstream truncation layer
-        // in `agent_loop.rs` no longer has to write oversized outputs to
-        // `~/.xiaoo/truncated_tool_output/`.
+        // `Vec<String>` returned here, so callers never receive oversized
+        // output buffers.
         let collector = Arc::new(BoundedLineCollector::for_rg_mode(
             head_limit,
             offset,
@@ -823,12 +818,6 @@ impl ToolExecutor for GrepExecutor {
                 message: format!("Failed to parse input: {}", e),
             }
         })?;
-
-        if let Err(e) = Self::validate_scope_options(&input) {
-            return Ok(ToolExecutorOutput::Completed {
-                raw_outcome: RawToolOutcome::Error { message: e },
-            });
-        }
 
         let validation_result = validation::validate_input(&input);
         if !validation_result.result {

@@ -1,7 +1,28 @@
 use super::*;
 
+// Test-only constructors for `Warning`.
+impl Warning {
+    fn new(
+        feature: impl Into<String>,
+        provider: impl Into<String>,
+        action: impl Into<String>,
+    ) -> Self {
+        Self {
+            feature: feature.into(),
+            provider: provider.into(),
+            action: action.into(),
+            message: None,
+        }
+    }
+
+    fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
+        self
+    }
+}
+
 #[test]
-fn test_warning_serialization() {
+fn warning_serialization_omits_absent_message() {
     let warning = Warning::new("response_format", "anthropic", "ignored");
     let json = serde_json::to_string(&warning).unwrap();
     assert!(json.contains(r#""feature":"response_format""#));
@@ -16,7 +37,7 @@ fn test_warning_serialization() {
 }
 
 #[test]
-fn test_wire_response_with_warnings() {
+fn wire_response_serializes_warnings_only_when_present() {
     let response = WireResponse {
         id: "test-123".to_string(),
         model: "gpt-4o".to_string(),

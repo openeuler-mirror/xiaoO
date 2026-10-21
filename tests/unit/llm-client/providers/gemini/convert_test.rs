@@ -3,7 +3,7 @@ use agent_llm::{ChatMessageExt, LlmRequestExt};
 use agent_types::LlmRequest;
 
 #[test]
-fn test_sanitize_gemini_schema_uppercases_types() {
+fn sanitize_gemini_schema_uppercases_types() {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -19,7 +19,7 @@ fn test_sanitize_gemini_schema_uppercases_types() {
 }
 
 #[test]
-fn test_sanitize_gemini_schema_removes_additional_properties() {
+fn sanitize_gemini_schema_removes_additional_properties() {
     let schema = serde_json::json!({
         "type": "object",
         "properties": { "name": {"type": "string"} },
@@ -30,7 +30,7 @@ fn test_sanitize_gemini_schema_removes_additional_properties() {
 }
 
 #[test]
-fn test_normalize_model_name() {
+fn normalize_model_name_prefixes_models_urn() {
     assert_eq!(normalize_model_name("gemini-pro"), "models/gemini-pro");
     assert_eq!(
         normalize_model_name("models/gemini-pro"),

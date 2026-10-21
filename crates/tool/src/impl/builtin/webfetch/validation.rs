@@ -98,7 +98,6 @@ fn is_ip_blocked(ip: IpAddr) -> bool {
 /// Parse host from URL and check if it's a literal blocked IP.
 /// This catches direct IP URLs like http://127.0.0.1:8080/path
 fn validate_url_host_not_blocked_ip(url_str: &str) -> ValidationResult {
-    // Extract host from URL manually to avoid adding url crate dependency
     // Format after stripping scheme: [user:pass@]host[:port][/][?][#]
     let host = extract_host(url_str);
 

@@ -158,11 +158,15 @@ impl PluginToolHookerAdaptor {
 
         let recent_messages = runtime.agent_context().conversation().recent_messages(100);
 
-        // Get the most recent user message as prompt_session (for intent consistency check).
-        // intent 一致性检查需要"当前意图"，而非整个会话的第一条用户消息：多轮对话里
-        // 会话开头通常是寒暄（如 "hi"），取第一条会污染意图判断。用户对 ask_user_question
-        // 之类的回答会作为 tool_result（Tool 角色）写回，不会成为 User 消息，因此取
-        // 最近一条 User 消息不会被这类回答污染，语义上就是"用户最近一次主动输入"。
+        // Get the most recent user message as prompt_session (for intent
+        // consistency check). The intent check needs the *current* intent,
+        // not the first user message of the session: in multi-turn
+        // conversations the opening is usually a greeting (e.g. "hi"), and
+        // using it would pollute intent detection. Answers to tools like
+        // ask_user_question are written back as tool_result (Tool role),
+        // never as User messages, so the most recent User message is
+        // semantically "the user's latest proactive input" and cannot be
+        // polluted by such answers.
         let prompt_session = recent_messages
             .iter()
             .rev()
@@ -177,12 +181,11 @@ impl PluginToolHookerAdaptor {
 
         // Get completed tool call history (for read_before_write rules)
         // Collect ToolUse (with input params like file paths) and ToolResult (with execution results)
-        let messages = recent_messages;
         let mut tool_use_map: std::collections::HashMap<&String, Value> =
             std::collections::HashMap::new();
 
         // First collect all ToolUse, record call_id -> input mapping
-        for m in messages.iter() {
+        for m in recent_messages.iter() {
             for block in &m.blocks {
                 if let agent_types::llm::ContentBlock::ToolUse {
                     call_id,
@@ -202,7 +205,7 @@ impl PluginToolHookerAdaptor {
         }
 
         // Then collect ToolResult, merge input and output
-        let action_history: Vec<Value> = messages
+        let action_history: Vec<Value> = recent_messages
             .iter()
             .flat_map(|m| m.blocks.iter())
             .filter_map(|block| match block {
@@ -230,12 +233,15 @@ impl PluginToolHookerAdaptor {
             })
             .collect();
 
-        // 构造交错历史 prompt（prompt_history）：按时间序遍历消息，遇到 User 消息
-        // 开一个新 turn，其后的 ToolResult 归入该 turn 的 actions，直到下一条 User。
-        // 解决多轮会话里"继续"覆盖初始读取/搜索意图导致的 L2 意图一致性漏报。
-        // 与 AgentMoss 接口契约 docs/INTEGRATION_GUIDE.md 第 4 节一致。
+        // Build the interleaved history prompt (prompt_history): iterate
+        // messages in time order, open a new turn on each User message, and
+        // assign subsequent ToolResults to that turn's actions until the
+        // next User message. This fixes L2 intent-consistency misses where
+        // a "continue" overwrites the initial read/search intent in
+        // multi-turn sessions. Matches section 4 of the AgentMoss interface
+        // contract (docs/INTEGRATION_GUIDE.md).
         let mut prompt_history: Vec<Value> = Vec::new();
-        for m in messages.iter() {
+        for m in recent_messages.iter() {
             if m.role == MessageRole::User {
                 let text = m
                     .blocks
@@ -250,7 +256,8 @@ impl PluginToolHookerAdaptor {
                     "actions": Vec::<Value>::new(),
                 }));
             } else {
-                // 非 User 消息中的 ToolResult 归入当前（最近一个）turn 的 actions
+                // ToolResults in non-User messages belong to the current
+                // (most recent) turn's actions
                 for block in &m.blocks {
                     if let agent_types::llm::ContentBlock::ToolResult {
                         call_id,

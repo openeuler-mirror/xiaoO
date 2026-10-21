@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_protocol_family_from_str() {
+fn protocol_family_parse_maps_known_names() {
     assert_eq!(
         ProtocolFamily::parse("openai"),
         Some(ProtocolFamily::OpenAiCompatible)
@@ -22,7 +22,7 @@ fn test_protocol_family_from_str() {
 }
 
 #[test]
-fn test_resolve_provider_profile() {
+fn resolve_provider_profile_returns_known_profiles() {
     let profile = resolve_provider_profile("openai").unwrap();
     assert_eq!(profile.provider_name, "openai");
     assert_eq!(profile.protocol_family, ProtocolFamily::OpenAiCompatible);
@@ -79,7 +79,7 @@ fn provider_catalog_groups_aliases_by_canonical_name() {
 }
 
 #[test]
-fn test_normalize_api_base() {
+fn normalize_api_base_trims_and_drops_trailing_slash() {
     assert_eq!(
         normalize_api_base("https://api.example.com"),
         "https://api.example.com"
@@ -103,7 +103,7 @@ fn test_normalize_api_base() {
 }
 
 #[test]
-fn test_resolve_protocol_family() {
+fn resolve_protocol_family_maps_providers() {
     assert_eq!(
         resolve_protocol_family("anthropic"),
         Some(ProtocolFamily::Anthropic)

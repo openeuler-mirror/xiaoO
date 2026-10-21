@@ -36,9 +36,8 @@ pub trait SessionStore: Send + Sync {
     /// `checkout`.
     async fn list_children(&self, parent_runtime_id: &str) -> Vec<SessionRecord>;
 
-    /// Returns every session currently in the store. Default returns an empty
-    /// vec so existing trait implementations keep compiling; the in-memory
-    /// store overrides it to snapshot its records for the dashboard.
+    /// Returns every session currently in the store. The in-memory store
+    /// overrides this to snapshot its records for the dashboard.
     async fn list_all(&self) -> Vec<SessionRecord> {
         Vec::new()
     }

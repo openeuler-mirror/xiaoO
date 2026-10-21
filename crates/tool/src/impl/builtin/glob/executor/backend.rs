@@ -37,7 +37,6 @@ impl GlobToolExecutor {
 
         let validation_result = validation::validate_path_shape(path_str);
         if !validation_result.result {
-            let _error_code = validation_result.error_code;
             return Err(validation_result
                 .message
                 .unwrap_or_else(|| "Validation failed".to_string()));
@@ -64,7 +63,6 @@ impl GlobToolExecutor {
 
         let validation_result = validation::validate_base_dir(path, &stat);
         if !validation_result.result {
-            let _error_code = validation_result.error_code;
             return Err(validation_result
                 .message
                 .unwrap_or_else(|| "Validation failed".to_string()));

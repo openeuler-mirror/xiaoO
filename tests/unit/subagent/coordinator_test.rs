@@ -176,7 +176,7 @@ fn subagent_prompt_builder_without_schema() {
 
 #[test]
 fn allows_concurrent_pending_joins_from_same_waiter() {
-    let coordinator = SubagentCoordinator::new();
+    let coordinator = SubagentCoordinator::default();
     let mut state = SubagentSessionState::default();
     let parent_id = make_parent_agent_id();
 
@@ -223,7 +223,7 @@ fn allows_concurrent_pending_joins_from_same_waiter() {
 
 #[test]
 fn multiple_joins_resolved_when_subagent_completes() {
-    let coordinator = SubagentCoordinator::new();
+    let coordinator = SubagentCoordinator::default();
     let mut state = SubagentSessionState::default();
     let parent_id = make_parent_agent_id();
 

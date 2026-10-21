@@ -8,7 +8,6 @@ use agent_types::common::BuildError;
 use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
 
 pub struct HookerRegistryBuilderImpl {
-    // Stores the hooker registry config for later use in build().
     config: HookerRegistryConfig,
 }
 
@@ -63,13 +62,11 @@ impl HookerRegistryBuilderImpl {
 
 impl HookerRegistryBuilder for HookerRegistryBuilderImpl {
     fn with_config(mut self, config: HookerRegistryConfig) -> Self {
-        // Stores the hooker registry config in the builder for later use in build().
         self.config = config;
         self
     }
 
     fn build(self) -> Result<Box<dyn HookerRegistry>, BuildError> {
-        // Uses the stored config and registered hookers to construct the HookerRegistryImpl.
         let config = self.config;
         let plugin_hooker_jsons = Self::load_plugin_hooker_jsons(&config.plugins)?;
         let mut hookers = HashMap::new();

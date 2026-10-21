@@ -245,8 +245,7 @@ impl ToolExecutor for FileEditExecutor {
             message: "Failed to apply edit: old_string not found in file".to_string(),
         })?;
 
-        let (structured_patch, _updated_file) =
-            get_patch_for_edit(&actual_old_string, &styled_new_string);
+        let structured_patch = get_patch_for_edit(&actual_old_string, &styled_new_string);
 
         let capabilities = backend.capabilities();
         let write_mode = preferred_overwrite_mode(capabilities.supports_atomic_write);

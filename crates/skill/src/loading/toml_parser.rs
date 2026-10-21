@@ -110,7 +110,6 @@ pub fn parse_skill_toml_content(
 #[derive(Deserialize)]
 struct SkillManifest {
     skill: SkillSection,
-    #[serde(rename = "tools")]
     tools: Option<Vec<ToolEntry>>,
 }
 

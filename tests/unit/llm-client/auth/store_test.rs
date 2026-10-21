@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_in_memory_store_crud() {
+fn in_memory_store_supports_crud() {
     let store = InMemoryAuthStore::new();
     let cred = AuthCredential::new("test-1", "openai", "sk-test");
     store.save(std::slice::from_ref(&cred)).unwrap();
@@ -21,17 +21,10 @@ fn test_in_memory_store_crud() {
 }
 
 #[test]
-fn test_in_memory_store_not_found() {
+fn in_memory_store_reports_not_found() {
     let store = InMemoryAuthStore::new();
     let result = store.update(&AuthCredential::new("nonexistent", "openai", "key"));
     assert!(matches!(result, Err(AuthStoreError::NotFound(_))));
     let result = store.delete("nonexistent");
     assert!(matches!(result, Err(AuthStoreError::NotFound(_))));
-}
-
-#[test]
-fn test_file_auth_store_stub() {
-    let store = FileAuthStore::new("/tmp/test.json");
-    assert!(store.load().is_err());
-    assert!(store.save(&[]).is_err());
 }

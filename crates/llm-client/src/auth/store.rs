@@ -104,44 +104,6 @@ impl AuthStore for InMemoryAuthStore {
     }
 }
 
-pub struct FileAuthStore {
-    _path: std::path::PathBuf,
-}
-
-impl FileAuthStore {
-    pub fn new(path: impl AsRef<std::path::Path>) -> Self {
-        Self {
-            _path: path.as_ref().to_path_buf(),
-        }
-    }
-}
-
-impl AuthStore for FileAuthStore {
-    fn load(&self) -> Result<Vec<AuthCredential>, AuthStoreError> {
-        Err(AuthStoreError::LoadError(
-            "FileAuthStore not yet implemented".to_string(),
-        ))
-    }
-
-    fn save(&self, _credentials: &[AuthCredential]) -> Result<(), AuthStoreError> {
-        Err(AuthStoreError::SaveError(
-            "FileAuthStore not yet implemented".to_string(),
-        ))
-    }
-
-    fn update(&self, _credential: &AuthCredential) -> Result<(), AuthStoreError> {
-        Err(AuthStoreError::UpdateError(
-            "FileAuthStore not yet implemented".to_string(),
-        ))
-    }
-
-    fn delete(&self, _id: &str) -> Result<(), AuthStoreError> {
-        Err(AuthStoreError::DeleteError(
-            "FileAuthStore not yet implemented".to_string(),
-        ))
-    }
-}
-
 #[cfg(test)]
 #[path = "../../../../tests/unit/llm-client/auth/store_test.rs"]
 mod tests;

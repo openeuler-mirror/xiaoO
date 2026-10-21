@@ -3,7 +3,7 @@ use agent_llm::ChatMessageExt;
 use agent_types::MessageRole;
 
 #[test]
-fn test_to_anthropic_tool() {
+fn to_anthropic_tool_maps_name_description_and_schema() {
     let tool = Tool {
         name: "get_weather".to_string(),
         description: "Get weather info".to_string(),
@@ -19,21 +19,21 @@ fn test_to_anthropic_tool() {
 }
 
 #[test]
-fn test_to_anthropic_tool_choice_auto() {
+fn auto_tool_choice_maps_to_anthropic_auto() {
     let choice = WireToolChoice::auto();
     let result = to_anthropic_tool_choice(&choice);
     assert_eq!(result["type"], "auto");
 }
 
 #[test]
-fn test_to_anthropic_tool_choice_required() {
+fn required_tool_choice_maps_to_anthropic_any() {
     let choice = WireToolChoice::required();
     let result = to_anthropic_tool_choice(&choice);
     assert_eq!(result["type"], "any");
 }
 
 #[test]
-fn test_to_anthropic_tool_choice_function() {
+fn function_tool_choice_maps_to_anthropic_tool_with_name() {
     let choice = WireToolChoice::function("get_weather".to_string());
     let result = to_anthropic_tool_choice(&choice);
     assert_eq!(result["type"], "tool");
@@ -41,7 +41,7 @@ fn test_to_anthropic_tool_choice_function() {
 }
 
 #[test]
-fn test_extract_anthropic_tool_calls() {
+fn extract_anthropic_tool_calls_parses_tool_use_blocks() {
     let content = serde_json::json!([{
         "type": "tool_use",
         "id": "toolu_123",
@@ -55,7 +55,7 @@ fn test_extract_anthropic_tool_calls() {
 }
 
 #[test]
-fn test_anthropic_messages_convert_assistant_tool_use() {
+fn assistant_tool_use_maps_to_anthropic_tool_use_block() {
     let msg = ChatMessage::new(
         MessageRole::Assistant,
         vec![
@@ -83,7 +83,7 @@ fn test_anthropic_messages_convert_assistant_tool_use() {
 }
 
 #[test]
-fn test_anthropic_messages_convert_tool_result_to_user_block() {
+fn anthropic_messages_convert_tool_result_to_user_block() {
     let msg = ChatMessage::tool_result("toolu_123", "bash", "done", false, 0);
 
     let messages = anthropic_messages(&[msg]);
@@ -95,7 +95,7 @@ fn test_anthropic_messages_convert_tool_result_to_user_block() {
 }
 
 #[test]
-fn test_anthropic_system_blocks_one_entry_per_message() {
+fn anthropic_system_blocks_one_entry_per_message() {
     let messages = vec![
         ChatMessage::system("base system"),
         ChatMessage::new(

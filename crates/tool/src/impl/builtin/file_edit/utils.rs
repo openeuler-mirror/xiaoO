@@ -148,7 +148,7 @@ pub fn apply_edit_to_file(
     }
 }
 
-pub fn get_patch_for_edit(old_string: &str, new_string: &str) -> (StructuredPatch, String) {
+pub fn get_patch_for_edit(old_string: &str, new_string: &str) -> StructuredPatch {
     let diff = TextDiff::from_lines(old_string, new_string);
 
     let mut hunks = Vec::new();
@@ -185,8 +185,7 @@ pub fn get_patch_for_edit(old_string: &str, new_string: &str) -> (StructuredPatc
         });
     }
 
-    let updated_file = new_string.to_string();
-    (hunks, updated_file)
+    hunks
 }
 
 #[cfg(test)]

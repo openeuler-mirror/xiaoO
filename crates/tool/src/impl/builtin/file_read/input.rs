@@ -33,3 +33,9 @@ pub struct FileReadInput {
     #[serde(default)]
     pub pages: Option<String>,
 }
+
+impl FileReadInput {
+    pub fn is_partial_view(&self) -> bool {
+        self.offset.is_some() || self.limit.is_some()
+    }
+}

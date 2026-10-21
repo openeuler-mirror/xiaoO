@@ -24,7 +24,7 @@ use tool::{EmptyToolRegistry, ToolSpecSnapshot};
 
 use xiaoo_core::{AgentLoopInput, AgentRuntime, LoopRunResult, LoopState};
 
-// ---- 签名可达 re-export（builder/run 签名出现的词汇） ----
+// ---- Signature-reachable re-exports (vocabulary appearing in builder/run signatures) ----
 #[doc(inline)]
 pub use agent_contracts::{PromptBuilder, ToolSpecView};
 #[doc(inline)]
@@ -34,7 +34,7 @@ pub use prompt::PromptBuilderImpl;
 #[doc(inline)]
 pub use xiaoo_core::{spawn_prefetch, LoopStateSnapshot, LoopStopRule, PendingUserMessageSource};
 
-// ---- 挂起/恢复（RuntimeOutput::Suspended 的签名可达词汇） ----
+// ---- Suspend/resume (signature-reachable vocabulary of RuntimeOutput::Suspended) ----
 
 /// Build the tool-result [`crate::chat::ChatMessage`] that resumes a
 /// suspended loop from a [`agent_types::tool::ToolExecutionResult`].
@@ -230,7 +230,7 @@ impl RuntimeBuilder {
 
     /// Inject the prompt builder.
     ///
-    /// Unset: [`PromptBuilderImpl::new`].
+    /// Unset: [`PromptBuilderImpl::default`].
     pub fn prompt_builder(mut self, builder: Arc<dyn PromptBuilder>) -> Self {
         self.prompt_builder = Some(builder);
         self
@@ -314,7 +314,7 @@ impl RuntimeBuilder {
             .unwrap_or_else(|| Arc::new(CompactionPolicy::from_budget(&token_budget_config)));
         let prompt_builder = self
             .prompt_builder
-            .unwrap_or_else(|| Arc::new(PromptBuilderImpl::new()));
+            .unwrap_or_else(|| Arc::new(PromptBuilderImpl));
         let tool_registry = self
             .tool_registry
             .unwrap_or_else(|| Arc::new(EmptyToolRegistry::new()));

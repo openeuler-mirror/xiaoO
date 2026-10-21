@@ -21,5 +21,6 @@ pub use key_provider_error::KeyProviderError;
 pub use hsm::HsmKeyProvider;
 pub use sdf::{
     decrypt_secret, encrypt_secret, init_sdf_provider, SdfKeyProvider, TeeKeyProvider, TeeType,
+    DEFAULT_SDF_LIBRARY_PATH,
 };
 pub use whitebox::WhiteBoxKeyProvider;

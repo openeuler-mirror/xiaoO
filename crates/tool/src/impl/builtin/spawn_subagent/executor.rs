@@ -13,6 +13,9 @@ use super::output::SpawnSubagentOutput;
 use super::spec::SpawnSubagentToolSpec;
 use super::validation;
 
+/// Fallback turn budget for subagents spawned without an explicit `max_turns`.
+const DEFAULT_MAX_TURNS: u32 = 20;
+
 pub struct SpawnSubagentExecutor {
     spec: Arc<SpawnSubagentToolSpec>,
     services: ToolRuntimeServices,
@@ -107,7 +110,7 @@ impl ToolExecutor for SpawnSubagentExecutor {
                 output_schema: input.output_schema,
                 subagent_role_id: input.subagent_role_id,
                 predefined_prompt: None,
-                max_turns: Some(input.max_turns.unwrap_or(20)),
+                max_turns: Some(input.max_turns.unwrap_or(DEFAULT_MAX_TURNS)),
             })
             .await
             .map_err(|error| ToolExecutionError::ExecutionFailed {

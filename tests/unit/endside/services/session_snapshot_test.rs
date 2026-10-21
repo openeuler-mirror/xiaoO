@@ -20,7 +20,7 @@ fn json_file_count(dir: &Path) -> usize {
 }
 
 #[test]
-fn test_sanitize_topic_caps_at_ten_chars() {
+fn sanitize_topic_caps_at_ten_chars() {
     // Whitespace is flattened then the first 10 chars are kept.
     assert_eq!(sanitize_topic("hello world"), "hello-worl");
     // Long ASCII prompts are truncated to 10 chars.
@@ -31,7 +31,7 @@ fn test_sanitize_topic_caps_at_ten_chars() {
 }
 
 #[test]
-fn test_sanitize_topic_keeps_unicode_and_drops_punctuation() {
+fn sanitize_topic_keeps_unicode_and_drops_punctuation() {
     // Chinese letters are alphanumeric and therefore preserved; the space
     // between words becomes a single dash.
     assert_eq!(
@@ -45,7 +45,7 @@ fn test_sanitize_topic_keeps_unicode_and_drops_punctuation() {
 }
 
 #[test]
-fn test_autosave_topic_uses_first_user_prompt() {
+fn autosave_topic_uses_first_user_prompt() {
     let mut state = AppState::new(PathBuf::new(), PathBuf::new()).unwrap();
     // No user messages → nothing to summarise.
     assert_eq!(autosave_topic(&state), None);

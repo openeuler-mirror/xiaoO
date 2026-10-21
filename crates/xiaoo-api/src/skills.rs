@@ -1,8 +1,8 @@
-//! skills 注册表与审计。
+//! Skill registry and audit.
 //!
-//! [`SkillRegistry`]（trait）+ [`FileSkillRegistry`]（文件系统实现）+
-//! [`audit_skill_directory`] / [`SkillAuditOptions`]（目录审计）构成 runtime
-//! 的 skill 注入面。
+//! [`SkillRegistry`] (trait) + [`FileSkillRegistry`] (filesystem
+//! implementation) + [`audit_skill_directory`] / [`SkillAuditOptions`]
+//! (directory audit) form the runtime's skill injection surface.
 
 #[doc(inline)]
 pub use agent_contracts::SkillRegistry;

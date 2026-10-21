@@ -1,5 +1,11 @@
 use super::*;
 
+/// Compatibility wrapper with the original full-render signature: window
+/// start 0 — the leftmost window.
+fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    render_markdown_with_horiz(text, theme, width, 0).0
+}
+
 fn test_theme() -> Theme {
     Theme::detect()
 }

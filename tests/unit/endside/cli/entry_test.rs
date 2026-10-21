@@ -19,7 +19,7 @@ fn parses_explicit_mcp_config_path() {
 }
 
 #[test]
-fn test_generate_title_from_prompt() {
+fn long_prompt_title_is_truncated_to_ten_words() {
     let prompt = "Fix the bug in authentication module related to JWT token validation";
     let title = generate_title_from_prompt(prompt);
     assert_eq!(
@@ -29,21 +29,21 @@ fn test_generate_title_from_prompt() {
 }
 
 #[test]
-fn test_generate_title_from_short_prompt() {
+fn short_prompt_is_used_as_title_verbatim() {
     let prompt = "Hello world";
     let title = generate_title_from_prompt(prompt);
     assert_eq!(title, Some("Hello world".to_string()));
 }
 
 #[test]
-fn test_generate_title_from_empty_prompt() {
+fn empty_prompt_yields_no_title() {
     let prompt = "";
     let title = generate_title_from_prompt(prompt);
     assert_eq!(title, None);
 }
 
 #[test]
-fn test_generate_title_from_whitespace_prompt() {
+fn whitespace_only_prompt_yields_no_title() {
     let prompt = "   ";
     let title = generate_title_from_prompt(prompt);
     assert_eq!(title, None);

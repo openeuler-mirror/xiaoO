@@ -2,6 +2,11 @@ use std::sync::OnceLock;
 
 use agent_types::{ChatMessage, ContentBlock};
 
+/// Fixed overhead added to the tools estimate regardless of tool count.
+const TOOLS_BASE_OVERHEAD_TOKENS: usize = 200;
+/// Rough per-tool token cost (average serialized spec size).
+const TOOLS_AVG_TOKENS_PER_TOOL: usize = 150;
+
 pub struct TokenEstimator {
     system_prompt_tokens: OnceLock<usize>,
     tools_tokens: OnceLock<usize>,
@@ -35,7 +40,9 @@ impl TokenEstimator {
     }
 
     pub fn estimate_tools(&self, count: usize) -> usize {
-        *self.tools_tokens.get_or_init(|| count * 150 + 200)
+        *self
+            .tools_tokens
+            .get_or_init(|| TOOLS_BASE_OVERHEAD_TOKENS + count * TOOLS_AVG_TOKENS_PER_TOOL)
     }
 
     pub fn estimate_history_messages(&self, messages: &[ChatMessage]) -> usize {

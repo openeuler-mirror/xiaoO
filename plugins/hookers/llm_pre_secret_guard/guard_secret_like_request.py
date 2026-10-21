@@ -16,7 +16,7 @@ def load_jsonc(path: str) -> dict:
 
 
 def parse_sensitive_patterns(raw: list) -> list[dict]:
-    """解析 sensitive_patterns 配置，统一为 [{description, pattern, compiled}] 格式"""
+    """解析 sensitive_patterns 配置，统一为 [{description, pattern}] 格式"""
     result = []
     for item in raw:
         if isinstance(item, str):

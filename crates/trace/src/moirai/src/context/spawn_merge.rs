@@ -57,13 +57,9 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
             drop(inner);
         }
 
-        let child_context = AgentContext::new_spawned(
-            child_agent_id,
-            &parent_trace_id,
-            &parent_span_id,
-            self.storage.clone(),
-        )
-        .await?;
+        let child_context =
+            AgentContext::new_spawned(&parent_trace_id, &parent_span_id, self.storage.clone())
+                .await?;
 
         Ok(SpawnResult {
             span_id,

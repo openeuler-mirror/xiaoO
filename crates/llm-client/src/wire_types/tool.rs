@@ -7,25 +7,6 @@ pub(crate) struct WireTool {
     pub function: WireToolFunction,
 }
 
-#[allow(dead_code)]
-impl WireTool {
-    #[allow(dead_code)]
-    pub(crate) fn function(
-        name: String,
-        description: String,
-        parameters: serde_json::Value,
-    ) -> Self {
-        Self {
-            tool_type: "function".to_string(),
-            function: WireToolFunction {
-                name,
-                description: Some(description),
-                parameters: Some(parameters),
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireToolFunction {
     pub name: String,

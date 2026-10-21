@@ -20,7 +20,7 @@
 //! #[tokio::main]
 //! async fn main() {
 //!     let storage = Arc::new(SqliteStorage::new(":memory:").unwrap());
-//!     let ctx = AgentContext::new_user("my-agent", storage).await.unwrap();
+//!     let ctx = AgentContext::new_user(storage).await.unwrap();
 //!
 //!     // Record a custom span
 //!     let span_id = ctx.record_span("CUSTOM", serde_json::json!({"key": "value"})).await.unwrap();
