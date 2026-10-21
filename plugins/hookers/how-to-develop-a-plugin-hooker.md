@@ -275,6 +275,50 @@ Rewrite tool input:
 { "result": "transform", "modified_input": { "file_path": "/safe/path.txt" } }
 ```
 
+### The `extra` channel (allow / transform)
+
+Both `allow` and `transform` results may carry an optional `extra` object —
+per-invocation data the host accumulates (with your hooker id injected as
+`hooker_id`) and forwards to the execution backend alongside the tool call.
+Plugins cannot observe each other's `extra` entries. Today the local backend
+defines one generic key:
+
+```json
+{
+  "result": "allow",
+  "extra": {
+    "spawn_wrapper": {
+      "prefix": ["/abs/path/wrapper", "--flag=value", "--"]
+    }
+  }
+}
+```
+
+- `prefix`: a **non-empty array of strings**. The local backend prepends it
+  to the spawned tool subprocess argv — **outermost**, so
+  `wrapper → sandbox (if any) → command`. Elements are raw argv values and
+  are never shell-parsed, so quoting/escaping is not a concern. Prefer an
+  absolute path for the first element — a bare name would be resolved
+  through the subprocess's `PATH`. A trailing `--` separator, as in the
+  example, is the wrapper's own convention for splitting its flags from the
+  wrapped command; the host never interprets or injects it.
+- `externalize_fs_writes`: optional, defaults to `false`. **Reserved for an
+  upcoming release: the field is parsed and forwarded today but not yet
+  consumed — setting it to `true` has no effect in this version.** Once
+  active, `true` will make the local backend execute mutation-class
+  filesystem requests for this call (`file_write` / `file_edit` writes and
+  their parent-directory creation) inside a `xiaoo-backend-cli` subprocess
+  whose argv carries the same prefix.
+- Consumption rules: only the local backend consumes the instruction; when
+  several hookers contribute a `spawn_wrapper`, the **first** one wins and
+  the rest are logged; unknown keys are ignored (forward compatible); a
+  malformed `spawn_wrapper` (missing / non-array / empty / non-string
+  `prefix`) is ignored with a warning. When no plugin contributes an
+  instruction, the spawn and write paths behave exactly as before.
+- The instruction is data from a plugin registered in `plugin.json` — the
+  same trust domain as the hooker itself (which may already deny or
+  transform tool calls) and never passes through model output.
+
 ## 8. Post-hook protocol
 
 ### Input payload

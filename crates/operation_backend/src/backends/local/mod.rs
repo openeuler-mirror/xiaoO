@@ -8,6 +8,7 @@ mod path;
 mod policy;
 mod provider;
 mod search;
+mod spawn_wrapper;
 
 pub use backend::LocalOperationBackend;
 pub use factory::{build_backend, local_backend, local_backend_with_isolation};
