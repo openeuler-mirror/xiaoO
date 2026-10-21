@@ -182,7 +182,7 @@ async fn file_edit_forwards_extra_on_both_write_paths() {
             "hooker_id": "plugin-x",
             "spawn_wrapper": {
                 "prefix": ["/opt/dummy-wrapper", "--session=s1", "--"],
-                "externalize_fs_writes": true
+                "externalize_fs_writes": false
             }
         }
     ]);

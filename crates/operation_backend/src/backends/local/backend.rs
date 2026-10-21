@@ -26,6 +26,11 @@ pub(crate) struct LocalBackendState {
     pub(crate) temp_root_host: PathBuf,
     pub(crate) default_shell: Option<String>,
     pub(crate) policy: LocalBackendPolicy,
+    /// Serialized backend config (`{ "kind", "options" }`) this backend was
+    /// built from. Feeds the `backend` section of externalization envelopes
+    /// so the subprocess rebuilds an identical, policy-preserving backend.
+    /// `None` for ad-hoc states that never externalize.
+    pub(crate) source_config: Option<serde_json::Value>,
     /// An interaction handle used to prompt the user at runtime. It is
     /// attached via the `attach_interaction` trait method after construction;
     /// the handle does not exist prior to this.

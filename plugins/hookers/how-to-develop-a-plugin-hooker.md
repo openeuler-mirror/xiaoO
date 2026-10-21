@@ -288,7 +288,8 @@ defines one generic key:
   "result": "allow",
   "extra": {
     "spawn_wrapper": {
-      "prefix": ["/abs/path/wrapper", "--flag=value", "--"]
+      "prefix": ["/abs/path/wrapper", "--flag=value", "--"],
+      "externalize_fs_writes": true
     }
   }
 }
@@ -302,13 +303,13 @@ defines one generic key:
   through the subprocess's `PATH`. A trailing `--` separator, as in the
   example, is the wrapper's own convention for splitting its flags from the
   wrapped command; the host never interprets or injects it.
-- `externalize_fs_writes`: optional, defaults to `false`. **Reserved for an
-  upcoming release: the field is parsed and forwarded today but not yet
-  consumed — setting it to `true` has no effect in this version.** Once
-  active, `true` will make the local backend execute mutation-class
-  filesystem requests for this call (`file_write` / `file_edit` writes and
-  their parent-directory creation) inside a `xiaoo-backend-cli` subprocess
-  whose argv carries the same prefix.
+- `externalize_fs_writes`: optional, defaults to `false`. When `true`, the
+  local backend executes mutation-class filesystem requests for this call
+  (`file_write` / `file_edit` writes and their parent-directory creation)
+  inside a `xiaoo-backend-cli` subprocess whose argv carries the same
+  prefix. Failure is loud by design: once externalization is requested, a
+  missing CLI or a failing subprocess surfaces as an error rather than a
+  silent in-process write that would mis-attribute the mutation.
 - Consumption rules: only the local backend consumes the instruction; when
   several hookers contribute a `spawn_wrapper`, the **first** one wins and
   the rest are logged; unknown keys are ignored (forward compatible); a

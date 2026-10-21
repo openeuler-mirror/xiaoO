@@ -58,7 +58,22 @@ pub(crate) fn run_from_env() -> Result<(), String> {
     };
 
     runtime.block_on(async move {
-        let output = execute_request(config, request).await?;
+        let output = match execute_request(config, request).await {
+            Ok(output) => output,
+            Err(error) => {
+                // Structured error on stdout so the externalized-write
+                // spawner can restore the typed error; stderr + exit code
+                // still carry the human-readable message.
+                let error_value =
+                    serde_json::to_value(&error).map_err(|error| error.to_string())?;
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({ "error": error_value }))
+                        .map_err(|error| error.to_string())?
+                );
+                return Err(format!("request failed: {error}"));
+            }
+        };
         println!(
             "{}",
             serde_json::to_string(&output).map_err(|error| error.to_string())?
@@ -68,11 +83,12 @@ pub(crate) fn run_from_env() -> Result<(), String> {
 }
 
 /// Run one request against a freshly built backend and return its output.
-/// Printing is left to the caller so tests can assert on the output value.
+/// Printing is left to the caller so tests can assert on the output value;
+/// the error stays typed for the structured error document.
 async fn execute_request(
     config: OperationBackendConfig,
     request: BackendCliRequest,
-) -> Result<Value, String> {
+) -> Result<Value, OperationError> {
     let builder = OperationBackendBuilderImpl::new();
     let backend = builder
         .build(&OperationBackendBuildInput {
@@ -80,12 +96,16 @@ async fn execute_request(
             ..OperationBackendBuildInput::default()
         })
         .await
-        .map_err(|error| format!("backend build failed: {error}"))?;
+        .map_err(|error| OperationError::ExecutionFailed {
+            message: format!("backend build failed: {error}"),
+        })?;
     let request_result = handle_request(backend.as_ref(), request).await;
     let shutdown_result = backend.shutdown().await;
 
-    let output = request_result.map_err(|error| format!("request failed: {error}"))?;
-    shutdown_result.map_err(|error| format!("backend shutdown failed: {error}"))?;
+    let output = request_result?;
+    shutdown_result.map_err(|error| OperationError::ExecutionFailed {
+        message: format!("backend shutdown failed: {error}"),
+    })?;
     Ok(output)
 }
 

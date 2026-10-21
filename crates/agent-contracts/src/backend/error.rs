@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// What is known about a command when its execution transport is interrupted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionState {
     /// The command request was rejected before execution started.
     NotStarted,
@@ -17,7 +19,12 @@ impl std::fmt::Display for ExecutionState {
 }
 
 /// Errors that can occur during backend operations.
-#[derive(Debug, thiserror::Error)]
+///
+/// `Serialize`/`Deserialize` power the backend CLI's structured error
+/// channel, so the spawning side restores the variant instead of flattening
+/// it to message text.
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationError {
     #[error("invalid path: {message}")]
     InvalidPath { message: String },

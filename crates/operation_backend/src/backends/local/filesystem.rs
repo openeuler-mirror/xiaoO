@@ -1,6 +1,8 @@
 use crate::backends::local::backend::{
     file_name_string, io_error_for_path, system_time_millis, LocalBackendState,
 };
+use crate::backends::local::externalize;
+use crate::backends::local::spawn_wrapper::{spawn_wrapper_from_extra, SpawnWrapper};
 use agent_contracts::backend::{
     capability::{
         filesystem::{
@@ -12,6 +14,8 @@ use agent_contracts::backend::{
     BackendPath, OperationError, PathStat,
 };
 use async_trait::async_trait;
+use base64::Engine as _;
+use serde_json::{json, Value};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,6 +28,59 @@ pub(crate) struct LocalFileSystem {
 impl LocalFileSystem {
     pub(crate) fn new(state: Arc<LocalBackendState>) -> Self {
         Self { _state: state }
+    }
+
+    /// The spawn_wrapper instruction for this request when it asks for
+    /// fs-write externalization.
+    fn externalize_wrapper(extra: Option<&Value>) -> Option<SpawnWrapper> {
+        spawn_wrapper_from_extra(extra).filter(|wrapper| wrapper.externalize_fs_writes)
+    }
+
+    /// The archived backend config for the envelope's backend section;
+    /// ad-hoc states without one fail loud.
+    fn externalize_source_config(&self) -> Result<&Value, OperationError> {
+        self._state
+            .source_config
+            .as_ref()
+            .ok_or_else(|| OperationError::ExecutionFailed {
+                message: "spawn_wrapper requested externalized fs writes but this backend has \
+                          no archived source config to rebuild from"
+                    .to_string(),
+            })
+    }
+
+    async fn write_bytes_externalized(
+        &self,
+        request: &WriteBytesRequest,
+        wrapper: &SpawnWrapper,
+    ) -> Result<WriteBytesOutcome, OperationError> {
+        let source_config = self.externalize_source_config()?;
+        let args = json!({
+            "path": request.path.native().to_string(),
+            "content_b64": base64::engine::general_purpose::STANDARD.encode(&request.content),
+            "mode": write_mode_tag(request.mode),
+        });
+        let outcome =
+            externalize::run_externalized(wrapper, source_config, "write_bytes", args).await?;
+        let created = outcome
+            .get("created")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| OperationError::ExecutionFailed {
+                message: "externalized write_bytes result is missing the 'created' field"
+                    .to_string(),
+            })?;
+        Ok(WriteBytesOutcome {
+            path: request.path.clone(),
+            created,
+        })
+    }
+}
+
+fn write_mode_tag(mode: WriteMode) -> &'static str {
+    match mode {
+        WriteMode::Create => "create",
+        WriteMode::Overwrite => "overwrite",
+        WriteMode::AtomicOverwrite => "atomic_overwrite",
     }
 }
 #[async_trait]
@@ -64,6 +121,10 @@ impl OperationFileSystem for LocalFileSystem {
         &self,
         request: WriteBytesRequest,
     ) -> Result<WriteBytesOutcome, OperationError> {
+        if let Some(wrapper) = Self::externalize_wrapper(request.extra.as_ref()) {
+            return self.write_bytes_externalized(&request, &wrapper).await;
+        }
+
         let host_path = self._state.backend_path_to_host(&request.path)?;
         let state = Arc::clone(&self._state);
         let mode = request.mode;
@@ -156,6 +217,20 @@ impl OperationFileSystem for LocalFileSystem {
         .map_err(|join_error| OperationError::Transport {
             message: format!("create_dir_all blocking task panicked: {join_error}"),
         })?
+    }
+
+    async fn create_dir_all_with_extra(
+        &self,
+        path: &BackendPath,
+        extra: Option<&Value>,
+    ) -> Result<(), OperationError> {
+        if let Some(wrapper) = Self::externalize_wrapper(extra) {
+            let source_config = self.externalize_source_config()?;
+            let args = json!({ "path": path.native().to_string() });
+            externalize::run_externalized(&wrapper, source_config, "create_dir_all", args).await?;
+            return Ok(());
+        }
+        self.create_dir_all(path).await
     }
 
     async fn temp_path(&self, request: TempPathRequest) -> Result<BackendPath, OperationError> {
