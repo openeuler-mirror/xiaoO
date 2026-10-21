@@ -402,7 +402,9 @@ impl PluginToolHookerAdaptor {
             .read_required_result_tag(output, Self::err)?
             .as_str()
         {
-            "allow" => Ok(PreHookResult::Allow),
+            "allow" => Ok(PreHookResult::Allow {
+                extra: self.parse_extra_field(output)?,
+            }),
             "deny" => Ok(PreHookResult::Deny {
                 reason: self
                     .core
@@ -414,13 +416,42 @@ impl PluginToolHookerAdaptor {
                     .core
                     .read_required_value_field(output, "modified_input", Self::err)?
                     .clone(),
-                extra: output.get("extra").cloned(),
+                extra: self.parse_extra_field(output)?,
             }),
             result => Err(Self::err(format!(
                 "plugin tool pre-hooker '{}' returned unsupported result '{}'",
                 self.core.id().0,
                 result
             ))),
+        }
+    }
+
+    /// Parse the optional `extra` field of a pre-hook response: a missing key
+    /// or an explicit `null` both mean "no contribution" (normalized to
+    /// `None`); any other value must be a JSON object so the framework can
+    /// attribute the entry via the injected `hooker_id` key.
+    fn parse_extra_field(&self, output: &Value) -> Result<Option<Value>, ToolExecutionError> {
+        match output.get("extra") {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) if value.is_object() => Ok(Some(value.clone())),
+            Some(value) => Err(Self::err(format!(
+                "plugin tool pre-hooker '{}' returned a non-object 'extra' payload ({}), \
+                 expected a JSON object or null",
+                self.core.id().0,
+                Self::json_kind(value),
+            ))),
+        }
+    }
+
+    /// Short JSON type tag used in `extra` validation errors.
+    fn json_kind(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
         }
     }
 

@@ -1,5 +1,6 @@
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
+use agent_types::common::HookerId;
 use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokePrimary, HookPointId};
 use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, FinalToolCall, PostHookResult, PostToolHookInput,
@@ -114,8 +115,9 @@ impl ToolCallImpl {
             };
 
             match pre_result {
-                PreHookResult::Allow => {
-                    results.push(PreHookResult::Allow);
+                PreHookResult::Allow { extra } => {
+                    accumulate_extra(&mut state.final_call, hooker.id(), extra);
+                    results.push(PreHookResult::Allow { extra: None });
                     runtime
                         .trace_recorder()
                         .end_span(hook_span, TraceOutcome::Ok, json!({"result": "allow"}))
@@ -135,17 +137,7 @@ impl ToolCallImpl {
                     extra,
                 } => {
                     state.final_call.input = modified_input;
-                    if let Some(mut entry) = extra {
-                        if let Value::Object(map) = &mut entry {
-                            map.insert("hooker_id".to_string(), json!(hooker.id().to_string()));
-                        }
-                        match &mut state.final_call.extra {
-                            Some(Value::Array(entries)) => entries.push(entry),
-                            _ => {
-                                state.final_call.extra = Some(Value::Array(vec![entry]));
-                            }
-                        }
-                    }
+                    accumulate_extra(&mut state.final_call, hooker.id(), extra);
                     results.push(PreHookResult::Transform {
                         modified_input: state.final_call.input.clone(),
                         extra: None,
@@ -461,6 +453,26 @@ fn hook_invoke_metadata(hook_span: &TraceSpanHandle) -> HookInvokeMetadata {
         trace_id: Some(hook_span.trace_id().to_string()),
         span_id: Some(hook_span.span_id().to_string()),
         parent_span_id: hook_span.parent_span_id().map(ToString::to_string),
+    }
+}
+
+/// Inject the hooker id into a plugin-produced `extra` payload and append it
+/// to the call's accumulated `extra` array. Shared by the allow and transform
+/// pre-hook arms so both result kinds contribute data identically; the
+/// accumulated entries stay invisible to subsequent plugin hookers via
+/// [`hooker_visible_call`] and reach the execution backend via
+/// `FinalToolCall.extra`. A `None` or `null` payload contributes nothing.
+fn accumulate_extra(final_call: &mut FinalToolCall, hooker_id: &HookerId, extra: Option<Value>) {
+    if let Some(mut entry) = extra.filter(|entry| !entry.is_null()) {
+        if let Value::Object(map) = &mut entry {
+            map.insert("hooker_id".to_string(), json!(hooker_id.to_string()));
+        }
+        match &mut final_call.extra {
+            Some(Value::Array(entries)) => entries.push(entry),
+            _ => {
+                final_call.extra = Some(Value::Array(vec![entry]));
+            }
+        }
     }
 }
 
