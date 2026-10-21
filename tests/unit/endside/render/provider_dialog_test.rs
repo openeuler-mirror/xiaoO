@@ -35,6 +35,27 @@ fn providers() -> Vec<ProviderInfo> {
     ]
 }
 
+/// 连按向下必须停在最后一项。越界会让 `selected()` 返回 `None`，而应用选择的那
+/// 一支只在 `Some` 时生效，界面上看不出异常——所以这里钉住上下界。
+#[test]
+fn move_down_in_the_models_pane_stops_at_the_last_model() {
+    let mut dialog = ProviderDialog::new(providers());
+    dialog.switch_to_models();
+
+    for _ in 0..5 {
+        dialog.move_down();
+    }
+
+    assert_eq!(
+        dialog.selected_model, 1,
+        "openai 只有 2 个模型，连按向下应停在末项而不是越过列表末尾"
+    );
+    assert!(
+        dialog.selected().is_some(),
+        "选中项必须落在列表范围内（越界会让 Enter 静默失效）"
+    );
+}
+
 #[test]
 fn new_with_selection_preselects_matching_provider_and_model() {
     let dialog =
@@ -97,7 +118,7 @@ fn replace_models_keeps_selection_by_id() {
     ));
 
     assert_eq!(
-        ids(&dialog.current_models()),
+        ids(dialog.current_models_ref()),
         vec!["gpt-4o", "o3", "gpt-4-turbo"]
     );
     assert_eq!(
@@ -152,7 +173,7 @@ fn replace_models_rejects_empty_list_and_unknown_provider() {
     assert!(!dialog.replace_models("no-such-provider", vec![model("x")]));
 
     assert_eq!(
-        ids(&dialog.current_models()),
+        ids(dialog.current_models_ref()),
         vec!["gpt-4o", "gpt-4-turbo"],
         "两次拒绝之后列表必须保持原样"
     );

@@ -118,8 +118,16 @@ impl App {
             self.render_slash_popup_dialog(frame, frame.area());
             self.render_file_mention_popup_dialog(frame, frame.area());
         }
-        if let Some(dialog) = self.state.provider_dialog.as_ref() {
-            self.render_provider_dialog(frame, frame.area(), dialog);
+        // 借用拆开：`provider_dialog` 需要可变（渲染时回写一屏行数），
+        // `theme` / `chat_state` 只读，三者是 `state` 的互不重叠字段。
+        if let Some(dialog) = self.state.provider_dialog.as_mut() {
+            Self::render_provider_dialog(
+                frame,
+                frame.area(),
+                dialog,
+                &self.state.theme,
+                &self.state.chat_state,
+            );
         }
         if let Some(dialog) = self.state.sandbox_dialog.as_ref() {
             self.render_sandbox_dialog(frame, frame.area(), dialog);
