@@ -56,9 +56,7 @@ struct ExtraRecordingBackend {
 }
 
 impl ExtraRecordingBackend {
-    fn wrap(
-        inner: Arc<dyn OperationBackend>,
-    ) -> (Arc<dyn OperationBackend>, Arc<ForwardedMkDirs>) {
+    fn wrap(inner: Arc<dyn OperationBackend>) -> (Arc<dyn OperationBackend>, Arc<ForwardedMkDirs>) {
         let forwarded = Arc::new(ForwardedMkDirs::default());
         (
             Arc::new(Self {

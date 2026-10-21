@@ -158,15 +158,7 @@ impl DeclarativeToolExecutor {
             .kill_on_drop(true)
             .current_dir(workspace_root)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("XIAOO_WORKSPACE_ROOT", workspace_root)
-            .env("XIAOO_TOOL_MANIFEST", &self.manifest_path)
-            .env("XIAOO_TOOL_DIR", &self.tool_dir);
-
-        if let Some(session_id) = session_id {
-            command.env("XIAOO_SESSION_ID", session_id);
-        }
-        command.env("XIAOO_AGENT_ID", agent_id);
+            .stderr(Stdio::piped());
 
         // 声明式插件工具的 manifest 位于 agent 可写的工作区内，所以这个子进程是
         // "模型间接决定跑什么"的那一类。它此前继承了 daemon 的整个环境 —— 包括
@@ -178,6 +170,18 @@ impl DeclarativeToolExecutor {
                 command.env(inherited, value);
             }
         }
+
+        // `XIAOO_*` 是 xiaoo 与工具脚本之间的注入契约，不是继承的宿主状态，必须在
+        // env_clear() 之后设置（赋值位于清空之前会被一并抹掉，工具脚本因此拿不到
+        // 工作区/会话身份）。
+        command
+            .env("XIAOO_WORKSPACE_ROOT", workspace_root)
+            .env("XIAOO_TOOL_MANIFEST", &self.manifest_path)
+            .env("XIAOO_TOOL_DIR", &self.tool_dir);
+        if let Some(session_id) = session_id {
+            command.env("XIAOO_SESSION_ID", session_id);
+        }
+        command.env("XIAOO_AGENT_ID", agent_id);
 
         // `exec.env` 曾经按 manifest 声明的名字从 daemon 环境逐个取值。但 manifest
         // 属于 agent 可写的不受信输入，而 daemon 环境里放着全部明文凭据，于是
