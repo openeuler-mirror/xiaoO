@@ -511,8 +511,9 @@ impl App {
         theme: &Theme,
         chat_state: &ChatState,
     ) {
-        let dialog_width = area.width.clamp(60, 80);
-        let dialog_height = area.height.clamp(12, 20);
+        // 窄/矮终端下弹窗不能超过可用区域，否则 ratatui 写 buffer 会越界 panic。
+        let dialog_width = area.width.clamp(60, 80).min(area.width);
+        let dialog_height = area.height.clamp(12, 20).min(area.height);
         let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
         let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
         let dialog_area = Rect {
