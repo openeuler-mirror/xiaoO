@@ -5,6 +5,7 @@ use futures::StreamExt;
 
 use crate::convert::{parse_tool_arguments, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
 use crate::error::{map_api_status_error, map_reqwest_error, map_serde_error, LlmError};
+use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::wire_types::{ParsedChunk, WireToolCallDelta, WireToolCallFunctionDelta, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{
@@ -365,6 +366,7 @@ impl LlmProvider for AnthropicProvider {
         let mut final_usage = None;
         let mut final_stop_reason = StopReason::EndTurn;
 
+        let mut decoder = StreamUtf8Decoder::default();
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
         // Per-stream event_type state. Scoped locally so concurrent streams
@@ -384,8 +386,7 @@ impl LlmProvider for AnthropicProvider {
                     message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
                 }
             })?;
-            let text = String::from_utf8_lossy(&bytes);
-            buffer.push_str(&text);
+            decoder.push(&bytes, &mut buffer);
 
             // Cursor-based SSE scanning: find each '\n' without rebuilding
             // the buffer per line; drain the consumed prefix in place.
@@ -427,6 +428,8 @@ impl LlmProvider for AnthropicProvider {
                 buffer.drain(..start);
             }
         }
+
+        decoder.finish(&mut buffer);
 
         let tool_use_blocks: Vec<ToolUseBlock> = full_tool_calls
             .iter()
