@@ -504,6 +504,25 @@ impl App {
         }
     }
 
+    /// 快捷键行两档文案：`Length(1)` 的行放不下第二行，溢出的尾部会被直接
+    /// 截掉（`Wrap` 只在可视行内折行），所以窄弹窗降级成精简版。
+    ///
+    /// 弹窗内宽 = `dialog_width` 减两侧边框，而 `dialog_width` 是
+    /// `width.clamp(60, 80)`，故内宽最窄 58、终端 ≥ 80 列时 78；完整版文案宽
+    /// 73 列，所以内宽 58..=72 走精简版、73..=78 走完整版。判定用
+    /// `Line::width()`（与渲染同一个宽度算法），不要改成字符数。
+    const PROVIDER_HINT_FULL: &str =
+        "↑↓ select | PgUp/PgDn page | Home/End | Ctrl+R | Enter apply | Esc cancel";
+    const PROVIDER_HINT_COMPACT: &str = "↑↓ select | PgUp/PgDn page | Ctrl+R refresh | Esc cancel";
+
+    fn provider_dialog_hint(width: u16) -> &'static str {
+        if usize::from(width) >= Line::from(Self::PROVIDER_HINT_FULL).width() {
+            Self::PROVIDER_HINT_FULL
+        } else {
+            Self::PROVIDER_HINT_COMPACT
+        }
+    }
+
     pub(crate) fn render_provider_dialog(
         frame: &mut Frame,
         area: Rect,
@@ -546,7 +565,7 @@ impl App {
         let hint_area = rows[2];
 
         // 翻页步长的唯一真相源：列表栏内容区行数（去掉上下边框）。量好写回
-        // 弹窗状态，一屏到底有多少行就不必靠常量去猜。
+        // 弹窗状态，PageUp/PageDown 的步长才等于一屏的行数（窗口记账见 `ProviderDialog::provider_window`）。
         dialog.page_height = usize::from(list_area.height.saturating_sub(2));
 
         let horizontal = Layout::default()
@@ -581,12 +600,19 @@ impl App {
                 .title(" Providers ")
                 .padding(Padding::horizontal(1)),
         );
-        // ListState 只用于"选中项跟随滚动"：官方列表可能远长于可视高度
+        // ListState 除了让选中项可见，还承担整屏对齐：官方列表可能远长于可视高度
         // （openrouter 300+），无状态的 List 会永远停在列表头部。
         // 逐行样式仍由上面的 Span 决定，不设 highlight_style。
-        let mut provider_state = ListState::default();
-        provider_state.select(Some(dialog.selected_provider));
+        // `offset` 由弹窗给出：翻页要整屏对齐，而 ListState 默认只会做最小滚动
+        // （见 `ProviderDialog::provider_window`）。
+        let mut provider_state = ListState::default()
+            .with_offset(dialog.provider_window())
+            .with_selected(Some(dialog.selected_provider));
         frame.render_stateful_widget(provider_list, left, &mut provider_state);
+        // ratatui 会把 offset 校正成"现在真正可见的第一项"（`List::render` 里的
+        // `state.offset = first_visible_index`）。记下来，下一次翻页才会从**看得见的**
+        // 窗口起算——列表刚被替换或预选到深处时尤其重要。
+        let provider_visible = provider_state.offset();
 
         let provider_name = dialog.selected_provider_name().unwrap_or_default();
         let status = chat_state.model_list_state(provider_name);
@@ -635,11 +661,13 @@ impl App {
                 .title(models_title)
                 .padding(Padding::horizontal(1)),
         );
-        let mut model_state = ListState::default();
-        model_state.select(Some(
-            dialog.selected_model.min(models.len().saturating_sub(1)),
-        ));
+        let mut model_state = ListState::default()
+            .with_offset(dialog.model_window())
+            .with_selected(Some(
+                dialog.selected_model.min(models.len().saturating_sub(1)),
+            ));
         frame.render_stateful_widget(model_list, right, &mut model_state);
+        let model_visible = model_state.offset();
 
         // 状态行按拉取状态给一句话：成功报数量、失败报原因、缺 key 只提示。
         let (status_text, status_style) = match &status {
@@ -673,6 +701,8 @@ impl App {
                 Style::default().fg(theme.muted),
             ),
         };
+        // `models` 借用 dialog 到上面为止，这里再把 ratatui 校正过的窗口收回去。
+        dialog.record_visible_windows(provider_visible, model_visible);
 
         frame.render_widget(
             Paragraph::new(status_text)
@@ -681,9 +711,7 @@ impl App {
             status_area,
         );
 
-        // 快捷键行只有一行高（`Length(1)`），文案必须窄于弹窗最小内宽
-        // （dialog_width 下限 60 → 内宽 58），否则 Wrap 会把尾部裁掉。
-        let hint = Paragraph::new("↑↓ select | Ctrl+R refresh | Enter apply | Esc cancel")
+        let hint = Paragraph::new(Self::provider_dialog_hint(hint_area.width))
             .style(Style::default().fg(theme.muted))
             .wrap(Wrap { trim: true });
         frame.render_widget(hint, hint_area);

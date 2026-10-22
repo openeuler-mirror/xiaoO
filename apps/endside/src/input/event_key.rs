@@ -1358,6 +1358,25 @@ impl App {
                 }
                 KeyCode::Left => dialog.switch_to_providers(),
                 KeyCode::Right => dialog.switch_to_models(),
+                // 官方列表可能几百条（openrouter），只靠上下键不现实：整屏翻页 +
+                // 首尾直达。步长取渲染时量出的一屏行数（见 `page_height`），
+                // providers 栏翻页同样可能换 provider，所以照样走"是否需要拉取"判定。
+                KeyCode::PageUp => {
+                    dialog.page_up();
+                    check_model_refresh = true;
+                }
+                KeyCode::PageDown => {
+                    dialog.page_down();
+                    check_model_refresh = true;
+                }
+                KeyCode::Home => {
+                    dialog.select_first();
+                    check_model_refresh = true;
+                }
+                KeyCode::End => {
+                    dialog.select_last();
+                    check_model_refresh = true;
+                }
                 KeyCode::Tab => {
                     if dialog.focus == DialogFocus::Providers {
                         dialog.switch_to_models();
