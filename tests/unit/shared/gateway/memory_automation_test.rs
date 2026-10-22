@@ -412,3 +412,70 @@ async fn concurrent_drainers_do_not_reclaim_slow_ingest() {
     let restarted = DurableIngestQueue::open(path, 4).await.unwrap();
     assert_eq!(drain_count(&restarted, 0).await, 0);
 }
+
+#[tokio::test]
+async fn same_queue_waits_for_its_active_ingest() {
+    let temp = tempfile::tempdir().unwrap();
+    let queue = Arc::new(
+        DurableIngestQueue::open(temp.path().join("queue.jsonl"), 4)
+            .await
+            .unwrap(),
+    );
+    queue
+        .enqueue(ingest_fixture("one", "hello", "reply"))
+        .await
+        .unwrap();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first = tokio::spawn({
+        let queue = Arc::clone(&queue);
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        let calls = Arc::clone(&calls);
+        async move {
+            queue
+                .drain_due(5, 1, 1_000, move |_| {
+                    let started = Arc::clone(&started);
+                    let release = Arc::clone(&release);
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    }
+                })
+                .await
+        }
+    });
+    started.notified().await;
+    let second = tokio::spawn({
+        let queue = Arc::clone(&queue);
+        let calls = Arc::clone(&calls);
+        async move {
+            queue
+                .drain_due(5, 1, 3_000, move |_| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                })
+                .await
+        }
+    });
+    // Exceed the file-lock contention timeout while this queue owns the lock.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let was_pending = !second.is_finished();
+    release.notify_one();
+    first.await.unwrap().unwrap();
+    let result = second.await.unwrap();
+    assert!(
+        was_pending,
+        "a transaction on the same queue must wait for its owner"
+    );
+    result.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(drain_count(&queue, 4_000).await, 0);
+}

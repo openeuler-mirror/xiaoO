@@ -188,6 +188,7 @@ pub(crate) struct DurableIngestQueue {
     path: PathBuf,
     capacity: usize,
     entries: Mutex<Vec<CompletedTurnIngest>>,
+    transaction: Arc<Mutex<()>>,
     changed: Notify,
 }
 impl DurableIngestQueue {
@@ -201,6 +202,7 @@ impl DurableIngestQueue {
             path,
             capacity,
             entries: Mutex::new(entries),
+            transaction: Arc::new(Mutex::new(())),
             changed: Notify::new(),
         })
     }
@@ -359,6 +361,9 @@ impl DurableIngestQueue {
         }
     }
     async fn acquire_lock(&self) -> Result<DurableQueueLock, MemoryAutomationError> {
+        // An active ingest owns this queue until it commits. Wait for that
+        // transaction before starting the timeout for other queue handles.
+        let transaction = Arc::clone(&self.transaction).lock_owned().await;
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -379,14 +384,17 @@ impl DurableIngestQueue {
                     }
                     file.set_len(0)?;
                     writeln!(file, "pid={}", std::process::id())?;
-                    Ok(Some(DurableQueueLock { file }))
+                    Ok(Some(file))
                 })
                 .await
                 .map_err(|error| {
                     MemoryAutomationError::Config(format!("memory queue lock task failed: {error}"))
                 })??;
-            if let Some(lock) = attempt {
-                return Ok(lock);
+            if let Some(file) = attempt {
+                return Ok(DurableQueueLock {
+                    file,
+                    _transaction: transaction,
+                });
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(MemoryAutomationError::QueueLocked);
@@ -438,6 +446,7 @@ fn try_lock_file(file: &File) -> Result<bool, MemoryAutomationError> {
 
 struct DurableQueueLock {
     file: File,
+    _transaction: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl Drop for DurableQueueLock {
