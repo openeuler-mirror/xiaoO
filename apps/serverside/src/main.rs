@@ -37,9 +37,10 @@ use crate::cron::scheduler::CronScheduler;
 use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;
 use crate::httpserver::{
+    apply_loopback_host_guard,
     create_router_with_channel_runtimes_control_plane_and_timeout_and_auth,
     create_router_with_control_plane_and_auth, dashboard_router, ChannelRouterOptions,
-    ChannelRuntimeProcessor, DashboardState, HttpBearerAuthConfig,
+    ChannelRuntimeProcessor, DashboardState, HttpBearerAuthConfig, HttpSecurityPolicy,
 };
 use crate::mcp_server::create_mcp_router;
 use anyhow::{bail, Context, Result};
@@ -578,6 +579,13 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
         .parse()
         .with_context(|| format!("invalid listen address {host}:{port}"))?;
     ensure_external_bind_is_authenticated(listen_addr, bearer_auth.is_some())?;
+    // Browser-facing hardening: CORS is limited to loopback origins (plus
+    // any explicitly configured ones) and, on loopback binds, the Host
+    // header must name this listener to close the DNS-rebinding hole.
+    let security = HttpSecurityPolicy {
+        listen_addr: Some(listen_addr),
+        allowed_origins: config.app.http.allowed_origins.clone(),
+    };
     let rate_limit = config.app.http.rate_limit.clone();
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config).await?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
@@ -681,6 +689,7 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
         };
 
         let channel_runtimes = config.channel_runtimes()?;
+        let security_listen_addr = security.listen_addr;
         let mut router = if channel_runtimes.is_empty() {
             create_router_with_control_plane_and_auth(
                 session_service.clone(),
@@ -689,6 +698,7 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
                 rate_limit.clone(),
                 cron_scheduler.clone(),
                 channel_manager.clone(),
+                security.clone(),
             )
         } else {
             create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
@@ -701,19 +711,28 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
                     rate_limit: rate_limit.clone(),
                     cron_scheduler: cron_scheduler.clone(),
                     channel_manager: channel_manager.clone(),
+                    security,
                 },
             )
             .map_err(anyhow::Error::new)
             .context("failed to create router with channel runtimes")?
         };
         if let Some(mcp_server_config) = mcp_server_config {
-            router = router.merge(create_mcp_router(
-                mcp_server_config,
-                session_service.clone(),
-                session_control_plane.clone(),
-                session_store.clone(),
-                rate_limit.clone(),
-            ));
+            // The MCP router joins the API listener after `create_router_*`
+            // applied the security layers, and axum layers only wrap routes
+            // that already exist — so wrap it with the same Host guard here
+            // instead of relying on the merge to inherit it.
+            let mcp_router = apply_loopback_host_guard(
+                create_mcp_router(
+                    mcp_server_config,
+                    session_service.clone(),
+                    session_control_plane.clone(),
+                    session_store.clone(),
+                    rate_limit.clone(),
+                ),
+                security_listen_addr,
+            );
+            router = router.merge(mcp_router);
         }
 
         // Dashboard runs on its own listener so it never shares the runtime
@@ -856,7 +875,14 @@ async fn spawn_dashboard_server(
     let bound_addr = listener
         .local_addr()
         .with_context(|| "failed to read bound dashboard address")?;
-    let router = dashboard_router(DashboardState::new(session_store, backend_manager));
+    // The dashboard is read-only but still exposes session/sandbox metadata,
+    // so its listener gets the same Host-header guard as the API listener to
+    // close the DNS-rebinding hole CORS cannot block. Non-loopback dashboard
+    // binds are fronted by explicit configuration and skip the guard.
+    let router = apply_loopback_host_guard(
+        dashboard_router(DashboardState::new(session_store, backend_manager)),
+        Some(bound_addr),
+    );
     tokio::spawn(async move {
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(async {

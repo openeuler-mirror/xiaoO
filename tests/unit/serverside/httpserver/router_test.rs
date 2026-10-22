@@ -2,7 +2,7 @@ use super::*;
 use super::{
     create_router_from_state, create_router_with_control_plane_and_auth, handle_channel_events,
     map_session_error, reject_forged_daemon_principal, runtime_export_file_name, GatewayAppState,
-    GatewayErrorResponse, HttpBearerAuthConfig,
+    GatewayErrorResponse, HttpBearerAuthConfig, HttpSecurityPolicy,
 };
 use crate::channel_management::ChannelManager;
 use crate::channels::{
@@ -89,6 +89,7 @@ async fn sandbox_catalog_is_authenticated_and_redacted() {
         None,
         None,
         Arc::new(ChannelManager::new(None, None)),
+        HttpSecurityPolicy::default(),
     );
 
     let unauthorized = router
@@ -133,6 +134,7 @@ async fn runtime_exec_interruption_returns_partial_output() {
         None,
         None,
         Arc::new(ChannelManager::new(None, None)),
+        HttpSecurityPolicy::default(),
     );
 
     let response = router
@@ -558,7 +560,7 @@ async fn cron_runtime_routes_trigger_and_report_results() {
     ));
     let mut state = GatewayAppState::new(Arc::new(FakeSessionService::new("unused")));
     state.set_cron_scheduler(Some(scheduler.clone()));
-    let router = create_router_from_state(state, None, None);
+    let router = create_router_from_state(state, None, None, HttpSecurityPolicy::default());
 
     let catalog = router
         .clone()
@@ -972,6 +974,7 @@ async fn require_lease_holder_returns_409_with_structured_body() {
         None,
         None,
         Arc::new(ChannelManager::new(None, None)),
+        HttpSecurityPolicy::default(),
     );
 
     let response = router
@@ -1045,5 +1048,6 @@ pub fn create_router_with_auth(
         GatewayAppState::new(session_service),
         bearer_auth,
         rate_limit,
+        HttpSecurityPolicy::default(),
     )
 }

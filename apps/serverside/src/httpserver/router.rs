@@ -13,8 +13,9 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     http::{
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
-        HeaderMap, Request, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE, HOST, WWW_AUTHENTICATE},
+        uri::{Authority, Uri},
+        HeaderMap, HeaderValue, Method, Request, StatusCode,
     },
     middleware::{self, Next},
     response::{
@@ -24,10 +25,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::warn;
 use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
 use xiaoo_shared::daemon_protocol::response::{
@@ -545,6 +547,23 @@ impl HttpBearerAuthConfig {
     }
 }
 
+/// Browser-facing security knobs resolved from the daemon config and bind
+/// address.
+///
+/// - `listen_addr` enables the DNS-rebinding defense: when the daemon serves
+///   a concrete loopback address, the Host header of every request must name
+///   that listener. `None` (tests, programmatic routers) and non-loopback or
+///   ephemeral-port addresses skip the check — non-loopback binds already
+///   require bearer auth to start and are commonly fronted by a reverse
+///   proxy whose Host is not ours to validate.
+/// - `allowed_origins` extends the CORS origin policy beyond loopback
+///   origins, for deployments that front the daemon with a remote web UI.
+#[derive(Debug, Clone, Default)]
+pub struct HttpSecurityPolicy {
+    pub listen_addr: Option<SocketAddr>,
+    pub allowed_origins: Vec<String>,
+}
+
 /// Channel-plane wiring for [`create_router_with_channel_runtimes_control_plane_and_timeout_and_auth`].
 pub struct ChannelRouterOptions {
     pub runtimes: Vec<ChannelRuntime>,
@@ -553,6 +572,7 @@ pub struct ChannelRouterOptions {
     pub rate_limit: Option<RateLimitConfig>,
     pub cron_scheduler: Option<Arc<CronScheduler>>,
     pub channel_manager: Arc<ChannelManager>,
+    pub security: HttpSecurityPolicy,
 }
 
 pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
@@ -567,6 +587,7 @@ pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
         rate_limit,
         cron_scheduler,
         channel_manager,
+        security,
     } = options;
     let mut state = GatewayAppState::with_channel_runtimes_and_control_plane(
         session_service,
@@ -577,13 +598,19 @@ pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
     state.set_channel_interaction_timeout(interaction_timeout_secs);
     state.set_cron_scheduler(cron_scheduler);
     spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
-    Ok(create_router_from_state(state, bearer_auth, rate_limit))
+    Ok(create_router_from_state(
+        state,
+        bearer_auth,
+        rate_limit,
+        security,
+    ))
 }
 
 fn create_router_from_state(
     state: GatewayAppState,
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
+    security: HttpSecurityPolicy,
 ) -> Router {
     let protected_runtime_routes = apply_http_bearer_auth(
         Router::new()
@@ -636,10 +663,21 @@ fn create_router_from_state(
             post(handle_channel_events),
         )
         .merge(protected_runtime_routes)
-        // The Harness web UI runs on a different local origin (usually :3080)
-        // and calls this daemon directly from the browser.
-        .layer(CorsLayer::very_permissive())
+        // The local web UI runs on a different local origin (any loopback
+        // host/port) and calls this daemon directly from the browser, so
+        // cross-origin requests from loopback origins must keep working —
+        // but nothing else.
+        .layer(cors_layer(&security.allowed_origins))
         .with_state(Arc::new(state));
+
+    // When serving on a concrete loopback address, additionally pin the Host
+    // header to this listener so DNS-rebound browser requests are rejected
+    // before routing: CORS alone cannot block blind cross-site POSTs. Routers
+    // that join this daemon's HTTP surface later (the MCP endpoints merged
+    // onto this listener, the dashboard's own listener) are wrapped by
+    // [`apply_loopback_host_guard`] themselves so every surface shares the
+    // same defense.
+    let router = apply_loopback_host_guard(router, security.listen_addr);
 
     match rate_limit.and_then(|c| c.governor_layer()) {
         Some(layer) => router.layer(layer),
@@ -654,13 +692,14 @@ pub fn create_router_with_control_plane_and_auth(
     rate_limit: Option<RateLimitConfig>,
     cron_scheduler: Option<Arc<CronScheduler>>,
     channel_manager: Arc<ChannelManager>,
+    security: HttpSecurityPolicy,
 ) -> Router {
     let mut state =
         GatewayAppState::with_control_plane(session_service, session_control_plane.clone());
     state.set_cron_scheduler(cron_scheduler);
     state.set_channel_manager(channel_manager);
     spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
-    create_router_from_state(state, bearer_auth, rate_limit)
+    create_router_from_state(state, bearer_auth, rate_limit, security)
 }
 
 fn apply_http_bearer_auth<S>(
@@ -675,6 +714,162 @@ where
             bearer_auth,
             require_bearer_auth,
         )),
+        None => router,
+    }
+}
+
+/// CORS policy for the daemon API.
+///
+/// Browser callers on loopback origins (the local web UI, on whatever host
+/// and port it picked) are answered with their origin reflected, plus any
+/// origins explicitly listed in `[http].allowed_origins`. Every other origin
+/// — i.e. any remote web page — gets no CORS headers at all, so the browser
+/// refuses to expose daemon responses to it.
+///
+/// `allow_credentials` is deliberately never enabled: the API authorizes via
+/// the Authorization header, not cookies, so credentialed CORS has no
+/// legitimate use here and would only widen exposure.
+fn cors_layer(extra_origins: &[String]) -> CorsLayer {
+    let extra: HashSet<String> = extra_origins
+        .iter()
+        .map(|origin| origin.trim())
+        .filter(|origin| !origin.is_empty())
+        .map(str::to_string)
+        .collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origin_is_allowed(origin, &extra)
+        }))
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE])
+}
+
+/// Whether a request `Origin` may read daemon responses from a browser.
+///
+/// Loopback origins need no configuration: a remote web page can never
+/// produce one, and a process able to serve pages on loopback could call the
+/// API without a browser anyway — browser-facing access control for that
+/// case is the bearer-auth layer's job, not CORS.
+fn origin_is_allowed(origin: &HeaderValue, extra: &HashSet<String>) -> bool {
+    let Some(origin) = origin.to_str().ok() else {
+        return false;
+    };
+    if extra.contains(origin) {
+        return true;
+    }
+    let Ok(uri) = origin.parse::<Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("http") | Some("https")) {
+        return false;
+    }
+    uri.host().is_some_and(is_loopback_host)
+}
+
+/// Whether `host` names this machine: `localhost` (case-insensitive), any
+/// address in the IPv4 loopback range 127.0.0.0/8, or the IPv6 loopback
+/// address `::1` (with or without RFC 3986 brackets). Parsing is delegated
+/// to [`IpAddr`] so equivalent textual forms (`0:0:0:0:0:0:0:1`, leading
+/// zeros, …) are recognized instead of a hand-rolled string comparison.
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+            .unwrap_or(host)
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// State for [`enforce_loopback_host`].
+#[derive(Clone, Copy)]
+struct LoopbackHostGuard {
+    port: u16,
+}
+
+/// Build the Host-header guard for a daemon bound to `listen_addr`.
+///
+/// Returns `None` unless the address is loopback with a concrete port: those
+/// are exactly the unauthenticated-by-default deployments DNS rebinding
+/// targets, and the one deployment shape where we own the Host namespace.
+fn loopback_host_guard(listen_addr: Option<SocketAddr>) -> Option<LoopbackHostGuard> {
+    let addr = listen_addr?;
+    if !addr.ip().is_loopback() || addr.port() == 0 {
+        return None;
+    }
+    Some(LoopbackHostGuard { port: addr.port() })
+}
+
+/// Reject requests whose Host header does not name this listener.
+///
+/// A DNS-rebinding attack delivers browser requests whose Host is the
+/// attacker's domain while the connection lands on loopback; the browser
+/// treats them as same-origin so CORS never applies, which makes the Host
+/// header the only signal left. It must name a loopback host at the port we
+/// serve on.
+async fn enforce_loopback_host(
+    State(guard): State<LoopbackHostGuard>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let host = request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if !host_names_listener(host, guard.port) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(request).await)
+}
+
+/// Whether a Host header value (`host[:port]`) names this daemon: a loopback
+/// host, with the port matching ours when one is given. Parsing is delegated
+/// to [`Authority`] so IPv6 brackets and userinfo follow RFC 3986 instead of
+/// a hand-rolled `rsplit_once(':')`.
+fn host_names_listener(host: &str, listen_port: u16) -> bool {
+    let Ok(authority) = host.parse::<Authority>() else {
+        return false;
+    };
+    if !is_loopback_host(authority.host()) {
+        return false;
+    }
+    match authority_port_segment(&authority) {
+        None => true,
+        Some(port) => port.parse::<u16>().is_ok_and(|port| port == listen_port),
+    }
+}
+
+/// The raw port segment following the host in `authority`, if it has one.
+///
+/// `Authority::port()` cannot distinguish "no port" from a malformed one —
+/// `127.0.0.1:80x` parses as a valid authority whose `port()` is `None` — so
+/// locate the segment structurally: whatever follows [`Authority::host`] in
+/// the post-userinfo part.
+fn authority_port_segment(authority: &Authority) -> Option<&str> {
+    let host = authority.host();
+    let host_port = authority
+        .as_str()
+        .rsplit('@')
+        .next()
+        .expect("rsplit always yields at least one item");
+    host_port
+        .strip_prefix(host)
+        .and_then(|rest| rest.strip_prefix(':'))
+}
+
+/// Wrap an arbitrary daemon router with the loopback Host-header guard for
+/// `listen_addr`.
+///
+/// Shares the [`enforce_loopback_host`] middleware the main API router gets
+/// in [`create_router_from_state`], so routers that join the daemon's HTTP
+/// surface after the fact — the MCP endpoints merged onto the API listener,
+/// the dashboard's own listener — apply the same DNS-rebinding defense.
+/// Returns `router` unchanged when the guard does not apply (see
+/// [`loopback_host_guard`]).
+pub fn apply_loopback_host_guard(router: Router, listen_addr: Option<SocketAddr>) -> Router {
+    match loopback_host_guard(listen_addr) {
+        Some(guard) => router.layer(middleware::from_fn_with_state(guard, enforce_loopback_host)),
         None => router,
     }
 }

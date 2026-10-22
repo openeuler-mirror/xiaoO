@@ -227,6 +227,11 @@ pub struct HttpConfig {
     pub bearer_token: Option<String>,
     #[serde(default)]
     pub bearer_token_env: Option<String>,
+    /// Extra origins, beyond loopback ones, that may call the daemon API
+    /// from a browser (for deployments fronted by a remote web UI). Loopback
+    /// origins are always allowed; empty by default.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
     #[serde(default)]
