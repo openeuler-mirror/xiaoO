@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 const LLM_SECRETS_FILE: &str = "llm_secrets.json";
@@ -19,6 +20,14 @@ pub struct SecretStoreMetadata {
     pub tokens: Vec<String>,
 }
 
+fn use_sdf_from_config_value(config_value: &toml::Value) -> bool {
+    config_value
+        .get("vault")
+        .and_then(|vault| vault.get("use_sdf"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 fn get_use_sdf_from_config(config_path: &Path) -> bool {
     let config_content = match fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -30,23 +39,74 @@ fn get_use_sdf_from_config(config_path: &Path) -> bool {
         Err(_) => return false,
     };
 
-    config_value
-        .get("vault")
-        .and_then(|vault| vault.get("use_sdf"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    use_sdf_from_config_value(&config_value)
 }
 
-pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Result<()> {
-    let secrets_path = llm_secrets_path(config_path);
-
+fn ensure_secrets_dir(secrets_path: &Path) -> Result<()> {
     if let Some(parent) = secrets_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create secrets directory {}", parent.display()))?;
     }
+    Ok(())
+}
+
+/// Advisory cross-process lock serializing read-modify-write cycles on the
+/// secrets store (auto-save / set-secret / delete-secret). The lock file is
+/// only ever used as an `flock` handle — its contents are never read or
+/// written. Held until dropped; the kernel releases it on process exit, so a
+/// crash cannot leave it stuck. Read-only paths (`inject`/`get`/`inspect`)
+/// skip the lock: the atomic rename in `save_encrypted_store` guarantees they
+/// observe either the old or the new complete file, never a torn one.
+struct StoreLock {
+    _file: File,
+}
+
+impl StoreLock {
+    fn acquire(secrets_path: &Path) -> Result<Self> {
+        let lock_path = lock_file_path(secrets_path);
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open secrets lock file {}", lock_path.display()))?;
+        let fd = file.as_raw_fd();
+        // SAFETY: `fd` is owned by `file` and stays open for as long as the
+        // lock is held; `flock` only manipulates the lock state of that fd.
+        let result = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("failed to acquire secrets lock {}", lock_path.display())
+            });
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+/// Build a hidden sibling of the secrets store in the same directory, so the
+/// resulting path (lock or temp file) always shares the store's filesystem.
+fn sibling_path(secrets_path: &Path, suffix: &str) -> PathBuf {
+    let file_name = secrets_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| LLM_SECRETS_FILE.to_string());
+    secrets_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".{file_name}{suffix}"))
+}
+
+fn lock_file_path(secrets_path: &Path) -> PathBuf {
+    sibling_path(secrets_path, ".lock")
+}
+
+pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Result<()> {
+    let secrets_path = llm_secrets_path(config_path);
+    ensure_secrets_dir(&secrets_path)?;
 
     let use_sdf = get_use_sdf_from_config(config_path);
 
+    let _guard = StoreLock::acquire(&secrets_path)?;
     let mut store = load_secrets_store(&secrets_path, use_sdf)?;
     store
         .api_keys
@@ -61,6 +121,7 @@ pub fn delete_llm_secret(config_path: &Path, env_name: &str) -> Result<bool> {
         return Ok(false);
     }
     let use_sdf = get_use_sdf_from_config(config_path);
+    let _guard = StoreLock::acquire(&secrets_path)?;
     let mut store = load_secrets_store(&secrets_path, use_sdf)?;
     let removed =
         store.api_keys.remove(env_name).is_some() | store.tokens.remove(env_name).is_some();
@@ -76,6 +137,10 @@ pub fn delete_llm_secret(config_path: &Path, env_name: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Persist an env-provided API key on first startup only: if the store
+/// already holds an entry for `llm.api_key_env` (saved via `set-secret` or
+/// the TUI popup), the env value is ignored so a lingering exported variable
+/// cannot silently roll an explicitly rotated key back.
 pub fn auto_save_from_env(config_path: &Path) -> Result<()> {
     let config_content = match fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -103,23 +168,69 @@ pub fn auto_save_from_env(config_path: &Path) -> Result<()> {
         Err(_) => return Ok(()),
     };
 
-    save_llm_secret(config_path, env_name, &api_key)?;
+    let secrets_path = llm_secrets_path(config_path);
+    ensure_secrets_dir(&secrets_path)?;
+
+    let use_sdf = use_sdf_from_config_value(&config_value);
+
+    // The existence check and the write must share one lock section, otherwise
+    // a concurrent `set-secret` between them could still be clobbered.
+    let _guard = StoreLock::acquire(&secrets_path)?;
+    let mut store = load_secrets_store(&secrets_path, use_sdf)?;
+    if store.api_keys.contains_key(env_name) || store.tokens.contains_key(env_name) {
+        tracing::debug!(
+            "secret for env {} already persisted; skipping env auto-save",
+            env_name
+        );
+        return Ok(());
+    }
+    store.api_keys.insert(env_name.to_string(), api_key);
+    save_encrypted_store(&secrets_path, &store, use_sdf)?;
 
     tracing::info!(
-        "auto saving API key from env {} to llm_secrets.json",
+        "auto saved API key from env {} to llm_secrets.json",
         env_name
     );
 
     Ok(())
 }
 
-fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
-    if !path.exists() {
-        return Ok(SecretsStore::default());
-    }
+/// Bootstrap LLM secrets for a startup path: persist a first-run API key from
+/// the environment, then load the whole store into the process environment.
+///
+/// The ordering is load-bearing and must not be inverted: injection
+/// overwrites the same env names from the store, so injecting first would
+/// mask the env-provided key and permanently block the first-run save.
+pub fn init_llm_secrets(config_path: &Path) -> Result<()> {
+    auto_save_from_env(config_path).with_context(|| {
+        format!(
+            "failed to auto-save LLM secrets from {}",
+            config_path.display()
+        )
+    })?;
+    inject_llm_secrets_into_env(config_path).with_context(|| {
+        format!(
+            "failed to initialize LLM secrets from {}",
+            config_path.display()
+        )
+    })
+}
 
-    let bytes = fs::read(path)
-        .with_context(|| format!("failed to read secrets file {}", path.display()))?;
+fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        // A missing store (never created, or removed by a concurrent
+        // `delete-secret` between the caller's check and this read) is an
+        // empty store, not an error: lock-free readers rely on this to
+        // survive benign races without failing startup.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SecretsStore::default())
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read secrets file {}", path.display()))
+        }
+    };
 
     let decrypted = if use_sdf {
         use vault::sdf::{decrypt_secret, init_sdf_provider, DEFAULT_SDF_LIBRARY_PATH};
@@ -135,6 +246,12 @@ fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
         .with_context(|| format!("failed to parse secrets file {}", path.display()))
 }
 
+/// Serialize and persist the store atomically: write to a sibling temp file
+/// with owner-only permissions, fsync it, then rename over the target. A
+/// crash or power loss mid-write can therefore never leave a truncated
+/// store behind (a torn file would fail every subsequent startup at decrypt
+/// time), and the rename can never downgrade the store file to the umask
+/// default. Callers must hold the store lock.
 fn save_encrypted_store(path: &Path, store: &SecretsStore, use_sdf: bool) -> Result<()> {
     let json = serde_json::to_vec(store).context("failed to serialize secrets")?;
 
@@ -148,10 +265,43 @@ fn save_encrypted_store(path: &Path, store: &SecretsStore, use_sdf: bool) -> Res
         encrypt_aes_gcm(&json)?
     };
 
-    fs::write(path, encrypted)
-        .with_context(|| format!("failed to write secrets file {}", path.display()))?;
-
+    let temp_path = temp_file_path(path);
+    if let Err(error) = write_secret_file(&temp_path, &encrypted) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to write secrets file {}", temp_path.display()));
+    }
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to persist secrets file {}", path.display()));
+    }
     Ok(())
+}
+
+/// Write `payload` to `path` with owner-only permissions and flush it to
+/// stable storage before returning, so the subsequent rename publishes a
+/// fully written file and never a umask-default mode. `mode()` only applies
+/// when the file is created, hence the unconditional `set_permissions`.
+fn write_secret_file(path: &Path, payload: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(payload)?;
+    file.sync_all()
+}
+
+/// Temp target for the atomic store write; same directory as the store so the
+/// final rename stays on one filesystem.
+fn temp_file_path(secrets_path: &Path) -> PathBuf {
+    sibling_path(secrets_path, &format!(".tmp.{}", std::process::id()))
 }
 
 fn encrypt_aes_gcm(plaintext: &[u8]) -> Result<Vec<u8>> {

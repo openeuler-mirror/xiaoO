@@ -490,8 +490,8 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
     xiaoo_shared::llm_secrets::save_llm_secret(config_path, env_name, secret)
 }
 
-pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
-    xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(config_path)
+pub fn init_llm_secrets(config_path: &Path) -> Result<()> {
+    xiaoo_shared::llm_secrets::init_llm_secrets(config_path)
 }
 
 fn default_agent_id() -> String {

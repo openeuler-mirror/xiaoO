@@ -78,12 +78,7 @@ where
 {
     let config_arg = parse_config_path_from(args)?;
     let config = load_tui_config(&config_arg)?;
-    config::inject_llm_secrets_into_env(&config_arg.path).with_context(|| {
-        format!(
-            "failed to initialize TUI secrets from {}",
-            config_arg.path.display()
-        )
-    })?;
+    config::init_llm_secrets(&config_arg.path)?;
     let mut config = config::require_tui_bootstrap_config(config, &config_arg.path)?;
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     config.load_runtime_mcp_servers(
