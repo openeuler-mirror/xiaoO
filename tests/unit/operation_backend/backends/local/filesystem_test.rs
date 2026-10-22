@@ -329,3 +329,195 @@ async fn exec_timeout_includes_creation_group_admission() {
         Some(0)
     );
 }
+
+#[cfg(unix)]
+fn blocking_pool_write_and_sync_creation(limit: usize, temp_file: bool) {
+    use std::future::Future;
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+    let temp = tempfile::tempdir().unwrap();
+    let backend = crate::local_backend(temp.path().to_path_buf(), None, None, None).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(limit)
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(async {
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let mut blockers = Vec::new();
+        for _ in 0..limit {
+            let release = Arc::clone(&release);
+            let (started, ready) = tokio::sync::oneshot::channel();
+            blockers.push(tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let (lock, changed) = &*release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                drop(released);
+                process_coordination::spawn_std_blocking(&mut std::process::Command::new(
+                    "/bin/true",
+                ))
+                .unwrap()
+                .wait()
+                .unwrap()
+            }));
+            ready.await.unwrap();
+        }
+        let mut write = Box::pin(async {
+            if temp_file {
+                backend
+                    .files()
+                    .temp_path(TempPathRequest {
+                        kind: TempPathKind::File,
+                        preferred_parent: Some(BackendPath::from_raw(
+                            temp.path().display().to_string(),
+                        )),
+                        prefix: Some("pool-temp".into()),
+                        suffix: None,
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                backend
+                    .files()
+                    .write_bytes(WriteBytesRequest {
+                        path: BackendPath::from_raw(
+                            temp.path().join("pool-write").display().to_string(),
+                        ),
+                        content: b"payload".to_vec(),
+                        mode: WriteMode::Create,
+                        extra: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+        std::future::poll_fn(|cx| {
+            assert!(write.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let (lock, changed) = &*release;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            write.await;
+            for blocker in blockers {
+                assert!(blocker.await.unwrap().success());
+            }
+        })
+        .await
+    });
+    runtime.shutdown_timeout(Duration::from_millis(200));
+    assert!(
+        result.is_ok(),
+        "write and synchronous creation must progress with {limit} blocking threads"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn single_blocking_thread_write_and_sync_creation_make_progress() {
+    blocking_pool_write_and_sync_creation(1, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn two_blocking_threads_write_and_sync_creation_make_progress() {
+    blocking_pool_write_and_sync_creation(2, false);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_expired_ready_admission_does_not_report_success() {
+    use agent_contracts::backend::capability::exec::ExecRequest;
+    use std::future::Future;
+    let temp = tempfile::tempdir().unwrap();
+    let backend = crate::local_backend(temp.path().to_path_buf(), None, None, None).unwrap();
+    let writer = process_coordination::write_permit().await;
+    let mut call = Box::pin(backend.exec().exec(ExecRequest {
+        command: "/bin/true".into(),
+        timeout_ms: Some(20),
+        ..Default::default()
+    }));
+    std::future::poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    drop(writer);
+    let result = call.await.unwrap();
+    assert!(result.timed_out);
+    assert_eq!(result.exit_code, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn single_blocking_thread_temp_file_and_sync_creation_make_progress() {
+    blocking_pool_write_and_sync_creation(1, true);
+}
+#[cfg(unix)]
+#[test]
+fn two_blocking_threads_temp_file_and_sync_creation_make_progress() {
+    blocking_pool_write_and_sync_creation(2, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelled_pool_queued_write_does_not_open_a_file() {
+    use std::future::Future;
+    use std::sync::{Condvar, Mutex};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cancelled-write");
+    let backend = crate::local_backend(temp.path().to_path_buf(), None, None, None).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking({
+            let release = Arc::clone(&release);
+            move || {
+                started.send(()).unwrap();
+                let (lock, changed) = &*release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+            }
+        });
+        ready.await.unwrap();
+        {
+            let mut write = Box::pin(backend.files().write_bytes(WriteBytesRequest {
+                path: BackendPath::from_raw(path.display().to_string()),
+                content: b"never".to_vec(),
+                mode: WriteMode::Create,
+                extra: None,
+            }));
+            std::future::poll_fn(|cx| {
+                assert!(write.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        let (lock, changed) = &*release;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+        blocker.await.unwrap();
+        // FIFO work queued behind the cancelled write confirms it was handled.
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+    });
+    runtime.shutdown_timeout(std::time::Duration::from_millis(200));
+    assert!(
+        !path.exists(),
+        "a cancelled queued operation must not open its target"
+    );
+}

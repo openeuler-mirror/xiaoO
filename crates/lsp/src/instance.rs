@@ -109,10 +109,15 @@ impl LspServerInstance {
             .ok_or_else(|| LspError::StartupFailed("binary path contains invalid UTF-8".into()))?
             .to_string();
 
-        let process = tokio::time::timeout(
-            std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS),
-            self.env
-                .spawn_process(&binary_str, &self.config.args, &self.root),
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS);
+        let process = process_coordination::with_deadline(
+            deadline,
+            tokio::time::timeout_at(
+                deadline,
+                self.env
+                    .spawn_process(&binary_str, &self.config.args, &self.root),
+            ),
         )
         .await
         .map_err(|_| LspError::StartupFailed("process spawn timed out".into()))??;

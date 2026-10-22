@@ -298,15 +298,26 @@ pub(crate) async fn run_plugin_subprocess<E>(
     // were driven outside it. `kill_on_drop(true)` on the `Child` ensures the
     // subprocess is reaped when this future is dropped on timeout, whether
     // the timeout fires during the stdin write or while awaiting stdout.
+    let deadline = timeout_ms.map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
     let run = async {
-        let mut child = process_coordination::spawn_tokio(&mut process_command)
-            .await
-            .map_err(|error| {
-                make_err(format!(
-                    "failed to spawn plugin command for hooker '{}' (command='{}'): {}",
-                    id.0, command, error
-                ))
-            })?;
+        let mut child =
+            process_coordination::spawn_tokio_with_deadline(&mut process_command, deadline)
+                .await
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::TimedOut {
+                        return make_timeout_err(
+                            format!(
+                                "plugin hooker '{}' command '{}' timed out before spawn",
+                                id.0, command
+                            ),
+                            timeout_ms.unwrap_or(0),
+                        );
+                    }
+                    make_err(format!(
+                        "failed to spawn plugin command for hooker '{}' (command='{}'): {}",
+                        id.0, command, error
+                    ))
+                })?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(&payload_bytes).await.map_err(|error| {

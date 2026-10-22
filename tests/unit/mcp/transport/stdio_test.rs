@@ -78,3 +78,29 @@ fn configured_env_is_applied_and_wins_over_the_allowlist() {
     // A configured entry must not duplicate a key inherited from the host.
     assert_eq!(env.iter().filter(|(key, _)| key == "PATH").count(), 1);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn expired_ready_admission_does_not_start_stdio_transport() {
+    use std::future::Future;
+    let writer = process_coordination::write_permit().await;
+    let args = Vec::new();
+    let environment = HashMap::new();
+    let mut call = Box::pin(super::StdioTransport::spawn(
+        "/bin/true",
+        &args,
+        &environment,
+        20,
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    drop(writer);
+    assert!(matches!(
+        call.await,
+        Err(crate::error::McpError::Timeout { timeout_ms: 20 })
+    ));
+}

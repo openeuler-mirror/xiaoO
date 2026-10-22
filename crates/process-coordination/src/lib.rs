@@ -10,8 +10,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Condvar, Mutex, OnceLock,
+};
 use std::task::{Context, Poll, Waker};
+use tokio::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Group {
@@ -159,11 +163,99 @@ fn global() -> &'static Coordinator {
     COORDINATOR.get_or_init(Coordinator::default)
 }
 
-/// Acquire before opening a writable executable descriptor. Move this guard
-/// into a blocking task when it owns the descriptor; cancelling its caller must
-/// not release the guard while blocking I/O still has the file open.
+/// Acquire only on an execution thread that can perform the write directly.
+/// Never enqueue work onto a runtime pool while holding this permit.
+/// Async filesystem operations should use [`write_blocking`] instead.
 pub async fn write_permit() -> Permit<'static> {
     Acquire(Some(global().request(Group::Write))).await
+}
+
+struct CancelWrite(Arc<AtomicBool>);
+
+impl Drop for CancelWrite {
+    fn drop(&mut self) {
+        // Pair cancellation with the same mutex as condvar wait, avoiding a
+        // lost wake between the worker's flag check and going to sleep.
+        let state = global().state.lock().unwrap();
+        self.0.store(true, Ordering::Release);
+        drop(state);
+        global().changed.notify_all();
+    }
+}
+
+/// Enqueue first; acquire the write group only after occupying a blocking
+/// worker. Cancellation before admission prevents the operation from starting.
+/// Once I/O starts the worker keeps the guard until every descriptor closes.
+pub async fn write_blocking<T: Send + 'static>(
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> Result<Option<T>, tokio::task::JoinError> {
+    let cancel = CancelWrite(Arc::new(AtomicBool::new(false)));
+    let cancelled = Arc::clone(&cancel.0);
+    let deadline = current_deadline();
+    tokio::task::spawn_blocking(move || {
+        let request = global().request(Group::Write);
+        let mut state = global().state.lock().unwrap();
+        loop {
+            if cancelled.load(Ordering::Acquire) || deadline.is_some_and(|d| Instant::now() >= d) {
+                drop(state);
+                drop(request);
+                return None;
+            }
+            if state.entries[&request.id].admitted {
+                break;
+            }
+            state = if let Some(deadline) = deadline {
+                global()
+                    .changed
+                    .wait_timeout(state, deadline.saturating_duration_since(Instant::now()))
+                    .unwrap()
+                    .0
+            } else {
+                global().changed.wait(state).unwrap()
+            };
+        }
+        drop(state);
+        let _permit = Permit { _request: request };
+        Some(operation())
+    })
+    .await
+}
+
+tokio::task_local! {
+    static DEADLINE: Instant;
+}
+
+/// Propagate an existing caller deadline through internal calls without
+/// changing filesystem capability traits or request envelopes. Nested scopes
+/// preserve the earlier deadline. This context is local to the polled task.
+pub async fn with_deadline<F: Future>(deadline: Instant, future: F) -> F::Output {
+    let deadline = current_deadline().map_or(deadline, |parent| parent.min(deadline));
+    DEADLINE.scope(deadline, future).await
+}
+
+pub fn current_deadline() -> Option<Instant> {
+    DEADLINE.try_with(|deadline| *deadline).ok()
+}
+
+fn expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+fn admission_timeout() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "process creation deadline elapsed before spawn",
+    )
+}
+
+async fn spawn_permit(deadline: Option<Instant>) -> std::io::Result<Permit<'static>> {
+    let request = Acquire(Some(global().request(Group::Spawn)));
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, request)
+            .await
+            .map_err(|_| admission_timeout()),
+        None => Ok(request.await),
+    }
 }
 
 // Synchronous application entry points run on the multi-thread application
@@ -193,18 +285,37 @@ pub fn write_permit_blocking() -> Permit<'static> {
     acquire_blocking(Group::Write)
 }
 
-/// Only the spawn call holds the permit; child I/O and wait happen afterwards.
+/// Only spawn holds the permit; the deadline is checked after admission and
+/// immediately before the system call, even if the outer timer was not polled.
 pub async fn spawn_tokio(
     command: &mut tokio::process::Command,
 ) -> std::io::Result<tokio::process::Child> {
-    let _permit = Acquire(Some(global().request(Group::Spawn))).await;
+    spawn_tokio_with_deadline(command, None).await
+}
+
+pub async fn spawn_tokio_with_deadline(
+    command: &mut tokio::process::Command,
+    deadline: Option<Instant>,
+) -> std::io::Result<tokio::process::Child> {
+    let deadline = match (deadline, current_deadline()) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let _permit = spawn_permit(deadline).await?;
+    if expired(deadline) {
+        return Err(admission_timeout());
+    }
     command.spawn()
 }
 
 pub async fn spawn_std(
     command: &mut std::process::Command,
 ) -> std::io::Result<std::process::Child> {
-    let _permit = Acquire(Some(global().request(Group::Spawn))).await;
+    let deadline = current_deadline();
+    let _permit = spawn_permit(deadline).await?;
+    if expired(deadline) {
+        return Err(admission_timeout());
+    }
     command.spawn()
 }
 
@@ -212,7 +323,11 @@ pub async fn spawn_std(
 pub fn spawn_std_blocking(
     command: &mut std::process::Command,
 ) -> std::io::Result<std::process::Child> {
+    let deadline = current_deadline();
     let _permit = acquire_blocking(Group::Spawn);
+    if expired(deadline) {
+        return Err(admission_timeout());
+    }
     command.spawn()
 }
 

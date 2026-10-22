@@ -344,14 +344,19 @@ impl LocalExec {
         stdin: std::process::Stdio,
     ) -> Result<Option<tokio::process::Child>, OperationError> {
         let Some(ms) = request.timeout_ms else {
-            return self.spawn_child(request, stdin).await.map(Some);
+            return self.spawn_child(request, stdin, None).await;
         };
         let start = tokio::time::Instant::now();
-        let result = timeout(Duration::from_millis(ms), self.spawn_child(request, stdin)).await;
+        let deadline = start + Duration::from_millis(ms);
+        let result = timeout(
+            Duration::from_millis(ms),
+            self.spawn_child(request, stdin, Some(deadline)),
+        )
+        .await;
         request.timeout_ms =
             Some(ms.saturating_sub(start.elapsed().as_millis().min(u64::MAX as u128) as u64));
         match result {
-            Ok(child) => child.map(Some),
+            Ok(child) => child,
             Err(_) => Ok(None),
         }
     }
@@ -362,7 +367,8 @@ impl LocalExec {
         &self,
         request: &ExecRequest,
         stdin: std::process::Stdio,
-    ) -> Result<tokio::process::Child, OperationError> {
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Option<tokio::process::Child>, OperationError> {
         let command_spec = build_command_spec(request)?;
         let command_cwd = if let Some(cwd) = request.cwd.as_ref() {
             let cwd = self._state.backend_path_to_host(cwd)?;
@@ -411,11 +417,13 @@ impl LocalExec {
         {
             command.process_group(0);
         }
-        process_coordination::spawn_tokio(&mut command)
-            .await
-            .map_err(|error| OperationError::ExecutionFailed {
+        match process_coordination::spawn_tokio_with_deadline(&mut command, deadline).await {
+            Ok(child) => Ok(Some(child)),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => Ok(None),
+            Err(error) => Err(OperationError::ExecutionFailed {
                 message: error.to_string(),
-            })
+            }),
+        }
     }
 
     /// Streaming execution for dyn-sandbox: the sandbox keeps the process alive

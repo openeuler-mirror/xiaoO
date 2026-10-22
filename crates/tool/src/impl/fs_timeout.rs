@@ -7,7 +7,7 @@
 //! contract shared by every backend implementation.
 
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 
 /// Default wall-clock budget for a single filesystem/search backend call.
 ///
@@ -27,7 +27,8 @@ where
     F: std::future::Future<Output = Result<T, E>>,
     E: std::fmt::Display,
 {
-    match timeout(Duration::from_millis(timeout_ms), fut).await {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    match process_coordination::with_deadline(deadline, timeout_at(deadline, fut)).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(err.to_string()),
         Err(_) => Err(format!("{} timed out after {}ms", label, timeout_ms)),

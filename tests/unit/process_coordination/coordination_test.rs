@@ -164,3 +164,77 @@ async fn synchronous_admission_yields_its_runtime_worker() {
     );
     writer.await.unwrap();
 }
+
+#[tokio::test]
+async fn cancelling_a_blocking_writer_waiter_prevents_its_operation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let permit = Acquire(Some(global().request(Group::Spawn))).await;
+    let executed = Arc::new(AtomicBool::new(false));
+    {
+        let mut future = Box::pin(write_blocking({
+            let executed = Arc::clone(&executed);
+            move || executed.store(true, Ordering::SeqCst)
+        }));
+        tokio::select! {
+            result = &mut future => panic!("writer must wait: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {},
+        }
+    }
+    drop(permit);
+    // A subsequent writer waits behind any still-unwinding cancelled request.
+    assert_eq!(write_blocking(|| 42).await.unwrap(), Some(42));
+    assert!(!executed.load(Ordering::SeqCst));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn expired_ready_admission_never_enters_the_child() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    let (mut observation, signal) = UnixStream::pair().unwrap();
+    observation.set_nonblocking(true).unwrap();
+    let descriptor = signal.as_raw_fd();
+    let mut command = tokio::process::Command::new("/bin/true");
+    unsafe {
+        command.pre_exec(move || {
+            // write(2) is async-signal-safe and proves fork happened even if the
+            // child is killed before exec or before creating a marker file.
+            libc::write(descriptor, b"x".as_ptr().cast(), 1);
+            Ok(())
+        });
+    }
+    let writer = write_permit().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+    let mut future = Box::pin(spawn_tokio_with_deadline(&mut command, Some(deadline)));
+    std::future::poll_fn(|cx| {
+        assert!(future.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    // The runtime is deliberately unable to poll its timer until both expiry
+    // and group admission are ready. An outer timeout alone polls inner first.
+    std::thread::sleep(Duration::from_millis(30));
+    drop(writer);
+    let error = future.await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    let mut byte = [0];
+    assert_eq!(
+        observation.read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    drop(signal);
+}
+
+#[tokio::test]
+async fn nested_deadline_scopes_preserve_the_earlier_deadline() {
+    let earlier = tokio::time::Instant::now() + Duration::from_millis(10);
+    with_deadline(earlier, async {
+        with_deadline(earlier + Duration::from_secs(5), async {
+            assert_eq!(current_deadline(), Some(earlier));
+        })
+        .await;
+    })
+    .await;
+    assert!(current_deadline().is_none());
+}

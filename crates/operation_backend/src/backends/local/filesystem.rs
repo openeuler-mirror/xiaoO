@@ -130,78 +130,81 @@ impl OperationFileSystem for LocalFileSystem {
         let mode = request.mode;
         let content = request.content;
         let returned_path = request.path;
-        let permit = process_coordination::write_permit().await;
-        tokio::task::spawn_blocking(move || -> Result<WriteBytesOutcome, OperationError> {
-            let _permit = permit;
-            state
-                .policy
-                .check_write(host_path.as_path(), "file_write")?;
-            let parent = host_path
-                .parent()
-                .ok_or_else(|| OperationError::InvalidPath {
-                    message: format!(
-                        "path does not have a parent directory: {}",
-                        host_path.display()
-                    ),
-                })?;
-            state.policy.check_write(parent, "file_write")?;
-            state.ensure_directory(parent)?;
-            let existed = host_path.exists();
+        process_coordination::write_blocking(
+            move || -> Result<WriteBytesOutcome, OperationError> {
+                state
+                    .policy
+                    .check_write(host_path.as_path(), "file_write")?;
+                let parent = host_path
+                    .parent()
+                    .ok_or_else(|| OperationError::InvalidPath {
+                        message: format!(
+                            "path does not have a parent directory: {}",
+                            host_path.display()
+                        ),
+                    })?;
+                state.policy.check_write(parent, "file_write")?;
+                state.ensure_directory(parent)?;
+                let existed = host_path.exists();
 
-            match mode {
-                WriteMode::Create => {
-                    let mut file = OpenOptions::new()
-                        .create_new(true)
-                        .write(true)
-                        .open(host_path.as_path())
-                        .map_err(|error| io_error_for_path(host_path.as_path(), error))?;
-                    file.write_all(content.as_slice()).map_err(|error| {
-                        OperationError::Transport {
-                            message: format!("{}: {error}", host_path.display()),
-                        }
-                    })?;
+                match mode {
+                    WriteMode::Create => {
+                        let mut file = OpenOptions::new()
+                            .create_new(true)
+                            .write(true)
+                            .open(host_path.as_path())
+                            .map_err(|error| io_error_for_path(host_path.as_path(), error))?;
+                        file.write_all(content.as_slice()).map_err(|error| {
+                            OperationError::Transport {
+                                message: format!("{}: {error}", host_path.display()),
+                            }
+                        })?;
+                    }
+                    WriteMode::Overwrite => {
+                        let mut file = OpenOptions::new()
+                            .create(true)
+                            .truncate(true)
+                            .write(true)
+                            .open(host_path.as_path())
+                            .map_err(|error| io_error_for_path(host_path.as_path(), error))?;
+                        file.write_all(content.as_slice()).map_err(|error| {
+                            OperationError::Transport {
+                                message: format!("{}: {error}", host_path.display()),
+                            }
+                        })?;
+                    }
+                    WriteMode::AtomicOverwrite => {
+                        let temp_path = atomic_write_temp_path(parent, host_path.as_path())?;
+                        state
+                            .policy
+                            .check_write(temp_path.as_path(), "file_write")?;
+                        let mut file = OpenOptions::new()
+                            .create_new(true)
+                            .write(true)
+                            .open(temp_path.as_path())
+                            .map_err(|error| io_error_for_path(temp_path.as_path(), error))?;
+                        file.write_all(content.as_slice()).map_err(|error| {
+                            OperationError::Transport {
+                                message: format!("{}: {error}", temp_path.display()),
+                            }
+                        })?;
+                        std::fs::rename(temp_path.as_path(), host_path.as_path())
+                            .map_err(|error| io_error_for_path(host_path.as_path(), error))?;
+                    }
                 }
-                WriteMode::Overwrite => {
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .truncate(true)
-                        .write(true)
-                        .open(host_path.as_path())
-                        .map_err(|error| io_error_for_path(host_path.as_path(), error))?;
-                    file.write_all(content.as_slice()).map_err(|error| {
-                        OperationError::Transport {
-                            message: format!("{}: {error}", host_path.display()),
-                        }
-                    })?;
-                }
-                WriteMode::AtomicOverwrite => {
-                    let temp_path = atomic_write_temp_path(parent, host_path.as_path())?;
-                    state
-                        .policy
-                        .check_write(temp_path.as_path(), "file_write")?;
-                    let mut file = OpenOptions::new()
-                        .create_new(true)
-                        .write(true)
-                        .open(temp_path.as_path())
-                        .map_err(|error| io_error_for_path(temp_path.as_path(), error))?;
-                    file.write_all(content.as_slice()).map_err(|error| {
-                        OperationError::Transport {
-                            message: format!("{}: {error}", temp_path.display()),
-                        }
-                    })?;
-                    std::fs::rename(temp_path.as_path(), host_path.as_path())
-                        .map_err(|error| io_error_for_path(host_path.as_path(), error))?;
-                }
-            }
 
-            Ok(WriteBytesOutcome {
-                path: returned_path,
-                created: !existed,
-            })
-        })
+                Ok(WriteBytesOutcome {
+                    path: returned_path,
+                    created: !existed,
+                })
+            },
+        )
         .await
         .map_err(|join_error| OperationError::Transport {
             message: format!("write_bytes blocking task panicked: {join_error}"),
+        })?
+        .ok_or_else(|| OperationError::Transport {
+            message: "write admission cancelled or deadline elapsed".into(),
         })?
     }
 
@@ -244,13 +247,7 @@ impl OperationFileSystem for LocalFileSystem {
         let prefix = request.prefix.unwrap_or_else(|| "tmp-".to_string());
         let suffix = request.suffix.unwrap_or_default();
         let kind = request.kind;
-        let permit = if matches!(kind, TempPathKind::File) {
-            Some(process_coordination::write_permit().await)
-        } else {
-            None
-        };
-        tokio::task::spawn_blocking(move || -> Result<BackendPath, OperationError> {
-            let _permit = permit;
+        let task = move || -> Result<BackendPath, OperationError> {
             state.policy.check_write(parent.as_path(), "temp_path")?;
             state.ensure_directory(parent.as_path())?;
 
@@ -272,11 +269,18 @@ impl OperationFileSystem for LocalFileSystem {
             }
 
             state.host_path_to_backend(generated.as_path())
-        })
-        .await
-        .map_err(|join_error| OperationError::Transport {
-            message: format!("temp_path blocking task panicked: {join_error}"),
-        })?
+        };
+        let result = match kind {
+            TempPathKind::File => process_coordination::write_blocking(task).await,
+            TempPathKind::Directory => tokio::task::spawn_blocking(move || Some(task())).await,
+        };
+        result
+            .map_err(|join_error| OperationError::Transport {
+                message: format!("temp_path blocking task panicked: {join_error}"),
+            })?
+            .ok_or_else(|| OperationError::Transport {
+                message: "temp file admission cancelled or deadline elapsed".into(),
+            })?
     }
 }
 

@@ -6,7 +6,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
-tokio = { workspace = true, features = ["process", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["process", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
+libc = "0.2"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

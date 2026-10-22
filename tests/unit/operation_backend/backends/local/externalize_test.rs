@@ -510,3 +510,47 @@ fn install_fake_dynsandbox() -> &'static std::path::PathBuf {
         root
     })
 }
+
+#[test]
+fn externalized_expired_ready_admission_does_not_create_subprocess() {
+    use std::future::Future;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let cli = write_stub_cli(temp.path());
+    let wrapper = write_dummy_wrapper(temp.path());
+    let fs = LocalFileSystem::new(state_with_source_config(&workspace));
+    let path = workspace.join("must-not-exist");
+    with_stub_cli(&cli, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let writer = process_coordination::write_permit().await;
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
+                let mut call = Box::pin(process_coordination::with_deadline(
+                    deadline,
+                    fs.write_bytes(WriteBytesRequest {
+                        path: BackendPath::from_raw(path.display().to_string()),
+                        content: b"payload".to_vec(),
+                        mode: WriteMode::Create,
+                        extra: Some(wrapper_extra(vec![wrapper.display().to_string()])),
+                    }),
+                ));
+                std::future::poll_fn(|cx| {
+                    assert!(call.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                drop(writer);
+                assert!(call
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("deadline elapsed before spawn"));
+            })
+    });
+    assert!(!path.exists());
+}

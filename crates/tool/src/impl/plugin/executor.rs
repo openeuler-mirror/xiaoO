@@ -198,16 +198,21 @@ impl DeclarativeToolExecutor {
 
         let deadline = tokio::time::Instant::now() + Duration::from_millis(self.timeout_ms);
         let mut child =
-            tokio::time::timeout_at(deadline, process_coordination::spawn_tokio(&mut command))
+            process_coordination::spawn_tokio_with_deadline(&mut command, Some(deadline))
                 .await
-                .map_err(|_| ToolExecutionError::Timeout {
-                    timeout_ms: self.timeout_ms,
-                })?
-                .map_err(|error| ToolExecutionError::ExecutionFailed {
-                    message: format!(
-                        "failed to spawn custom tool '{}': {error}",
-                        self.spec.name().0
-                    ),
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::TimedOut {
+                        ToolExecutionError::Timeout {
+                            timeout_ms: self.timeout_ms,
+                        }
+                    } else {
+                        ToolExecutionError::ExecutionFailed {
+                            message: format!(
+                                "failed to spawn custom tool '{}': {error}",
+                                self.spec.name().0
+                            ),
+                        }
+                    }
                 })?;
 
         if self.stdin_mode == StdinMode::Json {
