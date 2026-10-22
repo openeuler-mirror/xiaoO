@@ -1289,6 +1289,7 @@ dependencies = [
  "agent-contracts",
  "agent-types",
  "async-trait",
+ "process-coordination",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1860,6 +1861,8 @@ dependencies = [
  "agent-contracts",
  "agent-types",
  "async-trait",
+ "operation_backend",
+ "process-coordination",
  "serde",
  "serde_json",
  "tempfile",
@@ -1914,6 +1917,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures-util",
+ "process-coordination",
  "reqwest",
  "serde",
  "serde_json",
@@ -2251,6 +2255,7 @@ dependencies = [
  "base64",
  "glob",
  "libc",
+ "process-coordination",
  "regex",
  "serde",
  "serde_json",
@@ -2461,6 +2466,13 @@ name = "precomputed-hash"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
+
+[[package]]
+name = "process-coordination"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -3859,6 +3871,7 @@ dependencies = [
  "lsp",
  "mcp",
  "operation_backend",
+ "process-coordination",
  "regex",
  "reqwest",
  "rustls-native-certs",
@@ -4933,6 +4946,7 @@ dependencies = [
  "operation_backend",
  "parking_lot",
  "pbkdf2",
+ "process-coordination",
  "prompt",
  "protocol",
  "rand 0.8.7",

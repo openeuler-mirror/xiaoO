@@ -9,7 +9,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 
 use super::manifest::{LoadedDeclarativeTool, StdinMode, StdoutMode};
 use super::path_util::expand_tilde;
@@ -196,14 +196,19 @@ impl DeclarativeToolExecutor {
             }
         }
 
-        let mut child = command
-            .spawn()
-            .map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "failed to spawn custom tool '{}': {error}",
-                    self.spec.name().0
-                ),
-            })?;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(self.timeout_ms);
+        let mut child =
+            tokio::time::timeout_at(deadline, process_coordination::spawn_tokio(&mut command))
+                .await
+                .map_err(|_| ToolExecutionError::Timeout {
+                    timeout_ms: self.timeout_ms,
+                })?
+                .map_err(|error| ToolExecutionError::ExecutionFailed {
+                    message: format!(
+                        "failed to spawn custom tool '{}': {error}",
+                        self.spec.name().0
+                    ),
+                })?;
 
         if self.stdin_mode == StdinMode::Json {
             let payload = serde_json::to_vec(&self.stdin_payload(
@@ -225,20 +230,17 @@ impl DeclarativeToolExecutor {
             }
         }
 
-        let output = timeout(
-            Duration::from_millis(self.timeout_ms),
-            child.wait_with_output(),
-        )
-        .await
-        .map_err(|_| ToolExecutionError::Timeout {
-            timeout_ms: self.timeout_ms,
-        })?
-        .map_err(|error| ToolExecutionError::ExecutionFailed {
-            message: format!(
-                "failed to wait for custom tool '{}': {error}",
-                self.spec.name().0
-            ),
-        })?;
+        let output = tokio::time::timeout_at(deadline, child.wait_with_output())
+            .await
+            .map_err(|_| ToolExecutionError::Timeout {
+                timeout_ms: self.timeout_ms,
+            })?
+            .map_err(|error| ToolExecutionError::ExecutionFailed {
+                message: format!(
+                    "failed to wait for custom tool '{}': {error}",
+                    self.spec.name().0
+                ),
+            })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

@@ -102,8 +102,8 @@ pub(crate) async fn run_externalized(
         command.process_group(0);
     }
 
-    let mut child = command
-        .spawn()
+    let mut child = process_coordination::spawn_tokio(&mut command)
+        .await
         .map_err(|error| OperationError::ExecutionFailed {
             message: format!(
                 "failed to spawn externalized request ({} request --stdin): {error}",

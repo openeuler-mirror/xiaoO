@@ -76,7 +76,13 @@ impl StdioTransport {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd.spawn().map_err(|e| McpError::SpawnFailed {
+        let mut child = timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            process_coordination::spawn_tokio(&mut cmd),
+        )
+        .await
+        .map_err(|_| McpError::Timeout { timeout_ms })?
+        .map_err(|e| McpError::SpawnFailed {
             command: command.to_string(),
             error: e.to_string(),
         })?;

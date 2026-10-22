@@ -674,9 +674,14 @@ fn generate_title_from_prompt(prompt: &str) -> Option<String> {
 async fn handle_serve_command(port: u16, hostname: String) {
     eprintln!("Starting xiaoo daemon server on {}:{}", hostname, port);
     eprintln!("Use 'xiaoo-daemon' binary directly for full daemon functionality");
-    let status = std::process::Command::new("xiaoo-daemon")
-        .args(["--port", &port.to_string(), "--host", &hostname])
-        .status();
+    let status =
+        xiaoo_shared::process_support::status(std::process::Command::new("xiaoo-daemon").args([
+            "--port",
+            &port.to_string(),
+            "--host",
+            &hostname,
+        ]))
+        .await;
 
     match status {
         Ok(s) if s.success() => std::process::exit(0),

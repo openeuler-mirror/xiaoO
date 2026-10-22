@@ -19,6 +19,7 @@ members = [
     "crates/trace",
     "crates/trace/src/moirai",
     "crates/operation_backend",
+    "crates/process-coordination",
     "crates/lsp",
     "crates/mcp",
     "crates/xiaoo-api",

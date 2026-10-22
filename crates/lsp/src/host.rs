@@ -108,14 +108,15 @@ impl LspEnv for LocalLspEnv {
         args: &[String],
         cwd: &Path,
     ) -> Result<SpawnedProcess, LspError> {
-        let mut child = tokio::process::Command::new(cmd)
+        let mut command = tokio::process::Command::new(cmd);
+        command
             .args(args)
             .current_dir(cwd)
             .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
+            .stderr(std::process::Stdio::null());
+        let mut child = process_coordination::spawn_tokio(&mut command).await?;
 
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
@@ -126,3 +127,7 @@ impl LspEnv for LocalLspEnv {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/lsp/host_test.rs"]
+mod tests;

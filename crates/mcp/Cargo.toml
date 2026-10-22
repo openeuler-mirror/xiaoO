@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+process-coordination = { path = "../process-coordination" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

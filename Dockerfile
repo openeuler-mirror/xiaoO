@@ -57,6 +57,7 @@ COPY crates/lsp/Cargo.toml                crates/lsp/
 COPY crates/mcp/Cargo.toml                crates/mcp/
 COPY crates/memory/Cargo.toml            crates/memory/
 COPY crates/operation_backend/Cargo.toml  crates/operation_backend/
+COPY crates/process-coordination/Cargo.toml crates/process-coordination/
 COPY crates/prompt/Cargo.toml             crates/prompt/
 COPY crates/protocol/Cargo.toml           crates/protocol/
 COPY crates/skill/Cargo.toml              crates/skill/

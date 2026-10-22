@@ -16,6 +16,7 @@ test-support = []
 sysinfo = "0.31"
 
 [dependencies]
+process-coordination = { path = "../../crates/process-coordination" }
 toml = "0.8"
 anyhow.workspace = true
 async-trait.workspace = true

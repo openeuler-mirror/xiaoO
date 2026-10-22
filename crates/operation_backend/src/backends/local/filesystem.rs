@@ -130,7 +130,9 @@ impl OperationFileSystem for LocalFileSystem {
         let mode = request.mode;
         let content = request.content;
         let returned_path = request.path;
+        let permit = process_coordination::write_permit().await;
         tokio::task::spawn_blocking(move || -> Result<WriteBytesOutcome, OperationError> {
+            let _permit = permit;
             state
                 .policy
                 .check_write(host_path.as_path(), "file_write")?;
@@ -242,7 +244,13 @@ impl OperationFileSystem for LocalFileSystem {
         let prefix = request.prefix.unwrap_or_else(|| "tmp-".to_string());
         let suffix = request.suffix.unwrap_or_default();
         let kind = request.kind;
+        let permit = if matches!(kind, TempPathKind::File) {
+            Some(process_coordination::write_permit().await)
+        } else {
+            None
+        };
         tokio::task::spawn_blocking(move || -> Result<BackendPath, OperationError> {
+            let _permit = permit;
             state.policy.check_write(parent.as_path(), "temp_path")?;
             state.ensure_directory(parent.as_path())?;
 

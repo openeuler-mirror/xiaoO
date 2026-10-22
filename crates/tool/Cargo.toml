@@ -9,6 +9,7 @@ publish = false
 tool-cli = []
 
 [dependencies]
+process-coordination = { path = "../process-coordination" }
 hook = { path = "../hook" }
 agent-contracts = { path = "../agent-contracts" }
 agent-types = { path = "../agent-types" }

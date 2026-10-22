@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+process-coordination = { path = "../process-coordination" }
 agent-contracts = { path = "../agent-contracts" }
 agent-types = { path = "../agent-types" }
 async-trait.workspace = true

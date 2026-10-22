@@ -270,9 +270,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
     use std::process::{Command, Stdio};
     // Wayland: wl-copy
     if std::env::var("WAYLAND_DISPLAY").is_ok()
-        && Command::new("wl-copy")
-            .arg(text)
-            .output()
+        && xiaoo_shared::process_support::output_blocking(Command::new("wl-copy").arg(text))
             .ok()
             .map(|o| o.status.success())
             == Some(true)
@@ -281,11 +279,11 @@ pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
     }
     // X11: xclip (only if DISPLAY is set)
     if std::env::var("DISPLAY").is_ok() {
-        if let Ok(mut child) = Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(Stdio::piped())
-            .spawn()
-        {
+        if let Ok(mut child) = xiaoo_shared::process_support::spawn_std_blocking(
+            Command::new("xclip")
+                .args(["-selection", "clipboard"])
+                .stdin(Stdio::piped()),
+        ) {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin.write_all(text.as_bytes())?;
             }
@@ -294,11 +292,11 @@ pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
             }
         }
         // X11: xsel
-        if let Ok(mut child) = Command::new("xsel")
-            .args(["--clipboard", "--input"])
-            .stdin(Stdio::piped())
-            .spawn()
-        {
+        if let Ok(mut child) = xiaoo_shared::process_support::spawn_std_blocking(
+            Command::new("xsel")
+                .args(["--clipboard", "--input"])
+                .stdin(Stdio::piped()),
+        ) {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin.write_all(text.as_bytes())?;
             }
