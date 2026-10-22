@@ -5,6 +5,7 @@ use futures::StreamExt;
 
 use crate::convert::{parse_tool_arguments, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
 use crate::error::{map_api_status_error, map_reqwest_error, LlmError};
+use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::wire_types::{ParsedChunk, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{
@@ -187,6 +188,7 @@ impl LlmProvider for GeminiProvider {
         let mut final_usage = None;
         let mut final_stop_reason = StopReason::EndTurn;
 
+        let mut decoder = StreamUtf8Decoder::default();
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
 
@@ -203,7 +205,7 @@ impl LlmProvider for GeminiProvider {
                     message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
                 }
             })?;
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            decoder.push(&bytes, &mut buffer);
 
             while let Some(pos) = buffer.find('\n') {
                 let line = buffer[..pos].to_string();
@@ -278,6 +280,8 @@ impl LlmProvider for GeminiProvider {
                 on_chunk(parsed_chunk_to_stream_chunk(&parsed));
             }
         }
+
+        decoder.finish(&mut buffer);
 
         let tool_use_blocks: Vec<ToolUseBlock> = full_tool_calls
             .iter()

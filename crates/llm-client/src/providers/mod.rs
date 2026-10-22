@@ -2,6 +2,7 @@ mod anthropic;
 mod gemini;
 mod ollama;
 mod openai_family;
+mod stream_utf8;
 mod zhipu;
 
 pub(crate) use anthropic::AnthropicProvider;

@@ -11,6 +11,7 @@ use crate::convert::{
 use crate::error::{
     map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error, LlmError,
 };
+use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::url_fallback::{
     build_base_url_candidates, build_final_candidates, build_url_fallback_error_message,
     is_configuration_error, is_http_unauthorized_error, is_retryable_network_error,
@@ -233,6 +234,7 @@ impl OpenAiFamilyProvider {
         let mut final_finish_reason = None;
         let mut final_kv_transfer_params = None;
 
+        let mut decoder = StreamUtf8Decoder::default();
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
 
@@ -249,8 +251,7 @@ impl OpenAiFamilyProvider {
                     message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
                 }
             })?;
-            let text = String::from_utf8_lossy(&bytes);
-            buffer.push_str(&text);
+            decoder.push(&bytes, &mut buffer);
 
             // Cursor-based SSE scanning: find each '\n' without rebuilding
             // the buffer per line; drain the consumed prefix in place.
@@ -291,6 +292,8 @@ impl OpenAiFamilyProvider {
                 buffer.drain(..start);
             }
         }
+
+        decoder.finish(&mut buffer);
 
         let usage = final_usage
             .map(|u| wire_usage_to_usage(&u))
