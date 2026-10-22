@@ -162,6 +162,10 @@ fn encrypt_aes_gcm(plaintext: &[u8]) -> Result<Vec<u8>> {
     use rand::RngCore;
     use vault::WhiteBoxKeyProvider;
 
+    tracing::warn!(
+        "LLM secrets are being encrypted with the whitebox test-grade key \
+         (vault.use_sdf=false); configure SDF or HSM for production environments"
+    );
     let key_provider = WhiteBoxKeyProvider::new("default");
     let master_key = key_provider
         .get_key()
@@ -200,6 +204,10 @@ fn decrypt_aes_gcm(encrypted: &[u8]) -> Result<Vec<u8>> {
         bail!("unsupported encryption version: {}", version);
     }
 
+    tracing::warn!(
+        "LLM secrets are being decrypted with the whitebox test-grade key \
+         (vault.use_sdf=false); configure SDF or HSM for production environments"
+    );
     let key_provider = WhiteBoxKeyProvider::new("default");
     let master_key = key_provider
         .get_key()

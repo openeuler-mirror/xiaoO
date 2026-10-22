@@ -77,7 +77,7 @@ impl LspServerInstance {
         if let Err(e) = start {
             self.crash_count += 1;
             warn!(
-                server = self.config.id,
+                server = self.config.id.as_str(),
                 crash_count = self.crash_count,
                 "LSP server failed to start: {}",
                 e
@@ -85,7 +85,7 @@ impl LspServerInstance {
             return Err(e);
         }
         self.state = State::Running;
-        debug!(server = self.config.id, root = ?self.root, "LSP server started");
+        debug!(server = self.config.id.as_str(), root = ?self.root, "LSP server started");
         Ok(())
     }
 
@@ -112,7 +112,7 @@ impl LspServerInstance {
         let process = tokio::time::timeout(
             std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS),
             self.env
-                .spawn_process(&binary_str, self.config.args, &self.root),
+                .spawn_process(&binary_str, &self.config.args, &self.root),
         )
         .await
         .map_err(|_| LspError::StartupFailed("process spawn timed out".into()))??;

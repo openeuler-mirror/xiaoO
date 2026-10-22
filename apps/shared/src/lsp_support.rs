@@ -20,48 +20,21 @@ pub trait ExtraServerConfigView {
 }
 
 /// Convert user-supplied [`ExtraServerConfig`] entries to the lsp crate's
-/// [`ServerConfig`] format. Strings are leaked to produce `'static` slices,
-/// matching the format used by the built-in server table.
+/// [`ServerConfig`] format, cloning the strings into owned storage.
 pub fn build_extra_server_configs<T: ExtraServerConfigView>(
     extra_servers: &[T],
 ) -> Vec<ServerConfig> {
     extra_servers
         .iter()
-        .map(|c| {
-            let id: &'static str = Box::leak(c.id().to_string().into_boxed_str());
-            let command: &'static str = Box::leak(c.command().to_string().into_boxed_str());
-            let language_id: &'static str = Box::leak(c.language_id().to_string().into_boxed_str());
-            let extensions: &'static [&'static str] = Box::leak(
-                c.extensions()
-                    .iter()
-                    .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            let args: &'static [&'static str] = Box::leak(
-                c.args()
-                    .iter()
-                    .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            let root_markers: &'static [&'static str] = Box::leak(
-                c.root_markers()
-                    .iter()
-                    .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            ServerConfig {
-                id,
-                extensions,
-                command,
-                args,
-                root_markers,
-                language_id,
-                initialization_options: None,
-                auto_install: AutoInstall::None,
-            }
+        .map(|c| ServerConfig {
+            id: c.id().to_string(),
+            extensions: c.extensions().to_vec(),
+            command: c.command().to_string(),
+            args: c.args().to_vec(),
+            root_markers: c.root_markers().to_vec(),
+            language_id: c.language_id().to_string(),
+            initialization_options: None,
+            auto_install: AutoInstall::None,
         })
         .collect()
 }
@@ -198,7 +171,7 @@ async fn run_lsp_action<T: ExtraServerConfigView>(
             service.test_startup(server_id, workspace).await
         }
     };
-    let executable = find_executable(config.command);
+    let executable = find_executable(&config.command);
     LspActionReport {
         schema_version: 1,
         action,
@@ -257,29 +230,17 @@ fn server_summary(
     globally_enabled: bool,
     disabled: &HashSet<&str>,
 ) -> LspServerSummary {
-    let executable = find_executable(server.command);
+    let executable = find_executable(&server.command);
     let installed = executable.is_some();
-    let configured = globally_enabled && !disabled.contains(server.id);
+    let configured = globally_enabled && !disabled.contains(server.id.as_str());
     LspServerSummary {
-        id: server.id.to_string(),
+        id: server.id,
         source,
-        extensions: server
-            .extensions
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-        command: server.command.to_string(),
-        args: server
-            .args
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-        root_markers: server
-            .root_markers
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect(),
-        language_id: server.language_id.to_string(),
+        extensions: server.extensions.clone(),
+        command: server.command,
+        args: server.args.clone(),
+        root_markers: server.root_markers.clone(),
+        language_id: server.language_id,
         auto_install: auto_install_name(&server.auto_install),
         configured,
         installed,

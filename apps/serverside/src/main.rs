@@ -722,21 +722,19 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
         // dashboard server is started.
         if no_dashboard {
             tracing::info!("dashboard disabled by --no-dashboard");
+        } else if let Some(dash_addr) = spawn_dashboard_server(
+            &config,
+            dashboard_cli_host,
+            dashboard_cli_port,
+            session_store.clone(),
+            backend_manager.clone(),
+        )
+        .await?
+        {
+            tracing::info!(%dash_addr, "dashboard ready at http://{dash_addr}");
+            eprintln!("dashboard ready at http://{dash_addr}");
         } else {
-            if let Some(dash_addr) = spawn_dashboard_server(
-                &config,
-                dashboard_cli_host,
-                dashboard_cli_port,
-                session_store.clone(),
-                backend_manager.clone(),
-            )
-            .await?
-            {
-                tracing::info!(%dash_addr, "dashboard ready at http://{dash_addr}");
-                eprintln!("dashboard ready at http://{dash_addr}");
-            } else {
-                tracing::info!("dashboard disabled by config ([http.dashboard].enabled = false)");
-            }
+            tracing::info!("dashboard disabled by config ([http.dashboard].enabled = false)");
         }
 
         let listener = tokio::net::TcpListener::bind(listen_addr)

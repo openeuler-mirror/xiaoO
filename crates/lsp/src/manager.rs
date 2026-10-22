@@ -78,7 +78,7 @@ impl LspServerManager {
         &mut self,
         file: &Path,
         server_id: &str,
-        root_markers: &[&str],
+        root_markers: &[String],
     ) -> PathBuf {
         // Fast path: unexpired cache hit.
         if let Some(per_server) = self.root_cache.get(file) {
@@ -88,7 +88,8 @@ impl LspServerManager {
                 }
             }
         }
-        let root = find_root(file, root_markers, self.env.as_ref()).await;
+        let markers: Vec<&str> = root_markers.iter().map(String::as_str).collect();
+        let root = find_root(file, &markers, self.env.as_ref()).await;
         // Always cache the result. The previous "only cache if root !=
         // file.parent()" heuristic skipped the case where the marker is in
         // the file's direct parent (e.g. main.rs next to Cargo.toml),
@@ -117,17 +118,17 @@ impl LspServerManager {
 
         // Collect matching configs into an owned Vec so we don't hold a
         // borrow of `self.configs` across the `cached_find_root` await.
-        let matching: Vec<(&str, &[&str])> = self
+        let matching: Vec<(String, Vec<String>)> = self
             .configs
             .iter()
-            .filter(|c| c.extensions.contains(&ext.as_str()))
-            .map(|c| (c.id, c.root_markers))
+            .filter(|c| c.extensions.contains(&ext))
+            .map(|c| (c.id.clone(), c.root_markers.clone()))
             .collect();
 
         let mut keys: Vec<InstanceKey> = Vec::new();
         for (id, root_markers) in matching {
-            let root = self.cached_find_root(file, id, root_markers).await;
-            keys.push((id.to_string(), root));
+            let root = self.cached_find_root(file, &id, &root_markers).await;
+            keys.push((id, root));
         }
 
         if keys.is_empty() {
@@ -145,7 +146,7 @@ impl LspServerManager {
                 let config = self
                     .configs
                     .iter()
-                    .find(|c| c.id == id)
+                    .find(|c| c.id == *id)
                     .expect("config exists")
                     .clone();
                 self.instances.insert(
@@ -205,17 +206,17 @@ impl LspServerManager {
 
         // Collect matching configs into an owned Vec so we don't hold a
         // borrow of `self.configs` across the `cached_find_root` await.
-        let matching: Vec<(&str, &[&str])> = self
+        let matching: Vec<(String, Vec<String>)> = self
             .configs
             .iter()
-            .filter(|c| c.extensions.contains(&ext.as_str()))
-            .map(|c| (c.id, c.root_markers))
+            .filter(|c| c.extensions.contains(&ext))
+            .map(|c| (c.id.clone(), c.root_markers.clone()))
             .collect();
 
         let mut keys: Vec<InstanceKey> = Vec::new();
         for (id, root_markers) in matching {
-            let root = self.cached_find_root(file, id, root_markers).await;
-            keys.push((id.to_string(), root));
+            let root = self.cached_find_root(file, &id, &root_markers).await;
+            keys.push((id, root));
         }
 
         for key in &keys {
@@ -224,7 +225,7 @@ impl LspServerManager {
                 let config = self
                     .configs
                     .iter()
-                    .find(|c| c.id == id)
+                    .find(|c| c.id == *id)
                     .expect("config exists")
                     .clone();
                 self.instances.insert(
@@ -426,7 +427,7 @@ fn server_configs_with_disabled(
     let disabled_servers: HashSet<&str> = disabled_servers.iter().map(String::as_str).collect();
     let mut configs = extra_configs;
     configs.extend(builtin_servers());
-    configs.retain(|config| !disabled_servers.contains(config.id));
+    configs.retain(|config| !disabled_servers.contains(config.id.as_str()));
     configs
 }
 
