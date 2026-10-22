@@ -128,9 +128,11 @@ fn local_exec_state(workspace: &std::path::Path) -> Arc<LocalBackendState> {
 #[cfg(unix)]
 fn write_dummy_wrapper(dir: &std::path::Path) -> std::path::PathBuf {
     let wrapper = dir.join("dummy-wrapper.sh");
-    std::fs::write(
-        &wrapper,
-        concat!(
+    // A separate writer keeps this harness's concurrent forks from inheriting
+    // a writable script descriptor and making another test's exec fail ETXTBSY.
+    let status = std::process::Command::new("/bin/sh")
+        .args(["-c", "printf '%s' \"$1\" > \"$2\"", "write-wrapper"])
+        .arg(concat!(
             "#!/bin/sh\n",
             "printf '%s\\n' \"$@\" > \"$RECORD_FILE\"\n",
             "n=$#\n",
@@ -146,9 +148,11 @@ fn write_dummy_wrapper(dir: &std::path::Path) -> std::path::PathBuf {
             "  while [ $i -lt $skip ]; do shift; i=$((i+1)); done\n",
             "fi\n",
             "exec \"$@\"\n",
-        ),
-    )
-    .expect("write wrapper script");
+        ))
+        .arg(&wrapper)
+        .status()
+        .expect("run wrapper script writer");
+    assert!(status.success(), "write wrapper script");
     make_executable(&wrapper);
     wrapper
 }
@@ -269,6 +273,24 @@ fn dummy_wrapper_propagates_nonzero_exit_code() {
         Some(7),
         "exit code must propagate through the wrapper"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn dummy_wrappers_remain_executable_during_concurrent_spawns() {
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..256 {
+                let status = std::process::Command::new("true")
+                    .status()
+                    .expect("spawn concurrent command");
+                assert!(status.success());
+            }
+        });
+        for _ in 0..64 {
+            dummy_wrapper_propagates_nonzero_exit_code();
+        }
+    });
 }
 
 #[cfg(unix)]
