@@ -9,7 +9,9 @@ pub mod sse_sink;
 pub use channel_runtime::ChannelRuntimeProcessor;
 pub use dashboard::{dashboard_router, DashboardState};
 pub use router::{
+    apply_loopback_host_guard,
     create_router_with_channel_runtimes_control_plane_and_timeout_and_auth,
     create_router_with_control_plane_and_auth, ChannelRouterOptions, HttpBearerAuthConfig,
+    HttpSecurityPolicy,
 };
 pub use service::{GatewayService, GatewayServiceError};

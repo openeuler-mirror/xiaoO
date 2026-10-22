@@ -201,6 +201,31 @@ bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
 # bearer_token = "local-dev-token"   # Optional, use env var in production; do not set both
 ```
 
+#### Browser Access (CORS)
+
+The daemon answers browser callers with CORS headers only for **loopback
+origins** (`http://localhost:<any port>`, any address of the IPv4 loopback
+range 127.0.0.0/8 such as `http://127.0.0.1:<any port>`, and
+`http(s)://[::1]:<any port>`) — the local web UI runs on a local origin and
+calls the daemon API directly. Remote web pages get no CORS headers at all,
+so the browser refuses to expose daemon responses to them, and
+`Access-Control-Allow-Credentials` is never sent. When the daemon serves a
+loopback address it also rejects requests whose `Host` header does not name
+the listener, which blocks DNS-rebinding attacks. The same Host check covers
+the MCP endpoints merged onto the API listener and the dashboard listener.
+
+If you front the daemon with a web UI served from another origin, list it
+explicitly:
+
+```toml
+[http]
+allowed_origins = ["https://ui.example.com"]   # Optional; default: loopback origins only
+```
+
+> **Warning:** remote origins should be combined with
+> `[http].bearer_token` / `bearer_token_env`, since exposing the daemon
+> off-loopback already requires authentication.
+
 #### Rate Limiting
 
 ```toml

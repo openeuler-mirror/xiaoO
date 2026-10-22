@@ -48,6 +48,7 @@ pub fn config_schema() -> Value {
             section("http", "HTTP", "object", &[
                 field("bearer_token", "secret", false),
                 secret_field("bearer_token_env"),
+                field("allowed_origins", "string_array", false),
             ]),
             section("http.rate_limit", "HTTP 限流", "object", &[
                 field_default("enabled", "boolean", false, json!(true)),
