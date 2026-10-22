@@ -14,6 +14,10 @@
 #   4. 代码格式门禁    scripts/check-fmt.sh
 #      — cargo fmt --check：全部 workspace 源码排版须与 cargo fmt 一致，
 #        提交前在仓库根运行 cargo fmt 修复（见该脚本头注释）。
+#   5. Dockerfile COPY 覆盖门禁    scripts/check-dockerfile-copy-coverage.sh
+#      — COPY 源路径须存在、workspace 成员须全覆盖、plugins/ 与 hookers/
+#        引用须对应真实文件/目录（防 COPY 清单与 crate/插件目录漂移，见
+#        该脚本头注释）。
 #
 # 门禁不涉及编译：全量测试执行统一走 tests/run.sh（见 tests/README.md），
 # 不接入本脚本。
@@ -107,6 +111,7 @@ STEPS=(
     "tests-hygiene|bash scripts/check-tests-hygiene.sh"
     "文档门禁|bash scripts/check-docs.sh"
     "代码格式门禁|bash scripts/check-fmt.sh"
+    "Dockerfile COPY 覆盖门禁|bash scripts/check-dockerfile-copy-coverage.sh"
 )
 
 # ---- 执行 -------------------------------------------------------------------

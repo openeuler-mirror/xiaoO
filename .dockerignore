@@ -25,7 +25,7 @@ logs/
 # xiaoo runtime state (per-container, not baked in)
 .xiaoo/
 
-# Python dev artifacts (audit_agent source IS shipped; only these caches
+# Python dev artifacts (hooker source IS shipped; only these caches
 # and dev venvs are kept out of the build context)
 __pycache__/
 *.pyc
@@ -38,7 +38,6 @@ venv/
 **/.mimocode/
 
 # Generated / scratch files
-AUDIT_AGENT_REPLY.md
 create_ppt.py
 test.json
 *.tar.gz

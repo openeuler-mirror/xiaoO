@@ -53,17 +53,18 @@ COPY crates/compact/Cargo.toml            crates/compact/
 COPY crates/core/Cargo.toml               crates/core/
 COPY crates/hook/Cargo.toml               crates/hook/
 COPY crates/llm-client/Cargo.toml         crates/llm-client/
-COPY crates/llm-client-cli/Cargo.toml     crates/llm-client-cli/
 COPY crates/lsp/Cargo.toml                crates/lsp/
 COPY crates/mcp/Cargo.toml                crates/mcp/
 COPY crates/memory/Cargo.toml            crates/memory/
 COPY crates/operation_backend/Cargo.toml  crates/operation_backend/
 COPY crates/prompt/Cargo.toml             crates/prompt/
+COPY crates/protocol/Cargo.toml           crates/protocol/
 COPY crates/skill/Cargo.toml              crates/skill/
 COPY crates/subagent/Cargo.toml           crates/subagent/
 COPY crates/tool/Cargo.toml               crates/tool/
 COPY crates/trace/Cargo.toml              crates/trace/
 COPY crates/trace/src/moirai/Cargo.toml   crates/trace/src/moirai/
+COPY crates/xiaoo-api/Cargo.toml          crates/xiaoo-api/
 
 # Placeholder source files so cargo can resolve workspace metadata for
 # `cargo fetch` (some Cargo.toml files declare `[[bin]] path = ...`).
@@ -108,10 +109,29 @@ RUN mkdir -p /staging/usr/bin && \
 RUN mkdir -p /staging/usr/lib/.xiaoo/skills && \
     cp -a /build/plugins/skills/* /staging/usr/lib/.xiaoo/skills/
 
-# Hookers → /usr/lib/.xiaoo/hookers/.
-# chmod +x every install.sh / uninstall.sh (for xiaoo-hookers-install)
+# Hookers → /usr/lib/.xiaoo/hookers/. Three transformations:
+#   1) rm agent_moss/install.sh — its pip-venv + systemd service setup is
+#      host-oriented; containers point the bridge at an external AgentMoss
+#      service (AGENT_MOSS_URL/HOST/PORT) instead of installing one.
+#   2) rewrite agent_moss/plugin.json with an absolute-path command — the
+#      runtime spawns `sh -c <command>` from the daemon's cwd, so the repo's
+#      relative "python3 bridge.py" only works after the installer's path
+#      normalization; pre-normalizing makes the hooker usable as shipped.
+#      bridge.py is stdlib-only, so /usr/bin/python3 needs no venv. No
+#      "raw_command" is written: the runtime never reads it and the
+#      installer treats absolute commands as already normalized.
+#   3) chmod +x every install.sh / uninstall.sh (for xiaoo-hookers-install)
 RUN mkdir -p /staging/usr/lib/.xiaoo/hookers && \
     cp -a /build/plugins/hookers/* /staging/usr/lib/.xiaoo/hookers/ && \
+    rm -f /staging/usr/lib/.xiaoo/hookers/agent_moss/install.sh && \
+    printf '%s\n' \
+      '[' \
+      '  {' \
+      '    "id": "plugin_agent_moss_tool_input",' \
+      '    "hook_point": "*.Tool.*.pre",' \
+      '    "command": "/usr/bin/python3 /usr/lib/.xiaoo/hookers/agent_moss/bridge.py"' \
+      '  }' \
+      ']' > /staging/usr/lib/.xiaoo/hookers/agent_moss/plugin.json && \
     find /staging/usr/lib/.xiaoo/hookers \( -name install.sh -o -name uninstall.sh \) -exec chmod +x {} +
 
 # Docs → /usr/share/doc/xiaoO/ (README.md, README.zh-CN.md, docs/*.md)
@@ -131,8 +151,11 @@ FROM openeuler/openeuler:24.03-lts-sp3 AS runtime
 
 # Runtime deps via dnf. openEuler's container image enables OS / everything /
 # EPOL(main) / update by default, so all packages below resolve directly —
-# NO pip needed. Versions meet the apps' >= constraints (e.g. fastapi 0.115.12,
-# uvicorn 0.34.0, starlette 0.46.1).
+# NO pip needed. NOTE: the python3-openai / httpx / pydantic / tenacity /
+# fastapi / uvicorn / starlette set is a leftover from the removed
+# audit_agent / audit_dashboard; the shipped hooker scripts are stdlib-only
+# (python3 + python3-tomli suffice). Trimming the list is a known gap
+# tracked in docs/docker_deploy.md.
 RUN dnf install -y \
         ca-certificates \
         curl \
