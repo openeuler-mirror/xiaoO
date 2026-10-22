@@ -23,7 +23,9 @@ use crate::session_snapshot_service::{
 };
 use crate::theme::Theme;
 
-use super::utils::{line_prefix_width, sanitize_terminal_text};
+use super::utils::{
+    fit_popup_rect, fits_in_frame, line_prefix_width, sanitize_terminal_text, split_hint_row,
+};
 
 /// Flatten newlines and truncate `text` to fit within `max_width` terminal columns,
 /// appending "..." when truncated.
@@ -176,14 +178,7 @@ impl App {
         let available_height = area.height.saturating_sub(4).max(1).min(max_height);
         let desired_height = interaction_prompt_outer_height(&prompt.request, inner_width).max(6);
         let height = desired_height.min(available_height);
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let dialog_area = Rect {
-            x,
-            y,
-            width,
-            height,
-        };
+        let dialog_area = fit_popup_rect(area, width, height);
 
         render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         render_interaction_prompt(
@@ -223,14 +218,7 @@ impl App {
         let available_height = area.height.saturating_sub(4).max(1);
         let desired_height = (candidates.len() as u16 + 2).max(4);
         let height = desired_height.min(available_height);
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let dialog_area = Rect {
-            x,
-            y,
-            width,
-            height,
-        };
+        let dialog_area = fit_popup_rect(area, width, height);
 
         render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
@@ -251,21 +239,14 @@ impl App {
 
         let desired_height = (candidate_count as u16 + 2).max(3);
         let available_height = area.height.saturating_sub(4).max(1);
-        let height = desired_height.min(available_height).max(3);
+        let height = desired_height.min(available_height).max(3).min(area.height);
         let available_width = area.width.saturating_sub(4).max(1);
         let width = if available_width >= 32 {
             available_width.clamp(32, 80)
         } else {
             available_width
         };
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let dialog_area = Rect {
-            x,
-            y,
-            width,
-            height,
-        };
+        let dialog_area = fit_popup_rect(area, width, height);
 
         render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         self.render_file_mention_popup(
@@ -530,17 +511,7 @@ impl App {
         theme: &Theme,
         chat_state: &ChatState,
     ) {
-        // 窄/矮终端下弹窗不能超过可用区域，否则 ratatui 写 buffer 会越界 panic。
-        let dialog_width = area.width.clamp(60, 80).min(area.width);
-        let dialog_height = area.height.clamp(12, 20).min(area.height);
-        let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-        let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-        let dialog_area = Rect {
-            x: dialog_x,
-            y: dialog_y,
-            width: dialog_width,
-            height: dialog_height,
-        };
+        let dialog_area = fit_popup_rect(area, area.width.clamp(60, 80), area.height.clamp(12, 20));
 
         render_popup_backdrop(frame, dialog_area, area, theme.background);
         let dialog_block = Block::default()
@@ -724,17 +695,8 @@ impl App {
         area: Rect,
         dialog: &SandboxDialog,
     ) {
-        let dialog_width = area.width.clamp(48, 72);
         let visible = dialog.options.len() as u16;
-        let dialog_height = area.height.min(visible + 4).max(7);
-        let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-        let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-        let dialog_area = Rect {
-            x: dialog_x,
-            y: dialog_y,
-            width: dialog_width,
-            height: dialog_height,
-        };
+        let dialog_area = fit_popup_rect(area, area.width.clamp(48, 72), (visible + 4).max(7));
 
         render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         let block = Block::default()
@@ -747,18 +709,8 @@ impl App {
         let inner = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);
 
-        let list_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: inner.height.saturating_sub(1),
-        };
-        let hint_area = Rect {
-            x: inner.x,
-            y: inner.y + inner.height.saturating_sub(1),
-            width: inner.width,
-            height: 1,
-        };
+        // One decision drives both: when the hint is dropped, the list gets its row.
+        let (list_area, hint_area) = split_hint_row(inner);
 
         let name_width = dialog
             .options
@@ -791,9 +743,14 @@ impl App {
         list_state.select(Some(dialog.selected));
         frame.render_stateful_widget(List::new(items), list_area, &mut list_state);
 
-        let hint = Paragraph::new("↑↓ 选择  Enter 应用  Esc 取消")
-            .style(Style::default().fg(self.state.theme.muted));
-        frame.render_widget(hint, hint_area);
+        // The hint is the dialog's least important row: `split_hint_row` drops it
+        // (rather than painting it over the list) when the box shrank to a single
+        // row, and hands that row to the list.
+        if let Some(hint_area) = hint_area {
+            let hint = Paragraph::new("↑↓ 选择  Enter 应用  Esc 取消")
+                .style(Style::default().fg(self.state.theme.muted));
+            frame.render_widget(hint, hint_area);
+        }
     }
 
     pub(crate) fn render_remote_session_dialog(
@@ -802,20 +759,11 @@ impl App {
         area: Rect,
         dialog: &RemoteSessionDialog,
     ) {
-        let dialog_width = area.width.clamp(56, 92);
         let desired_height = match dialog.mode {
             RemoteSessionDialogMode::List => (dialog.entries.len() as u16 + 4).clamp(8, 22),
             RemoteSessionDialogMode::NewUrl => 9,
         };
-        let dialog_height = area.height.min(desired_height).max(8);
-        let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-        let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-        let dialog_area = Rect {
-            x: dialog_x,
-            y: dialog_y,
-            width: dialog_width,
-            height: dialog_height,
-        };
+        let dialog_area = fit_popup_rect(area, area.width.clamp(56, 92), desired_height);
 
         render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         let title = if dialog.switch_only {
@@ -835,18 +783,8 @@ impl App {
 
         match dialog.mode {
             RemoteSessionDialogMode::List => {
-                let list_area = Rect {
-                    x: inner.x,
-                    y: inner.y,
-                    width: inner.width,
-                    height: inner.height.saturating_sub(1),
-                };
-                let hint_area = Rect {
-                    x: inner.x,
-                    y: inner.y + inner.height.saturating_sub(1),
-                    width: inner.width,
-                    height: 1,
-                };
+                // One decision drives both: when the hint is dropped, the list gets its row.
+                let (list_area, hint_area) = split_hint_row(inner);
                 // In switch mode every row belongs to the same daemon, so
                 // drop the daemon column and show a session_id tail instead.
                 // Reserve 2 cols for the current-session marker (`* ` / `  `).
@@ -946,9 +884,14 @@ impl App {
                 } else {
                     "Enter 继续/新建  Esc 取消"
                 };
-                let hint =
-                    Paragraph::new(hint_text).style(Style::default().fg(self.state.theme.muted));
-                frame.render_widget(hint, hint_area);
+                // Drop the hint row before letting it overlap the list when the
+                // popup shrank to a single row -- `split_hint_row` also gives the
+                // freed row to the list.
+                if let Some(hint_area) = hint_area {
+                    let hint = Paragraph::new(hint_text)
+                        .style(Style::default().fg(self.state.theme.muted));
+                    frame.render_widget(hint, hint_area);
+                }
             }
             RemoteSessionDialogMode::NewUrl => {
                 let chunks = Layout::default()
@@ -1007,19 +950,10 @@ impl App {
         area: Rect,
         dialog: &SessionSnapshotDialog,
     ) {
-        let dialog_width = area.width.clamp(54, 96);
         let visible_manual = dialog.manual_entries.len().min(8) as u16;
         let visible_automatic = dialog.automatic_entries.len().min(8) as u16;
         let desired_height = (visible_manual + visible_automatic + 9).clamp(14, 30);
-        let dialog_height = area.height.min(desired_height).max(14);
-        let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-        let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-        let dialog_area = Rect {
-            x: dialog_x,
-            y: dialog_y,
-            width: dialog_width,
-            height: dialog_height,
-        };
+        let dialog_area = fit_popup_rect(area, area.width.clamp(54, 96), desired_height);
 
         render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         let block = Block::default()
@@ -1159,19 +1093,10 @@ impl App {
     ) {
         match dialog {
             DeleteDialog::Selecting { entries, selected } => {
-                let dialog_width = area.width.clamp(50, 80);
                 let max_visible = 8u16;
                 let visible = (entries.len() as u16).min(max_visible);
-                let desired_height = visible + 3;
-                let dialog_height = area.height.min(desired_height).max(6);
-                let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-                let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-                let dialog_area = Rect {
-                    x: dialog_x,
-                    y: dialog_y,
-                    width: dialog_width,
-                    height: dialog_height,
-                };
+                let dialog_area =
+                    fit_popup_rect(area, area.width.clamp(50, 80), (visible + 3).max(6));
 
                 render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
                 let block = Block::default()
@@ -1186,18 +1111,8 @@ impl App {
                 frame.render_widget(block, dialog_area);
 
                 // Separate list and hint areas to avoid overlap
-                let list_area = Rect {
-                    x: inner.x,
-                    y: inner.y,
-                    width: inner.width,
-                    height: inner.height.saturating_sub(1),
-                };
-                let hint_area = Rect {
-                    x: inner.x,
-                    y: inner.y + inner.height.saturating_sub(1),
-                    width: inner.width,
-                    height: 1,
-                };
+                // One decision drives both: when the hint is dropped, the list gets its row.
+                let (list_area, hint_area) = split_hint_row(inner);
 
                 let prefix_width = format!("{}. ", entries.len()).len() as u16;
                 let content_width = list_area.width.saturating_sub(prefix_width);
@@ -1229,24 +1144,23 @@ impl App {
                 let list = List::new(items);
                 frame.render_stateful_widget(list, list_area, &mut list_state);
 
-                let hint = Paragraph::new("↑↓ 选择  Enter 确认  Esc 取消")
-                    .style(Style::default().fg(self.state.theme.muted));
-                frame.render_widget(hint, hint_area);
+                // Same degradation as the other list popups: the hint row goes
+                // first when there is no room for both rows, and the list keeps it.
+                if let Some(hint_area) = hint_area {
+                    let hint = Paragraph::new("↑↓ 选择  Enter 确认  Esc 取消")
+                        .style(Style::default().fg(self.state.theme.muted));
+                    frame.render_widget(hint, hint_area);
+                }
             }
             DeleteDialog::Confirming {
                 turn,
                 subsequent_count,
             } => {
-                let dialog_width = area.width.clamp(36, 50);
-                let dialog_height = if *subsequent_count > 0 { 8 } else { 6 };
-                let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-                let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-                let dialog_area = Rect {
-                    x: dialog_x,
-                    y: dialog_y,
-                    width: dialog_width,
-                    height: dialog_height,
-                };
+                let dialog_area = fit_popup_rect(
+                    area,
+                    area.width.clamp(36, 50),
+                    if *subsequent_count > 0 { 8 } else { 6 },
+                );
 
                 render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
                 let block = Block::default()
@@ -1304,16 +1218,7 @@ impl App {
         area: Rect,
         dialog: &ApiKeyDialogState,
     ) {
-        let width = area.width.clamp(40, 56);
-        let height = 8u16;
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let rect = Rect {
-            x,
-            y,
-            width,
-            height,
-        };
+        let rect = fit_popup_rect(area, area.width.clamp(40, 56), 8);
 
         render_popup_backdrop(frame, rect, area, self.state.theme.background);
         let title = sanitize_terminal_text(&format!(
@@ -1378,16 +1283,24 @@ impl App {
         );
         frame.render_widget(input_paragraph, input_inner);
 
+        // The toggle is pinned by hand to the middle row of the input box, so
+        // it is the one area in this dialog that a collapsed `inner` does not
+        // bound: on a frame too short for the box the row lands past the frame
+        // and `Paragraph` would write out of bounds. Drop the button (and its
+        // click target) in that case.
         let toggle_area = Rect {
             x: row_chunks[1].x,
             y: row_chunks[1].y + 1,
             width: row_chunks[1].width,
             height: 1,
         };
-        let toggle_button =
-            Paragraph::new(toggle_label).style(Style::default().fg(self.state.theme.primary));
-        frame.render_widget(toggle_button, toggle_area);
-        self.state.render_state.api_key_toggle_area = Some(toggle_area);
+        self.state.render_state.api_key_toggle_area = None;
+        if fits_in_frame(area, toggle_area) {
+            let toggle_button =
+                Paragraph::new(toggle_label).style(Style::default().fg(self.state.theme.primary));
+            frame.render_widget(toggle_button, toggle_area);
+            self.state.render_state.api_key_toggle_area = Some(toggle_area);
+        }
 
         let cursor_offset = if dialog.show_plaintext {
             dialog.input.visual_cursor() as u16

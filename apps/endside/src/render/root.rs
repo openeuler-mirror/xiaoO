@@ -215,16 +215,11 @@ impl App {
 
         match &dialog.mode {
             CronDialogMode::List => {
-                let dialog_width = (area.width * 3 / 4).clamp(40, 80);
-                let dialog_height = (area.height * 3 / 4).clamp(10, 24);
-                let x = (area.width.saturating_sub(dialog_width)) / 2;
-                let y = (area.height.saturating_sub(dialog_height)) / 2;
-                let dialog_area = Rect {
-                    x,
-                    y,
-                    width: dialog_width,
-                    height: dialog_height,
-                };
+                let dialog_area = super::utils::fit_popup_rect(
+                    area,
+                    (area.width * 3 / 4).clamp(40, 80),
+                    (area.height * 3 / 4).clamp(10, 24),
+                );
                 frame.render_widget(Clear, dialog_area);
 
                 let title = if dialog.cron_section_present {
@@ -294,16 +289,8 @@ impl App {
 
             CronDialogMode::ConfirmDelete { job_index } => {
                 if let Some(job) = dialog.jobs.get(*job_index) {
-                    let dialog_width = 60.min(area.width.saturating_sub(4));
-                    let dialog_height = 6;
-                    let x = (area.width.saturating_sub(dialog_width)) / 2;
-                    let y = (area.height.saturating_sub(dialog_height)) / 2;
-                    let dialog_area = Rect {
-                        x,
-                        y,
-                        width: dialog_width,
-                        height: dialog_height,
-                    };
+                    let dialog_area =
+                        super::utils::fit_popup_rect(area, 60.min(area.width.saturating_sub(4)), 6);
                     frame.render_widget(Clear, dialog_area);
 
                     let block = Block::default()
@@ -335,16 +322,11 @@ impl App {
             CronDialogMode::EditForm {
                 form, focus, error, ..
             } => {
-                let dialog_width = 70.min(area.width.saturating_sub(4));
-                let dialog_height = (area.height.saturating_sub(2)).clamp(3, 22);
-                let x = (area.width.saturating_sub(dialog_width)) / 2;
-                let y = (area.height.saturating_sub(dialog_height)) / 2;
-                let dialog_area = Rect {
-                    x,
-                    y,
-                    width: dialog_width,
-                    height: dialog_height,
-                };
+                let dialog_area = super::utils::fit_popup_rect(
+                    area,
+                    70.min(area.width.saturating_sub(4)),
+                    (area.height.saturating_sub(2)).clamp(3, 22),
+                );
                 frame.render_widget(Clear, dialog_area);
 
                 let title = " Edit Cron Job — Tab:next field  Enter:save  Esc:cancel ";
@@ -443,10 +425,20 @@ impl App {
     }
 
     fn render_copy_toast(&self, frame: &mut Frame, area: Rect, message: &str) {
-        let width = message.chars().count() as u16;
+        // A toast lives one row tall in the bottom-right corner. Both the text
+        // width and the row are clamped to the frame: `Paragraph` does not clip
+        // to the buffer, so an over-wide toast on a narrow terminal is the same
+        // out-of-bounds write as an over-wide dialog.
+        if area.is_empty() {
+            return;
+        }
+        let width = (message.chars().count() as u16).min(area.width);
         // Float in the bottom-right corner, just above the 3-row status bar.
         let x = area.x.saturating_add(area.width).saturating_sub(width + 1);
-        let y = area.y.saturating_add(area.height).saturating_sub(4);
+        let y = area
+            .y
+            .saturating_add(area.height.saturating_sub(4))
+            .min(area.y.saturating_add(area.height.saturating_sub(1)));
         let toast_area = Rect {
             x,
             y,

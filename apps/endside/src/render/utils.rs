@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 
+use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 use crate::input::{Input, InputRequest};
@@ -171,6 +172,91 @@ pub(crate) fn find_substring_from(haystack: &str, needle: &str, start: usize) ->
         .map_or(haystack.len(), |(b, _)| b);
     let byte_pos = haystack[start_byte..].find(needle)?;
     Some(haystack[..start_byte + byte_pos].chars().count())
+}
+
+/// Fit a popup of the preferred `width` x `height` into `bounds`, centred,
+/// never exceeding `bounds`.
+///
+/// Popup geometry is written as a preferred size — `area.width.clamp(min,
+/// max)` — and then centred in the frame. The clamp's *lower* bound is what
+/// makes a narrow or short terminal dangerous: the popup claims more columns
+/// or rows than the frame has, so `x + width` / `y + height` reach past the
+/// buffer.
+///
+/// `Block` and `List` survive an oversized rect because they intersect it with
+/// the buffer before writing (`Buffer::set_style` does the same). `Clear` and
+/// `Paragraph` do not: `Clear::render_ref` iterates `buf[(x, y)]` over the raw
+/// area, and `Paragraph::render_text` writes one cell per grapheme at
+/// `buf[(area.left() + x, area.top() + y)]`. Both go through
+/// `Buffer::index_of`, which panics once the index falls outside the frame —
+/// the narrow-terminal crash this helper exists to prevent.
+///
+/// This is the one place that turns a *preferred* size into a rect, so a new
+/// renderer cannot forget the clamp: build the preferred size, hand it here, and
+/// every area derived from the result (block inner, `Layout` chunks, hand-built
+/// hint rows) stays inside the frame. `Rect::clamp` in ratatui does the same
+/// clamp-and-move for an already-built rect; this helper additionally *centres*
+/// before clamping, which is what every popup here wants, so the two stay split:
+/// `Rect::clamp` would be worth reaching for if a caller ever wants a popup that
+/// is not centred.
+///
+/// Clamping the popup rect to the frame here keeps every area derived from it
+/// (block inner, `Layout` chunks, hint rows) inside the frame, so a narrow or
+/// short terminal shrinks the dialog instead of crashing the TUI.
+pub(crate) fn fit_popup_rect(bounds: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(bounds.width);
+    let height = height.min(bounds.height);
+    Rect {
+        x: bounds.x + (bounds.width.saturating_sub(width)) / 2,
+        y: bounds.y + (bounds.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+/// Whether `area` is non-empty and fully inside `frame`.
+///
+/// Areas derived from a clamped popup rect satisfy this by construction
+/// (`Layout` splits stay inside their input, `Block::inner` shrinks to nothing
+/// when the box is too small). Rows a renderer *builds by hand* — a hint pinned
+/// to the last row of the box, a button pinned to a row of an input chunk — do
+/// not: when the popup has shrunk to one or two rows the block inner collapses
+/// to height 0 while such a row keeps `height: 1`, landing one row below the
+/// dialog and outside the frame. Since `Clear`/`Paragraph` do not clip, those
+/// rows must be checked before rendering.
+pub(crate) fn fits_in_frame(frame: Rect, area: Rect) -> bool {
+    !area.is_empty()
+        && area.x >= frame.x
+        && area.y >= frame.y
+        && area.right() <= frame.right()
+        && area.bottom() <= frame.bottom()
+}
+
+/// Split a popup's inner area into the list body and the optional hint row.
+///
+/// The hint is the least important row, so a box that shrank to a single row
+/// drops it -- and the row it would have occupied goes back to the list instead
+/// of being left blank. Deciding both things in one place is the point: when the
+/// gate and the reserved row were computed separately, a 3-row terminal produced
+/// `inner.height - 1 == 0` list rows while the hint was gated off, i.e. a
+/// border-only popup whose entries were still selectable with the keyboard but
+/// invisible on screen.
+///
+/// `None` means "do not draw a hint" and the list owns the whole inner area.
+pub(crate) fn split_hint_row(inner: Rect) -> (Rect, Option<Rect>) {
+    if inner.height < 2 {
+        return (inner, None);
+    }
+    let list = Rect {
+        height: inner.height - 1,
+        ..inner
+    };
+    let hint = Rect {
+        y: inner.y + inner.height - 1,
+        height: 1,
+        ..inner
+    };
+    (list, Some(hint))
 }
 
 #[cfg(test)]
