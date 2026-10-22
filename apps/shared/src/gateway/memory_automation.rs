@@ -361,46 +361,52 @@ impl DurableIngestQueue {
         }
     }
     async fn acquire_lock(&self) -> Result<DurableQueueLock, MemoryAutomationError> {
-        // An active ingest owns this queue until it commits. Wait for that
-        // transaction before starting the timeout for other queue handles.
-        let transaction = Arc::clone(&self.transaction).lock_owned().await;
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let lock_path = self.path.with_extension("lock");
+        // The budget includes waiting behind this instance's active ingest,
+        // filesystem setup and contention with independent queue handles.
         let deadline = tokio::time::Instant::now() + lock_wait_timeout();
-        loop {
-            let attempt_path = lock_path.clone();
-            let attempt =
-                tokio::task::spawn_blocking(move || -> Result<_, MemoryAutomationError> {
-                    let mut file = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(attempt_path)?;
-                    if !try_lock_file(&file)? {
-                        return Ok(None);
-                    }
-                    file.set_len(0)?;
-                    writeln!(file, "pid={}", std::process::id())?;
-                    Ok(Some(file))
-                })
-                .await
-                .map_err(|error| {
-                    MemoryAutomationError::Config(format!("memory queue lock task failed: {error}"))
-                })??;
-            if let Some(file) = attempt {
-                return Ok(DurableQueueLock {
-                    file,
-                    _transaction: transaction,
-                });
+        tokio::time::timeout_at(deadline, async {
+            let transaction = Arc::clone(&self.transaction).lock_owned().await;
+            if let Some(parent) = self.path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(MemoryAutomationError::QueueLocked);
+            let lock_path = self.path.with_extension("lock");
+            loop {
+                let attempt_path = lock_path.clone();
+                let attempt =
+                    tokio::task::spawn_blocking(move || -> Result<_, MemoryAutomationError> {
+                        let mut file = OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .truncate(false)
+                            .open(attempt_path)?;
+                        if !try_lock_file(&file)? {
+                            return Ok(None);
+                        }
+                        file.set_len(0)?;
+                        writeln!(file, "pid={}", std::process::id())?;
+                        Ok(Some(file))
+                    })
+                    .await
+                    .map_err(|error| {
+                        MemoryAutomationError::Config(format!(
+                            "memory queue lock task failed: {error}"
+                        ))
+                    })??;
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(MemoryAutomationError::QueueLocked);
+                }
+                if let Some(file) = attempt {
+                    return Ok(DurableQueueLock {
+                        file,
+                        _transaction: transaction,
+                    });
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        })
+        .await
+        .map_err(|_| MemoryAutomationError::QueueLocked)?
     }
     async fn persist(&self, entries: &[CompletedTurnIngest]) -> Result<(), MemoryAutomationError> {
         if let Some(parent) = self.path.parent() {

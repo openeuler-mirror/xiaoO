@@ -388,7 +388,8 @@ async fn concurrent_drainers_do_not_reclaim_slow_ingest() {
         let queue = Arc::clone(&queue);
         let server_calls = Arc::clone(&server_calls);
         tokio::spawn(async move {
-            queue
+            let started = tokio::time::Instant::now();
+            let result = queue
                 .drain_due(5, 1, 3_000, move |_entry| {
                     let server_calls = Arc::clone(&server_calls);
                     async move {
@@ -396,7 +397,14 @@ async fn concurrent_drainers_do_not_reclaim_slow_ingest() {
                         Ok(())
                     }
                 })
-                .await
+                .await;
+            match result {
+                Ok(()) => {}
+                Err(MemoryAutomationError::QueueLocked) => {
+                    assert!(started.elapsed() >= Duration::from_millis(200))
+                }
+                Err(error) => panic!("unexpected queue error: {error}"),
+            }
         })
     };
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -406,15 +414,18 @@ async fn concurrent_drainers_do_not_reclaim_slow_ingest() {
 
     release_first.notify_one();
     drain_a.await.unwrap().unwrap();
-    drain_b.await.unwrap().unwrap();
+    drain_b.await.unwrap();
 
     assert_eq!(server_calls.load(Ordering::SeqCst), 1);
     let restarted = DurableIngestQueue::open(path, 4).await.unwrap();
     assert_eq!(drain_count(&restarted, 0).await, 0);
 }
 
-#[tokio::test]
-async fn same_queue_waits_for_its_active_ingest() {
+async fn queue_with_stalled_ingest() -> (
+    Arc<DurableIngestQueue>,
+    tokio::task::JoinHandle<Result<(), MemoryAutomationError>>,
+    tempfile::TempDir,
+) {
     let temp = tempfile::tempdir().unwrap();
     let queue = Arc::new(
         DurableIngestQueue::open(temp.path().join("queue.jsonl"), 4)
@@ -426,56 +437,69 @@ async fn same_queue_waits_for_its_active_ingest() {
         .await
         .unwrap();
     let started = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let calls = Arc::new(AtomicUsize::new(0));
     let first = tokio::spawn({
         let queue = Arc::clone(&queue);
         let started = Arc::clone(&started);
-        let release = Arc::clone(&release);
-        let calls = Arc::clone(&calls);
         async move {
             queue
                 .drain_due(5, 1, 1_000, move |_| {
                     let started = Arc::clone(&started);
-                    let release = Arc::clone(&release);
-                    let calls = Arc::clone(&calls);
                     async move {
-                        calls.fetch_add(1, Ordering::SeqCst);
                         started.notify_one();
-                        release.notified().await;
-                        Ok(())
+                        std::future::pending::<Result<(), MemoryAutomationError>>().await
                     }
                 })
                 .await
         }
     });
     started.notified().await;
-    let second = tokio::spawn({
-        let queue = Arc::clone(&queue);
-        let calls = Arc::clone(&calls);
-        async move {
-            queue
-                .drain_due(5, 1, 3_000, move |_| {
-                    let calls = Arc::clone(&calls);
-                    async move {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
-                    }
-                })
-                .await
+    (queue, first, temp)
+}
+
+#[tokio::test]
+async fn stalled_same_queue_holder_exhausts_the_original_budget() {
+    let (queue, first, _temp) = queue_with_stalled_ingest().await;
+    let start = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        queue.enqueue(ingest_fixture("one", "hello", "reply")),
+    )
+    .await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let result = result.expect("same-instance wait must be bounded by the queue budget");
+    assert!(matches!(result, Err(MemoryAutomationError::QueueLocked)));
+    assert!(start.elapsed() >= Duration::from_millis(200));
+    assert_eq!(drain_count(&queue, 4_000).await, 1);
+}
+
+#[tokio::test]
+async fn cancelled_same_queue_waiter_does_not_block_the_next_transaction() {
+    let (queue, first, _temp) = queue_with_stalled_ingest().await;
+    let cancelled = {
+        let wait = queue.enqueue(ingest_fixture("one", "hello", "reply"));
+        tokio::pin!(wait);
+        tokio::select! {
+            _ = &mut wait => panic!("holder is still active"),
+            _ = tokio::time::sleep(Duration::from_millis(10)) => true,
         }
-    });
-    // Exceed the file-lock contention timeout while this queue owns the lock.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let was_pending = !second.is_finished();
-    release.notify_one();
-    first.await.unwrap().unwrap();
-    let result = second.await.unwrap();
-    assert!(
-        was_pending,
-        "a transaction on the same queue must wait for its owner"
-    );
-    result.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(drain_count(&queue, 4_000).await, 0);
+    };
+    assert!(cancelled);
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert_eq!(drain_count(&queue, 4_000).await, 1);
+}
+
+#[tokio::test]
+async fn timed_out_same_queue_waiter_can_be_followed_by_a_successful_waiter() {
+    let (queue, first, _temp) = queue_with_stalled_ingest().await;
+    let result = tokio::time::timeout(
+        Duration::from_millis(10),
+        queue.enqueue(ingest_fixture("one", "hello", "reply")),
+    )
+    .await;
+    assert!(result.is_err());
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert_eq!(drain_count(&queue, 4_000).await, 1);
 }
