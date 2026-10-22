@@ -71,7 +71,7 @@ fn make_executable(path: &std::path::Path) {
 /// execs everything after a `--` separator (or everything when absent).
 fn write_dummy_wrapper(dir: &std::path::Path) -> std::path::PathBuf {
     let wrapper = dir.join("dummy-wrapper.sh");
-    std::fs::write(
+    crate::test_support::write_script(
         &wrapper,
         concat!(
             "#!/bin/sh\n",
@@ -91,8 +91,7 @@ fn write_dummy_wrapper(dir: &std::path::Path) -> std::path::PathBuf {
             "fi\n",
             "exec \"$@\"\n",
         ),
-    )
-    .expect("write wrapper script");
+    );
     make_executable(&wrapper);
     wrapper
 }
@@ -101,7 +100,7 @@ fn write_dummy_wrapper(dir: &std::path::Path) -> std::path::PathBuf {
 /// then executes the request like the real CLI and prints the result JSON.
 fn write_stub_cli(dir: &std::path::Path) -> std::path::PathBuf {
     let cli = dir.join("xiaoo-backend-cli");
-    std::fs::write(
+    crate::test_support::write_script(
         &cli,
         concat!(
             "#!/usr/bin/env python3\n",
@@ -128,8 +127,7 @@ fn write_stub_cli(dir: &std::path::Path) -> std::path::PathBuf {
             "    print(json.dumps({'error': 'unsupported'}))\n",
             "    sys.exit(3)\n",
         ),
-    )
-    .expect("write stub cli script");
+    );
     make_executable(&cli);
     cli
 }
@@ -248,11 +246,10 @@ fn externalized_request_error_fails_loud() {
     std::fs::create_dir_all(&workspace).unwrap();
     // A CLI that always fails with a stderr message.
     let cli = temp.path().join("xiaoo-backend-cli");
-    std::fs::write(
+    crate::test_support::write_script(
         &cli,
         "#!/bin/sh\ncat > /dev/null\necho 'policy denied the write' >&2\nexit 4\n",
-    )
-    .unwrap();
+    );
     make_executable(&cli);
     let wrapper = write_dummy_wrapper(temp.path());
 
@@ -359,7 +356,7 @@ fn externalized_write_timeout_kills_subprocess() {
     // A wrapper that hangs forever; the caller's timeout must kill the
     // whole process group.
     let wrapper = temp.path().join("hang-wrapper.sh");
-    std::fs::write(&wrapper, "#!/bin/sh\nsleep 300\n").unwrap();
+    crate::test_support::write_script(&wrapper, "#!/bin/sh\nsleep 300\n");
     make_executable(&wrapper);
     let cli = write_stub_cli(temp.path());
 
@@ -501,7 +498,7 @@ fn install_fake_dynsandbox() -> &'static std::path::PathBuf {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let bin = root.join("dyn-sandbox");
-        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        crate::test_support::write_script(&bin, "#!/bin/sh\nexit 0\n");
         make_executable(&bin);
         let mut paths = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
             .collect::<Vec<_>>();

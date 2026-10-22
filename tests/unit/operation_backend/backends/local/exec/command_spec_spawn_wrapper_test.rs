@@ -128,11 +128,9 @@ fn local_exec_state(workspace: &std::path::Path) -> Arc<LocalBackendState> {
 #[cfg(unix)]
 fn write_dummy_wrapper(dir: &std::path::Path) -> std::path::PathBuf {
     let wrapper = dir.join("dummy-wrapper.sh");
-    // A separate writer keeps this harness's concurrent forks from inheriting
-    // a writable script descriptor and making another test's exec fail ETXTBSY.
-    let status = std::process::Command::new("/bin/sh")
-        .args(["-c", "printf '%s' \"$1\" > \"$2\"", "write-wrapper"])
-        .arg(concat!(
+    crate::test_support::write_script(
+        &wrapper,
+        concat!(
             "#!/bin/sh\n",
             "printf '%s\\n' \"$@\" > \"$RECORD_FILE\"\n",
             "n=$#\n",
@@ -148,11 +146,8 @@ fn write_dummy_wrapper(dir: &std::path::Path) -> std::path::PathBuf {
             "  while [ $i -lt $skip ]; do shift; i=$((i+1)); done\n",
             "fi\n",
             "exec \"$@\"\n",
-        ))
-        .arg(&wrapper)
-        .status()
-        .expect("run wrapper script writer");
-    assert!(status.success(), "write wrapper script");
+        ),
+    );
     make_executable(&wrapper);
     wrapper
 }
@@ -301,7 +296,7 @@ fn timeout_kills_the_wrapped_process_group() {
     std::fs::create_dir_all(&workspace).unwrap();
     // A wrapper that never execs: simulates a hung wrapper process tree.
     let wrapper = temp.path().join("hang-wrapper.sh");
-    std::fs::write(&wrapper, "#!/bin/sh\nsleep 300\n").unwrap();
+    crate::test_support::write_script(&wrapper, "#!/bin/sh\nsleep 300\n");
     make_executable(&wrapper);
 
     let exec = LocalExec::new(local_exec_state(&workspace));

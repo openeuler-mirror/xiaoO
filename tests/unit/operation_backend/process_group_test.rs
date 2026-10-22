@@ -25,24 +25,31 @@ fn kill_all_process_groups_clears_registry() {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
 
     const CHILD_ENV: &str = "XIAOO_ISOLATED_PROCESS_GROUP_TEST";
-    if std::env::var_os(CHILD_ENV).is_none() {
-        // Global shutdown cleanup must run with a private registry, away from
-        // commands owned by the other tests in this process.
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
+    if let Some(marker) = std::env::var_os(CHILD_ENV) {
+        use std::io::Read;
+        assert_eq!(
+            std::env::args().skip(1).collect::<Vec<_>>(),
+            [
                 "--exact",
                 "process_group::tests::kill_all_process_groups_clears_registry",
-                "--nocapture",
-            ])
-            .env(CHILD_ENV, "1")
-            .output()
-            .expect("run cleanup test in a separate process");
-        assert!(
-            output.status.success(),
-            "isolated cleanup test failed: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+                "--nocapture"
+            ],
+            "cleanup body requires an isolated single-test invocation"
         );
+        let marker = marker.to_str().expect("valid isolated cleanup marker");
+        let (parent, nonce) = marker
+            .split_once(':')
+            .expect("invalid isolated cleanup marker");
+        assert_eq!(parent.parse::<u32>().unwrap(), unsafe { libc::getppid() }
+            as u32);
+        let mut challenge = String::new();
+        std::io::stdin().read_to_string(&mut challenge).unwrap();
+        assert!(
+            !nonce.is_empty() && challenge == nonce,
+            "isolated cleanup challenge mismatch"
+        );
+    } else {
+        run_isolated_cleanup("process_group::tests::kill_all_process_groups_clears_registry");
         return;
     }
 
@@ -77,6 +84,83 @@ fn kill_all_process_groups_clears_registry() {
         let status = child.wait().expect("reap owned process group");
         assert_eq!(status.signal(), Some(libc::SIGTERM));
     }
+}
+
+#[cfg(unix)]
+fn run_isolated_cleanup(filter: &str) {
+    use std::hash::{BuildHasher, Hasher};
+    use std::io::Write;
+    use std::process::Stdio;
+
+    assert!(
+        std::env::var_os("XIAOO_ISOLATED_PROCESS_GROUP_TEST").is_none(),
+        "unexpected isolated cleanup marker"
+    );
+    let nonce = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+        .to_string();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", filter, "--nocapture"])
+        .env(
+            "XIAOO_ISOLATED_PROCESS_GROUP_TEST",
+            format!("{}:{nonce}", std::process::id()),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run cleanup test in a separate process");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(nonce.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "isolated cleanup test failed: {stdout}\n{stderr}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == format!("test {filter} ... ok")),
+        "target test did not pass: {stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+        "expected exactly one executed test: {stdout}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn isolated_cleanup_rejects_a_mismatched_filter() {
+    assert!(std::panic::catch_unwind(|| run_isolated_cleanup(
+        "process_group::tests::missing_cleanup_test"
+    ))
+    .is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn isolated_cleanup_rejects_an_external_marker() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "process_group::tests::kill_all_process_groups_clears_registry",
+            "--nocapture",
+        ])
+        .env("XIAOO_ISOLATED_PROCESS_GROUP_TEST", "preexisting")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid isolated cleanup marker"));
 }
 
 #[test]
