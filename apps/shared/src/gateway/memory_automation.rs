@@ -454,8 +454,6 @@ pub(crate) struct DurableIngestWorker {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl DurableIngestWorker {}
-
 impl Drop for DurableIngestWorker {
     fn drop(&mut self) {
         self.shutdown.cancel();

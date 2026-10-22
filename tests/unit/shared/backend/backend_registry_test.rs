@@ -11,7 +11,7 @@ fn temp_registry() -> (TempDir, BackendRegistry) {
 }
 
 #[tokio::test]
-async fn test_register_and_unregister() {
+async fn registered_entry_is_retrievable_until_unregistered() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-register");
     let entry = BackendRegistryEntry::new(
@@ -45,7 +45,7 @@ async fn test_register_and_unregister() {
 }
 
 #[tokio::test]
-async fn test_get_entries_by_key() {
+async fn get_entries_by_key_returns_all_matching() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-key-multi-v2");
 
@@ -69,7 +69,7 @@ async fn test_get_entries_by_key() {
 }
 
 #[tokio::test]
-async fn test_pending_eviction() {
+async fn pending_eviction_flag_round_trips() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-eviction");
     let entry = BackendRegistryEntry::new(
@@ -109,7 +109,7 @@ async fn test_pending_eviction() {
 }
 
 #[tokio::test]
-async fn test_update_activity() {
+async fn update_activity_advances_last_activity() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-activity");
     let entry = BackendRegistryEntry::new(
@@ -142,7 +142,7 @@ async fn test_update_activity() {
 }
 
 #[tokio::test]
-async fn test_get_entries_for_process() {
+async fn get_entries_for_process_filters_by_owner() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-process-v2");
 
@@ -189,7 +189,7 @@ async fn test_get_entries_for_process() {
 }
 
 #[tokio::test]
-async fn test_update_session_status() {
+async fn update_session_status_sets_status_and_queue_depth() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-status-v2");
     let entry = BackendRegistryEntry::new(
@@ -235,7 +235,7 @@ async fn test_update_session_status() {
 }
 
 #[tokio::test]
-async fn test_is_all_sessions_idle() {
+async fn is_all_sessions_idle_requires_every_session_idle() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-idle-v2");
     let entry = BackendRegistryEntry::new(
@@ -279,7 +279,7 @@ async fn test_is_all_sessions_idle() {
 }
 
 #[tokio::test]
-async fn test_refresh_heartbeats_for_process() {
+async fn refresh_heartbeats_touches_only_target_process() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-heartbeat");
 
@@ -331,7 +331,7 @@ async fn test_refresh_heartbeats_for_process() {
 }
 
 #[tokio::test]
-async fn test_is_evictable_when_owner_stale() {
+async fn is_evictable_when_owner_stale() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-stale-owner");
     let mut entry = BackendRegistryEntry::new(
@@ -359,7 +359,7 @@ async fn test_is_evictable_when_owner_stale() {
 }
 
 #[tokio::test]
-async fn test_is_evictable_when_idle_and_owner_alive() {
+async fn is_evictable_when_idle_and_owner_alive() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-alive-owner");
     let mut entry = BackendRegistryEntry::new(
@@ -384,7 +384,7 @@ async fn test_is_evictable_when_idle_and_owner_alive() {
 }
 
 #[tokio::test]
-async fn test_not_evictable_when_running_and_owner_alive() {
+async fn not_evictable_when_running_and_owner_alive() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-busy-owner");
     let mut entry = BackendRegistryEntry::new(
@@ -420,7 +420,7 @@ async fn test_not_evictable_when_running_and_owner_alive() {
 /// process under sandbox pressure could evict the brand-new sandbox
 /// mid-turn.
 #[tokio::test]
-async fn test_new_with_initial_running_status_is_not_evictable() {
+async fn new_with_initial_running_status_is_not_evictable() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-initial-running");
     let entry = BackendRegistryEntry::new(
@@ -464,7 +464,7 @@ async fn test_new_with_initial_running_status_is_not_evictable() {
 /// would fail with "sandbox limit reached" even though idle sandboxes
 /// are available to evict.
 #[tokio::test]
-async fn test_is_eviction_safe_ignores_pending_eviction_for_marked_entry() {
+async fn is_eviction_safe_ignores_pending_eviction_for_marked_entry() {
     let (_dir, registry) = temp_registry();
     let key = SandboxCounterKey::new("e2b", "test-marked-eviction");
     let mut entry = BackendRegistryEntry::new(

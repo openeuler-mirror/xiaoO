@@ -70,10 +70,10 @@ struct MarkdownParseOutcome {
 /// incoming parser state. Consumes `raw_lines` from the start; returns
 /// the rendered lines and the state at the end of the slice.
 ///
-/// This is the single source of truth for line parsing — both
-/// [`render_markdown`] (full, from an empty state) and
-/// [`render_markdown_incremental`] (streaming, from a frozen state) call
-/// into here. Tables are handled by the caller via a full-render fallback
+/// This is the single source of truth for line parsing — both a full
+/// render from an empty state and [`render_markdown_incremental`]
+/// (streaming, from a frozen state) call into here. Tables are handled
+/// by the caller via a full-render fallback
 /// (see [`render_markdown_incremental`]).
 fn parse_markdown_lines(
     raw_lines: &[&str],
@@ -233,14 +233,6 @@ fn parse_markdown_lines(
     }
 }
 
-/// Retained as a compatibility wrapper with the original signature (window
-/// start 0 — the leftmost window). Only exercised by tests now that callers
-/// use [`render_markdown_with_horiz`] / [`render_markdown_incremental`].
-#[allow(dead_code)]
-pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    render_markdown_with_horiz(text, theme, width, 0).0
-}
-
 /// Render markdown with an optional horizontal window for wide tables.
 ///
 /// Wide tables (natural width > `width`) are rendered at their natural
@@ -251,9 +243,9 @@ pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'stati
 /// `wide_tables` describe the windowed tables for the transcript layer to
 /// make them horizontally scrollable.
 ///
-/// [`render_markdown`] is a thin wrapper keeping its original signature
-/// (window start 0 — the leftmost window), so existing callers and
-/// regression tests are unaffected.
+/// The window-start-0 case (the leftmost window) is exercised by the
+/// regression tests via a local helper that keeps the original
+/// single-argument signature.
 pub fn render_markdown_with_horiz(
     text: &str,
     theme: &Theme,
@@ -377,7 +369,8 @@ pub struct MarkdownIncrementResult {
 /// count of frozen markdown lines to move from the previous tick's block.
 /// On any cache miss (width/theme change, content is not an extension of
 /// the frozen prefix, or no prior state) this degrades to a full
-/// [`render_markdown`] pass — always correct, just slower for that tick.
+/// [`render_markdown_with_horiz`] pass — always correct, just slower for
+/// that tick.
 pub fn render_markdown_incremental(
     prev: Option<MarkdownIncrementalState>,
     content: &str,

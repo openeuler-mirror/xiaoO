@@ -23,7 +23,7 @@ fn choice(prompt: &str, options: &[&str]) -> QuestionItem {
 }
 
 #[test]
-fn test_empty_questions() {
+fn empty_questions_are_rejected() {
     let input = AskUserQuestionInput { questions: vec![] };
     let r = validate_input(&input);
     assert!(!r.result);
@@ -31,7 +31,7 @@ fn test_empty_questions() {
 }
 
 #[test]
-fn test_too_many_questions() {
+fn more_than_four_questions_are_rejected() {
     let input = AskUserQuestionInput {
         questions: (0..5).map(|i| confirm(&format!("q{}", i))).collect(),
     };
@@ -41,7 +41,7 @@ fn test_too_many_questions() {
 }
 
 #[test]
-fn test_empty_prompt() {
+fn blank_prompt_is_rejected() {
     let input = AskUserQuestionInput {
         questions: vec![confirm("  ")],
     };
@@ -51,7 +51,7 @@ fn test_empty_prompt() {
 }
 
 #[test]
-fn test_choice_too_few_options() {
+fn choice_with_fewer_than_two_options_is_rejected() {
     let input = AskUserQuestionInput {
         questions: vec![choice("pick one?", &["only one"])],
     };
@@ -61,7 +61,7 @@ fn test_choice_too_few_options() {
 }
 
 #[test]
-fn test_choice_empty_option() {
+fn choice_with_blank_option_is_rejected() {
     let input = AskUserQuestionInput {
         questions: vec![choice("pick?", &["a", ""])],
     };
@@ -71,7 +71,7 @@ fn test_choice_empty_option() {
 }
 
 #[test]
-fn test_duplicate_prompts() {
+fn duplicate_prompts_are_rejected() {
     let input = AskUserQuestionInput {
         questions: vec![confirm("same?"), text_input("same?")],
     };
@@ -81,7 +81,7 @@ fn test_duplicate_prompts() {
 }
 
 #[test]
-fn test_duplicate_choice_options() {
+fn duplicate_choice_options_are_rejected() {
     let input = AskUserQuestionInput {
         questions: vec![choice("pick?", &["a", "a"])],
     };
@@ -91,7 +91,7 @@ fn test_duplicate_choice_options() {
 }
 
 #[test]
-fn test_valid_input() {
+fn mixed_question_types_pass_validation() {
     let input = AskUserQuestionInput {
         questions: vec![
             confirm("确认继续？"),

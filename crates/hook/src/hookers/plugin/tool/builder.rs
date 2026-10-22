@@ -9,8 +9,6 @@ pub(crate) fn build_plugin_tool_hooker(
     definition: PluginHookerDefinition,
     parsed_hook_point: ParsedPluginHookPoint,
 ) -> Result<Box<dyn Hooker>, BuildError> {
-    let _agent = &parsed_hook_point.agent;
-
     // Route by tool hook stage inside the tool family.
     match parsed_hook_point.stage.0.as_str() {
         "pre" | "post" | "error" => {

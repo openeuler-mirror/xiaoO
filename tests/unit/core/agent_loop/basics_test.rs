@@ -114,7 +114,7 @@ mod token_budget_tests {
     use agent_types::MessageRole;
 
     #[test]
-    fn test_estimator_basic_calculation() {
+    fn estimator_counts_positive_tokens_for_messages() {
         let estimator = TokenEstimator::new();
         let messages = vec![
             ChatMessage::text(MessageRole::User, "Hello world", 0),
@@ -125,60 +125,5 @@ mod token_budget_tests {
             estimator.estimate_input_tokens("You are a helpful assistant", 0, &messages);
 
         assert!(estimated > 0);
-    }
-
-    #[test]
-    fn test_budget_calculation_logic() {
-        let config = TokenBudgetConfig {
-            total_budget: 10000,
-            reserved_for_output: 1000,
-            reserved_for_system: 500,
-            hard_limit_ratio: 0.8,
-        };
-
-        let available_for_input = config
-            .total_budget
-            .saturating_sub(config.reserved_for_output)
-            .saturating_sub(config.reserved_for_system);
-
-        assert_eq!(available_for_input, 8500);
-    }
-
-    #[test]
-    fn test_budget_edge_case_zero_available() {
-        let config = TokenBudgetConfig {
-            total_budget: 1000,
-            reserved_for_output: 1000,
-            reserved_for_system: 500,
-            hard_limit_ratio: 0.8,
-        };
-
-        let available_for_input = config
-            .total_budget
-            .saturating_sub(config.reserved_for_output)
-            .saturating_sub(config.reserved_for_system);
-
-        assert_eq!(available_for_input, 0);
-    }
-
-    #[test]
-    fn test_budget_edge_case_over_allocation() {
-        let config = TokenBudgetConfig {
-            total_budget: 1000,
-            reserved_for_output: 800,
-            reserved_for_system: 400,
-            hard_limit_ratio: 0.8,
-        };
-
-        let available_for_input = config
-            .total_budget
-            .saturating_sub(config.reserved_for_output)
-            .saturating_sub(config.reserved_for_system);
-
-        assert_eq!(available_for_input, 0);
-
-        let is_invalid =
-            config.reserved_for_output + config.reserved_for_system >= config.total_budget;
-        assert!(is_invalid);
     }
 }

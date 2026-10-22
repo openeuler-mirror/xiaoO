@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_credential_creation() {
+fn credential_new_sets_identity_priority_and_availability() {
     let cred = AuthCredential::new("test-1", "openai", "sk-test").with_priority(10);
     assert_eq!(cred.id, "test-1");
     assert_eq!(cred.provider, "openai");
@@ -10,7 +10,7 @@ fn test_credential_creation() {
 }
 
 #[test]
-fn test_pool_add_and_get() {
+fn pool_add_then_get_returns_credential() {
     let pool = InMemoryAuthPool::new();
     let cred = AuthCredential::new("test-1", "openai", "sk-test");
     pool.add(cred);
@@ -20,7 +20,7 @@ fn test_pool_add_and_get() {
 }
 
 #[test]
-fn test_pool_get_available() {
+fn pool_get_available_prefers_highest_priority_for_provider() {
     let pool = InMemoryAuthPool::new();
     pool.add(AuthCredential::new("cred-1", "openai", "key1").with_priority(10));
     pool.add(AuthCredential::new("cred-2", "openai", "key2").with_priority(5));
@@ -35,7 +35,7 @@ fn test_pool_get_available() {
 }
 
 #[test]
-fn test_pool_mark_cooldown() {
+fn pool_mark_cooldown_makes_credential_unavailable() {
     let pool = InMemoryAuthPool::new();
     pool.add(AuthCredential::new("test-1", "openai", "sk-test"));
     pool.mark_cooldown("test-1", Duration::from_secs(60));
@@ -45,7 +45,7 @@ fn test_pool_mark_cooldown() {
 }
 
 #[test]
-fn test_pool_mark_blocked() {
+fn pool_mark_blocked_records_reason() {
     let pool = InMemoryAuthPool::new();
     pool.add(AuthCredential::new("test-1", "openai", "sk-test"));
     pool.mark_blocked("test-1", "rate limited");
@@ -55,7 +55,7 @@ fn test_pool_mark_blocked() {
 }
 
 #[test]
-fn test_pool_remove() {
+fn pool_remove_drops_credential() {
     let pool = InMemoryAuthPool::new();
     pool.add(AuthCredential::new("test-1", "openai", "sk-test"));
     pool.remove("test-1");

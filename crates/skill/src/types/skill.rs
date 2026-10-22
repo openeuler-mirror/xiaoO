@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub struct Skill {
-    // --- 基础元数据 ---
+    // --- Basic metadata ---
     pub name: String,
     pub description: String,
     pub version: Option<String>,
@@ -14,20 +14,20 @@ pub struct Skill {
     pub tags: Vec<String>,
     pub location: Option<PathBuf>,
 
-    // --- Prompt 内容 ---
+    // --- Prompt content ---
     pub prompt: String,
 
-    // --- 调用控制 ---
+    // --- Invocation control ---
     pub user_invocable: bool,
     pub disable_model_invocation: bool,
     pub context: SkillContext,
     pub argument_hint: Option<String>,
     pub arguments: Vec<String>,
 
-    // --- 条件激活 ---
+    // --- Conditional activation ---
     pub paths: Vec<String>,
 
-    // --- 工具定义（可选扩展）---
+    // --- Tool definitions (optional extension) ---
     pub tools: Vec<SkillToolDef>,
 }
 

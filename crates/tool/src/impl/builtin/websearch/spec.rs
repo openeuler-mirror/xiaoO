@@ -1,8 +1,15 @@
 use agent_contracts::tool::ToolSpecView;
 use agent_types::common::ids::{ToolId, ToolName};
 use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
+use chrono::Datelike;
 
 use super::constants::{DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS};
+
+/// Reference year for the search-freshness hint in the description, taken
+/// from the system clock at spec construction time.
+fn description_current_year() -> i32 {
+    chrono::Utc::now().year()
+}
 
 #[derive(Debug, Clone)]
 pub struct WebSearchToolSpec {
@@ -16,7 +23,7 @@ pub struct WebSearchToolSpec {
 
 impl WebSearchToolSpec {
     pub fn new() -> Self {
-        let current_year = 2026; // updated at build time; LLM description references current year
+        let current_year = description_current_year();
         let description = format!(
             "Searches the web using Exa and returns relevant results with full page content. \
             Useful for finding up-to-date information, recent events (up to {}), documentation, \

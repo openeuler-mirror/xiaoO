@@ -201,7 +201,7 @@ impl ToolExecutor for FileWriteExecutor {
             }
         }
 
-        let _write_result = timed(
+        timed(
             "file_write write_bytes",
             DEFAULT_FS_TIMEOUT_MS,
             backend.files().write_bytes(WriteBytesRequest {
@@ -233,14 +233,12 @@ impl ToolExecutor for FileWriteExecutor {
                 file_path: input.file_path.clone(),
                 new_lines,
                 structured_patch,
-                git_diff: None,
                 lsp_diagnostics: lsp_diagnostics.clone(),
             }),
             None => FileWriteOutput::Create(CreateOutput {
                 file_path: input.file_path.clone(),
                 new_lines,
                 structured_patch,
-                git_diff: None,
                 lsp_diagnostics,
             }),
         };

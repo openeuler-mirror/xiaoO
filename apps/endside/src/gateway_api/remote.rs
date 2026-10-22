@@ -47,6 +47,14 @@ pub struct RemoteRuntimeConfig {
     pub bearer_token_env: Option<String>,
 }
 
+/// SSE event consumed by the TUI from `/api/v1/runtimes/input`.
+///
+/// Wire-contract mirror of the daemon's `SseStreamEvent`. Two other models
+/// track the same wire format: `RuntimeSseEvent` in
+/// `crates/protocol/src/sse.rs` (protocol-crate consumers) and the daemon's
+/// own serializer (separate repository). Any field/event change must be
+/// kept in sync across all three; unknown fields and unknown event types
+/// are tolerated so older TUIs keep working against newer daemons.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RemoteSseEvent {
@@ -120,16 +128,12 @@ enum RemoteSseEvent {
         detail: String,
     },
     /// Per-agent loop-end marker so the TUI clears `is_running` on the
-    /// matching lane. Summary fields default to zero/empty for backward
-    /// compat with older daemons.
+    /// matching lane. Daemons may attach summary fields
+    /// (`turn_count` / `total_tokens` / `stop_reason`) to the wire payload;
+    /// they are unknown fields here and silently ignored (the TUI reads the
+    /// summary via its own `loop_summary` sink instead).
     LoopEnd {
         agent_id: String,
-        #[serde(default)]
-        turn_count: u32,
-        #[serde(default)]
-        total_tokens: usize,
-        #[serde(default)]
-        stop_reason: String,
     },
     InteractionRequested {
         request: InteractionRequest,
@@ -929,21 +933,11 @@ async fn handle_remote_event(
                 update,
             });
         }
-        RemoteSseEvent::LoopEnd {
-            agent_id,
-            turn_count,
-            total_tokens,
-            stop_reason,
-        } => {
-            // Forward the per-agent `LoopEndSummary` so the TUI clears
+        RemoteSseEvent::LoopEnd { agent_id } => {
+            // Forward the per-agent loop-end marker so the TUI clears
             // `is_running` on the matching lane.
             let _ = updates_tx.send(SessionTurnUpdate::LoopEnd {
                 agent_id: AgentId(agent_id),
-                summary: xiaoo_api::events::LoopEndSummary {
-                    turn_count,
-                    total_tokens,
-                    stop_reason,
-                },
             });
         }
         RemoteSseEvent::Unknown => {

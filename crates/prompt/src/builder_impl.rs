@@ -15,10 +15,6 @@ use crate::decision::decide_prompt;
 pub struct PromptBuilderImpl;
 
 impl PromptBuilderImpl {
-    pub fn new() -> Self {
-        Self
-    }
-
     fn build_inner(
         &self,
         mut input: PromptBuildInput,

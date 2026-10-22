@@ -175,7 +175,6 @@ impl TraceRecorder for TestTraceRecorder {
     ) {
     }
     async fn finalize_trace(&self, _outcome: TraceOutcome, _fields: serde_json::Value) {}
-    async fn force_finalize_trace(&self, _outcome: TraceOutcome, _fields: serde_json::Value) {}
 }
 
 /// Minimal [`RuntimeView`] for plugin adaptor tests: empty conversation,

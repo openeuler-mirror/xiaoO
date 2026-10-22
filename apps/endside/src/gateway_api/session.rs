@@ -16,7 +16,6 @@ use crate::interaction_prompt::PromptRequest;
 use crate::status_panel::MemoryStatus;
 
 use xiaoo_api::chat::AgentId;
-use xiaoo_api::events::LoopEndSummary;
 use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotUpdate};
 
 /// Slot holding the session's shared MCP memory client: `None` (outer) means
@@ -92,7 +91,6 @@ pub enum SessionTurnUpdate {
     },
     LoopEnd {
         agent_id: AgentId,
-        summary: LoopEndSummary,
     },
     InteractionPrompt(PromptRequest),
     PendingUserMessagesConsumed {

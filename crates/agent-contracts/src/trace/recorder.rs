@@ -46,9 +46,6 @@ pub trait TraceRecorder: Send + Sync {
     async fn end_span(&self, span: TraceSpanHandle, outcome: TraceOutcome, fields: Value);
 
     async fn finalize_trace(&self, outcome: TraceOutcome, fields: Value);
-
-    #[allow(dead_code)]
-    async fn force_finalize_trace(&self, outcome: TraceOutcome, fields: Value);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

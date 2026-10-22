@@ -9,8 +9,6 @@ pub(crate) fn build_plugin_llm_hooker(
     definition: PluginHookerDefinition,
     parsed_hook_point: ParsedPluginHookPoint,
 ) -> Result<Box<dyn Hooker>, BuildError> {
-    let _agent = &parsed_hook_point.agent;
-
     match parsed_hook_point.stage.0.as_str() {
         "pre" | "post" | "error" => {
             let hooker = PluginLlmHookerAdaptor::new(

@@ -1,33 +1,34 @@
-//! LLM provider 构建与上下文窗口解析、压缩管道。
+//! LLM provider construction, context-window resolution, and the
+//! compression pipeline.
 //!
-//! - [`create_llm_provider`] + [`LlmProviderWrapper`]：构建 provider 实例
-//! - [`resolve_config`] + [`ResolveInput`]：解析 provider / model / api_base / api_key
+//! - [`create_llm_provider`] + [`LlmProviderWrapper`]: build a provider instance
+//! - [`resolve_config`] + [`ResolveInput`]: resolve provider / model / api_base / api_key
 //! - [`resolve_model_context_length`] / [`resolve_protocol_family`] /
-//!   [`ProtocolFamily`]：上下文窗口探测链
-//! - [`build_context_manager`] + [`CompactOverrides`]：构建压缩管道
+//!   [`ProtocolFamily`]: context-window probing chain
+//! - [`build_context_manager`] + [`CompactOverrides`]: build the compression pipeline
 //!
 //! The resulting provider and compression pipeline can be injected directly
 //! through [`crate::runtime::RuntimeBuilder`].
 
-// ---- provider 构建 ----
+// ---- Provider construction ----
 #[doc(inline)]
 pub use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper};
 
-// ---- provider / model 解析 ----
+// ---- Provider / model resolution ----
 #[doc(inline)]
 pub use llm_client::{resolve_config, ResolveInput};
 
-// ---- provider registry ----
+// ---- Provider registry ----
 #[doc(inline)]
 pub use llm_client::{
     provider_catalog, resolve_provider_profile, ProviderMetadata, ProviderProfile, ReasoningDialect,
 };
 
-// ---- 上下文窗口探测链 ----
+// ---- Context-window probing chain ----
 #[doc(inline)]
 pub use llm_client::{resolve_model_context_length, resolve_protocol_family, ProtocolFamily};
 
-// ---- 压缩管道 ----
+// ---- Compression pipeline ----
 #[doc(inline)]
 pub use agent_contracts::{CompressionPipeline, LlmProvider, ProviderCapabilities};
 
@@ -39,7 +40,7 @@ pub use compact::{
     DEFAULT_SUMMARY_PRESERVE_TAIL, DEFAULT_WARNING_RATIO,
 };
 
-// ---- token 预算与压缩策略 ----
+// ---- Token budget and compaction policy ----
 #[doc(inline)]
 pub use agent_contracts::TokenBudgetPolicy;
 

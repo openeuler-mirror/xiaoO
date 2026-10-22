@@ -120,8 +120,6 @@ impl TraceRecorder for NoopTraceRecorder {
     }
 
     async fn finalize_trace(&self, _outcome: TraceOutcome, _fields: serde_json::Value) {}
-
-    async fn force_finalize_trace(&self, _outcome: TraceOutcome, _fields: serde_json::Value) {}
 }
 
 struct NoopInteraction;

@@ -108,22 +108,10 @@ RUN mkdir -p /staging/usr/bin && \
 RUN mkdir -p /staging/usr/lib/.xiaoo/skills && \
     cp -a /build/plugins/skills/* /staging/usr/lib/.xiaoo/skills/
 
-# Hookers → /usr/lib/.xiaoo/hookers/. Three transformations:
-#   1) rm audit_agent/install.sh  — Python deps come from system, not venv
-#   2) rewrite audit_agent/plugin.json to call /usr/bin/python3 with absolute
-#      paths so audit_agent works without a per-user venv
-#   3) chmod +x every install.sh / uninstall.sh (for xiaoo-hookers-install)
+# Hookers → /usr/lib/.xiaoo/hookers/.
+# chmod +x every install.sh / uninstall.sh (for xiaoo-hookers-install)
 RUN mkdir -p /staging/usr/lib/.xiaoo/hookers && \
     cp -a /build/plugins/hookers/* /staging/usr/lib/.xiaoo/hookers/ && \
-    rm -f /staging/usr/lib/.xiaoo/hookers/audit_agent/install.sh && \
-    printf '%s\n' \
-      '[' \
-      '  {' \
-      '    "id": "plugin_audit_tool_input",' \
-      '    "hook_point": "*.Tool.*.pre",' \
-      '    "command": "PYTHONPATH=/usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker /usr/bin/python3 /usr/lib/.xiaoo/hookers/audit_agent/audit.py"' \
-      '  }' \
-      ']' > /staging/usr/lib/.xiaoo/hookers/audit_agent/plugin.json && \
     find /staging/usr/lib/.xiaoo/hookers \( -name install.sh -o -name uninstall.sh \) -exec chmod +x {} +
 
 # Docs → /usr/share/doc/xiaoO/ (README.md, README.zh-CN.md, docs/*.md)

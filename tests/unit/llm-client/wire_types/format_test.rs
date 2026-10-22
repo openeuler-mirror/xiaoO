@@ -1,7 +1,17 @@
 use super::*;
 
+// Test-only constructor for the plain-text response format.
+impl WireResponseFormat {
+    fn text() -> Self {
+        Self {
+            format_type: "text".to_string(),
+            json_schema: None,
+        }
+    }
+}
+
 #[test]
-fn test_response_format_serialization() {
+fn response_format_serializes_json_object_text_and_json_schema() {
     let format = WireResponseFormat::json_object();
     let json = serde_json::to_string(&format).unwrap();
     assert_eq!(json, r#"{"type":"json_object"}"#);

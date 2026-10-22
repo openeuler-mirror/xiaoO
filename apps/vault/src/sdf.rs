@@ -140,7 +140,7 @@ impl TeeKeyProvider {
 
     #[cfg(feature = "tee_sdf")]
     async fn get_from_sdf(&self) -> Result<KeyMaterial, KeyProviderError> {
-        let provider = SdfKeyProvider::new(self.name(), "/usr/local/sdf/lib/libsdf.so");
+        let provider = SdfKeyProvider::new(self.name());
         provider.provide().await
     }
 
@@ -159,15 +159,11 @@ impl TeeKeyProvider {
 /// SDF 国密密钥提供者
 pub struct SdfKeyProvider {
     name: String,
-    _library_path: String,
 }
 
 impl SdfKeyProvider {
-    pub fn new(name: impl Into<String>, library_path: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            _library_path: library_path.into(),
-        }
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
     }
 }
 
@@ -215,6 +211,10 @@ impl KeyProvider for SdfKeyProvider {
         &self.name
     }
 }
+
+/// Default path of the SDF provider library. Callers that need a different
+/// location can still pass their own path to [`init_sdf_provider`].
+pub const DEFAULT_SDF_LIBRARY_PATH: &str = "/usr/local/sdf/lib/libsdf.so";
 
 /// 初始化 SDF 国密提供者
 pub fn init_sdf_provider(path: &str) -> Result<(), KeyProviderError> {
@@ -310,10 +310,8 @@ pub mod sdf_impl {
     pub fn load_library(path: &str) -> Result<(), KeyProviderError> {
         unsafe {
             if LIBRARY.get().is_some() {
-                eprintln!("[SDF DEBUG] Library already loaded, skipping");
                 return Ok(());
             }
-            eprintln!("[SDF DEBUG] Loading library: {}", path);
             LIBRARY
                 .set(Library::new(path).map_err(|e| {
                     KeyProviderError::Tee(format!(
@@ -327,7 +325,6 @@ pub mod sdf_impl {
                     ))
                 })?)
                 .map_err(|_| KeyProviderError::Tee("库已加载".into()))?;
-            eprintln!("[SDF DEBUG] Library loaded successfully");
             Ok(())
         }
     }

@@ -33,17 +33,6 @@ pub struct StructuredPatch {
     pub hunks: Option<Vec<Hunk>>,
 }
 
-/// Git diff information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitDiff {
-    /// Raw diff string from git.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw: Option<String>,
-    /// Whether the file has uncommitted changes.
-    pub has_uncommitted_changes: bool,
-}
-
 /// Output for newly created files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,9 +43,6 @@ pub struct CreateOutput {
     pub new_lines: u32,
     /// Structured patch representation (delta only).
     pub structured_patch: StructuredPatch,
-    /// Git diff information.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_diff: Option<GitDiff>,
     /// LSP diagnostics for the file after the write (None if LSP unavailable or timed out).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
@@ -72,9 +58,6 @@ pub struct UpdateOutput {
     pub new_lines: u32,
     /// Structured patch representation (delta only).
     pub structured_patch: StructuredPatch,
-    /// Git diff information.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub git_diff: Option<GitDiff>,
     /// LSP diagnostics for the file after the write (None if LSP unavailable or timed out).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_diagnostics: Option<LspDiagnosticsInfo>,

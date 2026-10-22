@@ -2,7 +2,6 @@ mod builtin;
 pub mod fs_timeout;
 pub mod lsp_hooks;
 mod mcp;
-mod path_resolver;
 mod plugin;
 pub mod reqwest_util;
 mod runtime_services;

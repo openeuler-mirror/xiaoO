@@ -122,7 +122,7 @@ impl FileReadExecutor {
                 timestamp: mtime,
                 offset: input.offset,
                 limit: input.limit,
-                is_partial_view: input.offset.is_some() || input.limit.is_some(),
+                is_partial_view: input.is_partial_view(),
             },
         );
 
@@ -214,7 +214,7 @@ impl FileReadExecutor {
                         timestamp: mtime,
                         offset: input.offset,
                         limit: input.limit,
-                        is_partial_view: input.offset.is_some() || input.limit.is_some(),
+                        is_partial_view: input.is_partial_view(),
                     },
                 );
                 return Ok(FileReadOutput::Text(windowed));
@@ -232,7 +232,7 @@ impl FileReadExecutor {
                 timestamp: mtime,
                 offset: input.offset,
                 limit: input.limit,
-                is_partial_view: input.offset.is_some() || input.limit.is_some(),
+                is_partial_view: input.is_partial_view(),
             },
         );
 
@@ -250,7 +250,7 @@ impl FileReadExecutor {
         // Suppressed for both paged and full reads — without it, repeated
         // identical reads of an unchanged file re-slurp, re-tokenize, and
         // re-serialize the content every time.
-        let is_partial_view = input.offset.is_some() || input.limit.is_some();
+        let is_partial_view = input.is_partial_view();
 
         let is_unchanged = dedup_store.is_file_unchanged(
             file_path,

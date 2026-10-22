@@ -45,7 +45,7 @@ impl ToolSpecView for TestToolSpec {
 
 #[test]
 fn build_projects_tools_into_llm_request() {
-    let builder = PromptBuilderImpl::new();
+    let builder = PromptBuilderImpl::default();
     let input = PromptBuildInput {
         system_prompt: "You are a coding agent.".to_string(),
         messages: vec![ChatMessage::user("hello")],
@@ -104,7 +104,7 @@ fn build_projects_tools_into_llm_request() {
 
 #[test]
 fn build_appends_volatile_context_as_trailing_reminder_message() {
-    let builder = PromptBuilderImpl::new();
+    let builder = PromptBuilderImpl::default();
     let input = PromptBuildInput {
         system_prompt: "You are a coding agent.".to_string(),
         messages: vec![
@@ -179,7 +179,7 @@ fn build_appends_volatile_context_as_trailing_reminder_message() {
 
 #[test]
 fn build_fails_fast_when_budget_is_zero() {
-    let builder = PromptBuilderImpl::new();
+    let builder = PromptBuilderImpl::default();
     let input = PromptBuildInput {
         system_prompt: "You are a coding agent.".to_string(),
         messages: vec![ChatMessage::user("hello")],
@@ -213,7 +213,7 @@ fn build_fails_fast_when_budget_is_zero() {
 
 #[test]
 fn build_filters_out_existing_system_messages() {
-    let builder = PromptBuilderImpl::new();
+    let builder = PromptBuilderImpl::default();
     let input = PromptBuildInput {
         system_prompt: "New system prompt".to_string(),
         messages: vec![

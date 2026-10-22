@@ -5,7 +5,6 @@ use agent_types::{ChatMessage, ContentBlock, MessageRole, ResponseFormat, ToolCh
 pub enum PromptState {
     NewUserTurn,
     AfterToolResult,
-    FinalAnswer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +69,6 @@ fn infer_state(last_message: &ChatMessage) -> PromptState {
 fn infer_action(state: PromptState, has_visible_tools: bool) -> PromptAction {
     match state {
         PromptState::AfterToolResult => PromptAction::IntegrateToolResults,
-        PromptState::FinalAnswer => PromptAction::AnswerOnly,
         PromptState::NewUserTurn => {
             if has_visible_tools {
                 PromptAction::PlanAndMaybeUseTools

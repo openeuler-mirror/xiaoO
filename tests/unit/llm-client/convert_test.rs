@@ -3,7 +3,7 @@ use agent_llm::ChatMessageExt;
 use agent_types::MessageRole;
 
 #[test]
-fn test_chat_message_to_wire_text() {
+fn user_text_message_maps_to_wire_user_content() {
     let msg = ChatMessage::user("Hello");
     let wire = chat_message_to_wire(&msg);
     assert_eq!(wire.role, "user");
@@ -12,7 +12,7 @@ fn test_chat_message_to_wire_text() {
 }
 
 #[test]
-fn test_chat_message_to_wire_tool_use() {
+fn assistant_tool_use_maps_to_wire_tool_calls() {
     let msg = ChatMessage::new(
         MessageRole::Assistant,
         vec![ContentBlock::ToolUse {
@@ -34,7 +34,7 @@ fn test_chat_message_to_wire_tool_use() {
 }
 
 #[test]
-fn test_chat_message_to_wire_tool_result() {
+fn tool_result_message_maps_to_wire_tool_role_with_call_id() {
     let msg = ChatMessage::tool_result("call_123", "get_weather", "72°F", false, 0);
     let wire = chat_message_to_wire(&msg);
     assert_eq!(wire.role, "tool");
@@ -43,7 +43,7 @@ fn test_chat_message_to_wire_tool_result() {
 }
 
 #[test]
-fn test_chat_message_to_wire_preserves_reasoning_content() {
+fn chat_message_to_wire_preserves_reasoning_content() {
     let mut msg = ChatMessage::new(
         MessageRole::Assistant,
         vec![ContentBlock::ToolUse {
@@ -64,7 +64,7 @@ fn test_chat_message_to_wire_preserves_reasoning_content() {
 }
 
 #[test]
-fn test_chat_message_to_wire_drops_reasoning_on_text_only_rounds() {
+fn chat_message_to_wire_drops_reasoning_on_text_only_rounds() {
     let mut msg = ChatMessage::new(
         MessageRole::Assistant,
         vec![ContentBlock::Text {
@@ -86,7 +86,7 @@ fn test_chat_message_to_wire_drops_reasoning_on_text_only_rounds() {
 }
 
 #[test]
-fn test_wire_choice_preserves_reasoning_content() {
+fn wire_choice_preserves_reasoning_content() {
     let choice = WireChoice {
         message: WireMessage {
             role: "assistant".to_string(),
@@ -116,7 +116,7 @@ fn test_wire_choice_preserves_reasoning_content() {
 }
 
 #[test]
-fn test_wire_response_to_llm_response() {
+fn wire_response_to_llm_response_maps_message_and_stop_reason() {
     let wire = WireResponse {
         id: "resp-1".to_string(),
         model: "gpt-4o".to_string(),
@@ -142,7 +142,7 @@ fn test_wire_response_to_llm_response() {
 }
 
 #[test]
-fn test_tool_choice_to_wire() {
+fn tool_choice_to_wire_maps_all_variants_to_strings() {
     assert!(
         matches!(tool_choice_to_wire(&ToolChoice::Auto), WireToolChoice::String(s) if s == "auto")
     );
@@ -190,7 +190,7 @@ fn tool_to_wire_preserves_existing_object_schema() {
 }
 
 #[test]
-fn test_parse_tool_arguments_repairs_missing_trailing_brace() {
+fn parse_tool_arguments_repairs_missing_trailing_brace() {
     let parsed = parse_tool_arguments(
         r#"{"description":"count workspace","task_goal":"Count files","task_context":"Use find","output_schema":{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}"#,
     );
@@ -201,7 +201,7 @@ fn test_parse_tool_arguments_repairs_missing_trailing_brace() {
 }
 
 #[test]
-fn test_chat_message_to_wire_null_arguments_becomes_empty_object() {
+fn chat_message_to_wire_null_arguments_becomes_empty_object() {
     // When the LLM returns a tool call with invalid/empty JSON arguments,
     // parse_tool_arguments returns Value::Null. When this is sent back to
     // the LLM API in the conversation history, "null" is rejected by
@@ -226,7 +226,7 @@ fn test_chat_message_to_wire_null_arguments_becomes_empty_object() {
 }
 
 #[test]
-fn test_chat_message_to_wire_valid_arguments_preserved() {
+fn chat_message_to_wire_valid_arguments_preserved() {
     let msg = ChatMessage::new(
         MessageRole::Assistant,
         vec![ContentBlock::ToolUse {
@@ -247,7 +247,7 @@ fn test_chat_message_to_wire_valid_arguments_preserved() {
 }
 
 #[test]
-fn test_end_to_end_null_arguments_round_trip() {
+fn null_arguments_survive_full_round_trip_as_empty_object() {
     // Simulate the full flow:
     // 1. LLM returns tool call with broken arguments
     // 2. xiaoo parses → Null
@@ -286,7 +286,7 @@ fn test_end_to_end_null_arguments_round_trip() {
 }
 
 #[test]
-fn test_wire_choice_repairs_tool_arguments() {
+fn wire_choice_repairs_tool_arguments() {
     let choice = WireChoice {
         message: WireMessage::assistant(""),
         finish_reason: Some("tool_calls".to_string()),

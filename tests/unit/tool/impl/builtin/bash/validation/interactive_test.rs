@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_error_message_quality() {
+fn ssh_password_error_guides_through_ask_user_question_flow() {
     let input = BashInput {
         command: "ssh root@192.168.1.1 ls /root".to_string(),
         cwd: None,
@@ -31,7 +31,7 @@ fn test_error_message_quality() {
 }
 
 #[test]
-fn test_ssh_with_key_needs_hostkey_guidance() {
+fn ssh_with_key_needs_hostkey_guidance() {
     let input = BashInput {
         command: "ssh -i ~/.ssh/id_rsa root@192.168.1.1 ls /root".to_string(),
         cwd: None,
@@ -52,7 +52,7 @@ fn test_ssh_with_key_needs_hostkey_guidance() {
 }
 
 #[test]
-fn test_ssh_strict_hostkey_allowed() {
+fn ssh_strict_hostkey_allowed() {
     let input = BashInput {
         command: "ssh -o StrictHostKeyChecking=no root@192.168.1.1 ls /root".to_string(),
         cwd: None,
@@ -68,7 +68,7 @@ fn test_ssh_strict_hostkey_allowed() {
 }
 
 #[test]
-fn test_ssh_with_compact_key_path_needs_hostkey_guidance() {
+fn ssh_with_compact_key_path_needs_hostkey_guidance() {
     // SSH allows the -i option to be written compactly without separating
     // whitespace, e.g. `ssh -i~/.ssh/id_rsa ...`. This should still be
     // recognized as key-based auth (no password needed), only hostkey
@@ -86,7 +86,7 @@ fn test_ssh_with_compact_key_path_needs_hostkey_guidance() {
 }
 
 #[test]
-fn test_ssh_with_compact_key_path_and_no_hostkey_allowed() {
+fn ssh_with_compact_key_path_and_no_hostkey_allowed() {
     // Compact `-i<path>` form combined with StrictHostKeyChecking=no should
     // be fully non-interactive and allowed.
     let input = BashInput {
@@ -100,7 +100,7 @@ fn test_ssh_with_compact_key_path_and_no_hostkey_allowed() {
 }
 
 #[test]
-fn test_ssh_with_key_and_no_hostkey_allowed() {
+fn ssh_with_key_and_no_hostkey_allowed() {
     let input = BashInput {
         command: "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no root@192.168.1.1 ls /root"
             .to_string(),
@@ -114,7 +114,7 @@ fn test_ssh_with_key_and_no_hostkey_allowed() {
 }
 
 #[test]
-fn test_ssh_with_batch_and_no_hostkey_allowed() {
+fn ssh_with_batch_and_no_hostkey_allowed() {
     let input = BashInput {
         command: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@192.168.1.1 ls /root"
             .to_string(),
@@ -128,7 +128,7 @@ fn test_ssh_with_batch_and_no_hostkey_allowed() {
 }
 
 #[test]
-fn test_ssh_batch_mode_alone_allowed() {
+fn ssh_batch_mode_alone_allowed() {
     // BatchMode=yes disables both password prompts AND host key confirmation
     // requests per ssh_config, so the command is fully non-interactive (it
     // will fail cleanly rather than hang if auth cannot complete).
@@ -142,7 +142,7 @@ fn test_ssh_batch_mode_alone_allowed() {
 }
 
 #[test]
-fn test_ssh_identity_file_option_allowed() {
+fn ssh_identity_file_option_allowed() {
     // `-o IdentityFile=<key>` is equivalent to `-i <key>` and should be
     // recognized as key-based auth (no password needed).
     let input = BashInput {
@@ -155,7 +155,7 @@ fn test_ssh_identity_file_option_allowed() {
 }
 
 #[test]
-fn test_ssh_identity_file_option_needs_hostkey() {
+fn ssh_identity_file_option_needs_hostkey() {
     // IdentityFile= clears password requirement, but without hostkey handling
     // the command may still prompt for hostkey confirmation.
     let input = BashInput {
@@ -174,7 +174,7 @@ fn test_ssh_identity_file_option_needs_hostkey() {
 }
 
 #[test]
-fn test_ssh_accept_new_hostkey_allowed() {
+fn ssh_accept_new_hostkey_allowed() {
     // StrictHostKeyChecking=accept-new auto-adds new hosts without prompting,
     // so no hostkey confirmation is needed.
     let input = BashInput {
@@ -189,7 +189,7 @@ fn test_ssh_accept_new_hostkey_allowed() {
 }
 
 #[test]
-fn test_ssh_accept_new_without_key_needs_password() {
+fn ssh_accept_new_without_key_needs_password() {
     // accept-new handles hostkey, but without a key the command still needs
     // a password (BatchMode not set).
     let input = BashInput {
@@ -205,7 +205,7 @@ fn test_ssh_accept_new_without_key_needs_password() {
 }
 
 #[test]
-fn test_ssh_no_key_guidance_uses_batchmode_for_auto_key_detection() {
+fn ssh_no_key_guidance_uses_batchmode_for_auto_key_detection() {
     // issue 3: when the user chooses key-based login but does not provide a keyfile,
     // the guidance must instruct using -o BatchMode=yes so ssh automatically tries
     // default keys (~/.ssh/id_rsa, id_ed25519, …) instead of giving up.
@@ -226,7 +226,7 @@ fn test_ssh_no_key_guidance_uses_batchmode_for_auto_key_detection() {
 }
 
 #[test]
-fn test_ssh_guidance_requires_method_choice_before_asking_credentials() {
+fn ssh_guidance_requires_method_choice_before_asking_credentials() {
     // issue 2: the flow must direct the model to first let the user choose an auth
     // method via a `choice` question, not ask for password/keyfile directly.
     let input = BashInput {
@@ -241,7 +241,7 @@ fn test_ssh_guidance_requires_method_choice_before_asking_credentials() {
 }
 
 #[test]
-fn test_ssh_guidance_clarifies_only_password_is_secret() {
+fn ssh_guidance_clarifies_only_password_is_secret() {
     // issue 1: username/host/keyfile-path are not sensitive; only the password
     // may be hidden. The guidance must make this explicit.
     let input = BashInput {
@@ -257,7 +257,7 @@ fn test_ssh_guidance_clarifies_only_password_is_secret() {
 }
 
 #[test]
-fn test_sudo_needs_password_detection() {
+fn sudo_without_noninteractive_flag_is_rejected() {
     let input = BashInput {
         command: "sudo cat /var/log/syslog".to_string(),
         cwd: None,
@@ -270,7 +270,7 @@ fn test_sudo_needs_password_detection() {
 }
 
 #[test]
-fn test_sudo_with_no_password_allowed() {
+fn sudo_with_no_password_allowed() {
     let input = BashInput {
         command: "sudo -n cat /var/log/syslog".to_string(),
         cwd: None,
@@ -281,7 +281,7 @@ fn test_sudo_with_no_password_allowed() {
 }
 
 #[test]
-fn test_passwd_detection() {
+fn passwd_is_rejected_as_interactive() {
     let input = BashInput {
         command: "passwd".to_string(),
         cwd: None,
@@ -293,7 +293,7 @@ fn test_passwd_detection() {
 }
 
 #[test]
-fn test_su_needs_password_detection() {
+fn su_is_rejected_as_needing_password() {
     let input = BashInput {
         command: "su -".to_string(),
         cwd: None,
@@ -305,7 +305,7 @@ fn test_su_needs_password_detection() {
 }
 
 #[test]
-fn test_mysql_needs_password_detection() {
+fn mysql_with_password_prompt_flag_is_rejected() {
     let input = BashInput {
         command: "mysql -u root -p".to_string(),
         cwd: None,
@@ -317,7 +317,7 @@ fn test_mysql_needs_password_detection() {
 }
 
 #[test]
-fn test_mysql_with_password_allowed() {
+fn mysql_with_password_allowed() {
     let input = BashInput {
         command: "mysql -u root -p'mypassword'".to_string(),
         cwd: None,
@@ -328,7 +328,7 @@ fn test_mysql_with_password_allowed() {
 }
 
 #[test]
-fn test_gpg_needs_passphrase_detection() {
+fn gpg_without_batch_passphrase_is_rejected() {
     let input = BashInput {
         command: "gpg --decrypt file.gpg".to_string(),
         cwd: None,
@@ -340,7 +340,7 @@ fn test_gpg_needs_passphrase_detection() {
 }
 
 #[test]
-fn test_gpg_with_batch_allowed() {
+fn gpg_with_batch_allowed() {
     let input = BashInput {
         command: "gpg --batch --passphrase-fd 0 --decrypt file.gpg".to_string(),
         cwd: None,
@@ -351,7 +351,7 @@ fn test_gpg_with_batch_allowed() {
 }
 
 #[test]
-fn test_normal_command_allowed() {
+fn normal_command_allowed() {
     let input = BashInput {
         command: "ls -la".to_string(),
         cwd: None,
@@ -362,7 +362,7 @@ fn test_normal_command_allowed() {
 }
 
 #[test]
-fn test_scp_detection() {
+fn scp_without_key_is_rejected() {
     let input = BashInput {
         command: "scp file.txt root@192.168.1.1:/tmp/".to_string(),
         cwd: None,
@@ -374,7 +374,7 @@ fn test_scp_detection() {
 }
 
 #[test]
-fn test_rsync_ssh_detection() {
+fn rsync_over_ssh_transport_is_rejected() {
     let input = BashInput {
         command: "rsync -avz -e ssh file.txt root@192.168.1.1:/tmp/".to_string(),
         cwd: None,
@@ -385,7 +385,7 @@ fn test_rsync_ssh_detection() {
 }
 
 #[test]
-fn test_sshpass_command_allowed() {
+fn sshpass_command_allowed() {
     let input = BashInput {
         command: "sshpass -p 'password' ssh root@192.168.1.1 ls /root".to_string(),
         cwd: None,
@@ -396,7 +396,7 @@ fn test_sshpass_command_allowed() {
 }
 
 #[test]
-fn test_empty_command_allowed() {
+fn empty_command_allowed() {
     let input = BashInput {
         command: "".to_string(),
         cwd: None,

@@ -3,7 +3,7 @@ use std::io::Write;
 use tempfile::NamedTempFile;
 
 #[test]
-fn test_load_subagent_config() {
+fn load_subagent_config_reads_roles_with_prompts_and_max_turns() {
     let config_content = r#"
 [llm]
 provider = "anthropic"
@@ -44,7 +44,7 @@ max_turns = 8
 }
 
 #[test]
-fn test_subagent_tools_config() {
+fn subagent_tools_config_parses_per_tool_visibility_flags() {
     let config_content = r#"
 [llm]
 provider = "openai"
@@ -69,7 +69,7 @@ tools = { "bash" = true, "read" = true }
 }
 
 #[test]
-fn test_empty_subagent_config() {
+fn config_without_subagent_section_has_no_roles() {
     let config_content = r#"
 [llm]
 provider = "anthropic"
@@ -84,7 +84,7 @@ provider = "anthropic"
 }
 
 #[test]
-fn test_loads_memory_automation_config() {
+fn memory_automation_section_is_parsed_field_by_field() {
     let config_content = r#"
 [memory_automation]
 enabled = true
@@ -120,7 +120,7 @@ allowed_agent_roles = ["main", "researcher"]
 }
 
 #[test]
-fn test_load_linux_dynsandbox_operation_backend_config() {
+fn operation_backend_options_keep_isolation_settings() {
     let config_content = r#"
 [llm]
 provider = "openai"

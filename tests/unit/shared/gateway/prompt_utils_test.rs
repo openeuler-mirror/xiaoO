@@ -11,14 +11,14 @@ fn create_test_role(id: &str, desc: &str) -> SubagentRoleRecord {
 }
 
 #[test]
-fn test_empty_roles_returns_none() {
+fn empty_roles_returns_none() {
     let roles = BTreeMap::new();
     let result = compose_subagent_delegation_rules(&roles);
     assert!(result.is_none());
 }
 
 #[test]
-fn test_single_role_formats_correctly() {
+fn single_role_renders_bullet_entry_and_delegation_tools() {
     let mut roles = BTreeMap::new();
     roles.insert(
         "code_reviewer".to_string(),
@@ -36,7 +36,7 @@ fn test_single_role_formats_correctly() {
 }
 
 #[test]
-fn test_multiple_roles_format_list() {
+fn every_role_gets_its_own_bullet_entry() {
     let mut roles = BTreeMap::new();
     roles.insert(
         "reviewer".to_string(),
@@ -55,7 +55,7 @@ fn test_multiple_roles_format_list() {
 }
 
 #[test]
-fn test_rules_content_structure() {
+fn rules_include_header_available_roles_and_join_tools() {
     let mut roles = BTreeMap::new();
     roles.insert("agent1".to_string(), create_test_role("agent1", "desc1"));
 
@@ -68,14 +68,14 @@ fn test_rules_content_structure() {
 }
 
 #[test]
-fn test_generate_skills_dirs_table_empty() {
+fn skills_dirs_table_without_dirs_shows_placeholder() {
     let dirs: Vec<PathBuf> = Vec::new();
     let table = generate_skills_dirs_table(&dirs);
     assert!(table.contains("(none configured)"));
 }
 
 #[test]
-fn test_generate_skills_dirs_table_default_four_levels() {
+fn skills_dirs_table_labels_default_dirs_by_scope() {
     let dirs = vec![
         PathBuf::from(".xiaoo/skills"),
         PathBuf::from("/home/user/.xiaoo/skills"),
@@ -91,7 +91,7 @@ fn test_generate_skills_dirs_table_default_four_levels() {
 }
 
 #[test]
-fn test_generate_skills_dirs_table_with_config_dirs() {
+fn skills_dirs_table_lists_extra_config_dirs_as_configured_entries() {
     let dirs = vec![
         PathBuf::from(".xiaoo/skills"),
         PathBuf::from("/opt/custom/skills"),
@@ -110,7 +110,7 @@ fn test_generate_skills_dirs_table_with_config_dirs() {
 }
 
 #[test]
-fn test_classify_skill_dir_user_variations() {
+fn home_and_tilde_skill_dirs_classify_as_user_scope() {
     let mut counter = 0;
 
     assert_eq!(

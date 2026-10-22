@@ -150,7 +150,7 @@ async fn run_agent_loop_synthesizes_missing_call_id_and_executes_tool() {
 }
 
 #[test]
-fn test_filter_ask_user_question_output() {
+fn filter_ask_user_question_output_replaces_secret_with_display_value() {
     // Test with display_value
     let input_with_display = json!({
         "answers": [{
@@ -204,7 +204,7 @@ fn test_filter_ask_user_question_output() {
 }
 
 #[test]
-fn test_extract_secrets_from_messages() {
+fn extract_secrets_from_messages_redacts_sensitive_values() {
     // Test 1: Only extract secrets with display_value (is_secret=true)
     let message_with_secret = ChatMessage {
         role: MessageRole::Tool,

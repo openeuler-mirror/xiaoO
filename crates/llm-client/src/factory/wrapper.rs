@@ -44,12 +44,6 @@ impl LlmProviderWrapper {
         }
     }
 
-    /// Deprecated compatibility no-op. Runtime context is now supplied per call.
-    pub fn set_runtime_view(&self, _runtime_view: Arc<dyn RuntimeView>) {}
-
-    /// Deprecated compatibility no-op. Runtime context is now supplied per call.
-    pub fn clear_runtime_view(&self) {}
-
     /// Returns the raw inner provider that this wrapper delegates to.
     pub fn inner(&self) -> Arc<dyn LlmProvider> {
         self.inner.clone()

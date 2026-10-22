@@ -42,7 +42,6 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
     }
 
     async fn create_with_root_span(
-        _agent_id: String,
         storage: Arc<S>,
         span_type: impl Into<String>,
         extras: serde_json::Value,
@@ -88,17 +87,12 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         })
     }
 
-    pub async fn new_user(agent_id: &str, storage: Arc<S>) -> Result<Self> {
-        Self::new_user_with_config(agent_id, storage, ContextConfig::default()).await
+    pub async fn new_user(storage: Arc<S>) -> Result<Self> {
+        Self::new_user_with_config(storage, ContextConfig::default()).await
     }
 
-    pub async fn new_user_with_config(
-        agent_id: &str,
-        storage: Arc<S>,
-        config: ContextConfig,
-    ) -> Result<Self> {
+    pub async fn new_user_with_config(storage: Arc<S>, config: ContextConfig) -> Result<Self> {
         Self::create_with_root_span(
-            agent_id.to_string(),
             storage,
             span_types::USER,
             serde_json::json!({}),
@@ -110,14 +104,12 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
     }
 
     pub async fn new_user_with_explicit_trace(
-        agent_id: &str,
         trace_id: String,
         root_span_id: Option<String>,
         storage: Arc<S>,
         config: ContextConfig,
     ) -> Result<Self> {
         Self::create_with_root_span(
-            agent_id.to_string(),
             storage,
             span_types::USER,
             serde_json::json!({}),
@@ -128,18 +120,16 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         .await
     }
 
-    pub async fn new_quest(agent_id: &str, quest_id: &str, storage: Arc<S>) -> Result<Self> {
-        Self::new_quest_with_config(agent_id, quest_id, storage, ContextConfig::default()).await
+    pub async fn new_quest(quest_id: &str, storage: Arc<S>) -> Result<Self> {
+        Self::new_quest_with_config(quest_id, storage, ContextConfig::default()).await
     }
 
     pub async fn new_quest_with_config(
-        agent_id: &str,
         quest_id: &str,
         storage: Arc<S>,
         config: ContextConfig,
     ) -> Result<Self> {
         Self::create_with_root_span(
-            agent_id.to_string(),
             storage,
             span_types::QUEST,
             serde_json::json!({ "quest_id": quest_id }),
@@ -151,13 +141,11 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
     }
 
     pub async fn new_spawned(
-        agent_id: &str,
         parent_trace_id: &str,
         parent_span_id: &str,
         storage: Arc<S>,
     ) -> Result<Self> {
         Self::new_spawned_with_config(
-            agent_id,
             parent_trace_id,
             parent_span_id,
             storage,
@@ -167,14 +155,12 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
     }
 
     pub async fn new_spawned_with_config(
-        agent_id: &str,
         parent_trace_id: &str,
         parent_span_id: &str,
         storage: Arc<S>,
         config: ContextConfig,
     ) -> Result<Self> {
         Self::create_with_root_span(
-            agent_id.to_string(),
             storage,
             span_types::SPAWNED,
             serde_json::json!({

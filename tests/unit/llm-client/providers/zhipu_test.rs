@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_schema_to_format_description_simple() {
+fn schema_to_format_description_lists_fields_and_required() {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -17,7 +17,7 @@ fn test_schema_to_format_description_simple() {
 }
 
 #[test]
-fn test_schema_to_format_description_with_description() {
+fn schema_to_format_description_appends_field_comments() {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {

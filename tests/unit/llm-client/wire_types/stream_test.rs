@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_parsed_chunk() {
+fn parsed_chunk_holds_content_finish_reason_and_usage() {
     let chunk = ParsedChunk::default();
     assert!(chunk.content.is_none());
     assert!(chunk.finish_reason.is_none());
@@ -27,7 +27,7 @@ fn test_parsed_chunk() {
 }
 
 #[test]
-fn test_parsed_chunk_with_tool_calls() {
+fn parsed_chunk_carries_tool_call_deltas() {
     let tool_call_delta = WireToolCallDelta {
         index: 0,
         id: Some("call_123".to_string()),

@@ -268,8 +268,6 @@ impl TraceRecorder for NoopTraceRecorder {
     async fn end_span(&self, _span: TraceSpanHandle, _outcome: TraceOutcome, _fields: Value) {}
 
     async fn finalize_trace(&self, _outcome: TraceOutcome, _fields: Value) {}
-
-    async fn force_finalize_trace(&self, _outcome: TraceOutcome, _fields: Value) {}
 }
 
 struct NoopHookerRegistry;

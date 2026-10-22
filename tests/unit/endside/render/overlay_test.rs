@@ -13,31 +13,31 @@ use ratatui::Terminal;
 use std::path::PathBuf;
 
 #[test]
-fn test_basic() {
+fn cursor_position_tracks_plain_text() {
     let (row, col) = calculate_visual_cursor_position("hello", 3, 10);
     assert_eq!((row, col), (0, 3));
 }
 
 #[test]
-fn test_newline() {
+fn cursor_position_resets_column_after_newline() {
     let (row, col) = calculate_visual_cursor_position("hello\nworld", 6, 10);
     assert_eq!((row, col), (1, 0));
 }
 
 #[test]
-fn test_cursor_after_newline() {
+fn cursor_position_at_trailing_newline_starts_next_row() {
     let (row, col) = calculate_visual_cursor_position("hello\n", 6, 10);
     assert_eq!((row, col), (1, 0));
 }
 
 #[test]
-fn test_empty() {
+fn cursor_position_of_empty_input_is_origin() {
     let (row, col) = calculate_visual_cursor_position("", 0, 10);
     assert_eq!((row, col), (0, 0));
 }
 
 #[test]
-fn test_multiple_spaces_wrap() {
+fn cursor_position_wraps_after_trailing_spaces() {
     // "aa   bb" at width 4: ratatui renders "aa  " / "bb  " (two trailing
     // spaces fill the first line as background). Cursor at the end (7) must
     // be on row 1 at the end of "bb" (col 2).
@@ -47,7 +47,7 @@ fn test_multiple_spaces_wrap() {
 }
 
 #[test]
-fn test_long_word_break() {
+fn cursor_position_breaks_long_words_at_width() {
     // "aaaaaaaa" at width 4 wraps as "aaaa" / "aaaa"; cursor=4 is the start
     // of the second line, not the (off-screen) end of the first.
     assert_eq!(calculate_visual_cursor_position("aaaaaaaa", 4, 4), (1, 0));
@@ -55,7 +55,7 @@ fn test_long_word_break() {
 }
 
 #[test]
-fn test_cjk_wrap() {
+fn cursor_position_counts_cjk_as_double_width() {
     // Each CJK char is width 2; width 6 fits three per line.
     assert_eq!(calculate_visual_cursor_position("中文测试", 3, 6), (1, 0));
     assert_eq!(calculate_visual_cursor_position("中文测试", 4, 6), (1, 2));

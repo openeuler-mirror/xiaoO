@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_key_reconstruction_deterministic() {
+fn key_reconstruction_deterministic() {
     let provider = WhiteBoxKeyProvider::new("test");
     let key1 = provider.reconstruct_key().unwrap();
     let key2 = provider.reconstruct_key().unwrap();
@@ -9,7 +9,7 @@ fn test_key_reconstruction_deterministic() {
 }
 
 #[test]
-fn test_key_providers_same_key() {
+fn differently_named_providers_yield_same_key() {
     let p1 = WhiteBoxKeyProvider::new("p1");
     let p2 = WhiteBoxKeyProvider::new("p2");
     let k1 = p1.reconstruct_key().unwrap();
@@ -18,7 +18,7 @@ fn test_key_providers_same_key() {
 }
 
 #[test]
-fn test_key_length() {
+fn reconstructed_key_is_32_bytes_for_aes_256() {
     let provider = WhiteBoxKeyProvider::new("test");
     let key = provider.reconstruct_key().unwrap();
     assert_eq!(key.len(), 32, "AES-256 requires 32 bytes");

@@ -148,7 +148,7 @@ impl SessionSupervisor {
             session_store,
             runtime_resolver,
             backend_manager,
-            coordinator: SubagentCoordinator::new(),
+            coordinator: SubagentCoordinator::default(),
             session: Mutex::new(session),
             pending_joins: Mutex::new(HashMap::new()),
             pending_interactions: Mutex::new(HashMap::new()),

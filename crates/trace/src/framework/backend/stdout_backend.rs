@@ -108,25 +108,6 @@ impl TraceBackend for StdoutBackend {
             })
         );
     }
-
-    async fn force_finalize_trace(
-        &self,
-        occurred_at_ms: u64,
-        final_parent_span_id: Option<String>,
-        outcome: TraceOutcome,
-        fields: Value,
-    ) {
-        println!(
-            "{}",
-            json!({
-                "record_type": "trace_force_finalization",
-                "occurred_at_ms": occurred_at_ms,
-                "final_parent_span_id": final_parent_span_id,
-                "outcome": format!("{:?}", outcome),
-                "fields": fields,
-            })
-        );
-    }
 }
 
 fn print_span_snapshot(operation: &str, state: &StdoutSpanState) {

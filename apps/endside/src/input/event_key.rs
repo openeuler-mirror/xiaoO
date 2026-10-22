@@ -130,34 +130,18 @@ impl App {
             return self.handle_api_key_dialog_key(key);
         }
 
-        if self.state.input_mode == InputMode::InteractionPrompt {
-            return self.handle_interaction_prompt_key(key);
-        }
-
-        if self.state.input_mode == InputMode::SessionSnapshotSelection {
-            return self.handle_session_snapshot_selection_key(key).await;
-        }
-
-        if self.state.input_mode == InputMode::SandboxSelection {
-            return self.handle_sandbox_selection_key(key);
-        }
-
-        if self.state.input_mode == InputMode::RemoteSessionSelection {
-            return self.handle_remote_session_selection_key(key).await;
-        }
-
-        if self.state.input_mode == InputMode::TurnDelete {
-            return self.handle_turn_delete_key(key).await;
-        }
-
         match self.state.input_mode {
+            InputMode::InteractionPrompt => self.handle_interaction_prompt_key(key),
+            InputMode::SessionSnapshotSelection => {
+                self.handle_session_snapshot_selection_key(key).await
+            }
+            InputMode::SandboxSelection => self.handle_sandbox_selection_key(key),
+            InputMode::RemoteSessionSelection => {
+                self.handle_remote_session_selection_key(key).await
+            }
+            InputMode::TurnDelete => self.handle_turn_delete_key(key).await,
             InputMode::Editing => self.handle_editing_mode_key(key).await,
             InputMode::ProviderSelection => self.handle_provider_selection_key(key),
-            InputMode::SandboxSelection => Ok(()),
-            InputMode::RemoteSessionSelection => Ok(()),
-            InputMode::SessionSnapshotSelection => Ok(()),
-            InputMode::InteractionPrompt => Ok(()),
-            InputMode::TurnDelete => Ok(()),
             InputMode::CronManagement => self.handle_cron_management_key(key).await,
         }
     }
@@ -1688,9 +1672,9 @@ impl App {
 
     fn open_cron_dialog(&mut self) {
         match crate::services::cron_service::load_cron_snapshot(&self.state.config_path) {
-            Ok(snapshot) => {
+            Ok((snapshot, jobs)) => {
                 let dialog = crate::cron_dialog::CronDialog::new(
-                    snapshot.jobs,
+                    jobs,
                     snapshot.jobs_file,
                     snapshot.default_timeout_secs,
                     snapshot.cron_section_present,

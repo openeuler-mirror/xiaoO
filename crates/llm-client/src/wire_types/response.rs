@@ -12,27 +12,6 @@ pub(crate) struct Warning {
     pub message: Option<String>,
 }
 
-#[allow(dead_code)]
-impl Warning {
-    pub(crate) fn new(
-        feature: impl Into<String>,
-        provider: impl Into<String>,
-        action: impl Into<String>,
-    ) -> Self {
-        Self {
-            feature: feature.into(),
-            provider: provider.into(),
-            action: action.into(),
-            message: None,
-        }
-    }
-    #[allow(dead_code)]
-    pub(crate) fn with_message(mut self, message: impl Into<String>) -> Self {
-        self.message = Some(message.into());
-        self
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct KvTransferParams {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

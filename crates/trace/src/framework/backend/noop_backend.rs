@@ -98,15 +98,6 @@ impl TraceBackend for NoopBackend {
         _fields: Value,
     ) {
     }
-
-    async fn force_finalize_trace(
-        &self,
-        _occurred_at_ms: u64,
-        _final_parent_span_id: Option<String>,
-        _outcome: TraceOutcome,
-        _fields: Value,
-    ) {
-    }
 }
 
 fn merge_json_fields(target: &mut Value, update: Value) {

@@ -1,22 +1,24 @@
-//! Loop / tool 事件类型与 sink 契约。
+//! Loop / tool event types and sink contracts.
 //!
-//! 【L1 支撑类型层】`LoopEventSink` / `ToolEventSink` 是 Agent 内核回调的契约
-//! 接口；`ToolLifecycleEvent` / `ToolResultEvent` / `LoopEndSummary` 是事件负载
-//! 类型，同时也是 SSE `Done` / `tool` / `tool_result` 事件的 wire 载荷。本模块
-//! 同时提供丢弃事件的 Noop 默认实现，用于无需采集事件的场景。
+//! `LoopEventSink` / `ToolEventSink` are the contract interfaces for Agent
+//! kernel callbacks; `ToolLifecycleEvent` / `ToolResultEvent` /
+//! `LoopEndSummary` are the event payload types, which also serve as the
+//! wire payloads of the SSE `Done` / `tool` / `tool_result` events. This
+//! module also provides the no-op default implementation that discards
+//! events for scenarios that do not need to collect them.
 //!
 //! `LoopEventSink` receives progressive snapshots rather than text deltas;
 //! consumers that need deltas can diff adjacent snapshots.
 
-// ---- sink 契约 trait ----
+// ---- Sink contract traits ----
 #[doc(inline)]
 pub use agent_contracts::events::{LoopEventSink, ToolEventSink};
 
-// ---- 事件负载类型 ----
+// ---- Event payload types ----
 #[doc(inline)]
 pub use agent_types::events::{LoopEndSummary, ToolLifecycleEvent, ToolResultEvent};
 
-// ---- 构建默认件 ----
+// ---- Default implementation ----
 
 /// Default `ToolEventSink` that discards every event; the standard
 /// implementation when a caller does not need to collect tool lifecycle

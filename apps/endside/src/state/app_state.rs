@@ -1022,19 +1022,6 @@ impl AppState {
         args_preview: &str,
         file_change: Option<crate::chat::FileChangeDelta>,
     ) -> Option<crate::chat::FileChangeDelta> {
-        let file_change_str = match &file_change {
-            Some(delta) => format!(
-                "Some(file_path={}, additions={}, deletions={})",
-                delta.file_path, delta.additions, delta.deletions
-            ),
-            None => "None".to_string(),
-        };
-        let _ = crate::support::error_log::append_error_log(
-            "app_state on_tool_completed",
-            &format!(
-                "call_id={call_id} tool={tool} args_preview={args_preview} file_change={file_change_str}"
-            ),
-        );
         self.diff_tracker
             .on_tool_completed(call_id, tool, args_preview, file_change.map(Into::into))
             .map(Into::into)

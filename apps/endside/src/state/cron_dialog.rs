@@ -320,14 +320,11 @@ impl CronDialog {
 
     /// Save current jobs to file.
     fn save(&self) -> anyhow::Result<()> {
-        // Build a temporary snapshot for writing
-        let snapshot = crate::services::cron_service::CronConfigSnapshot {
+        let params = crate::services::cron_service::WriteJobsParams {
             jobs_file: self.jobs_file.clone(),
-            cron_section_present: self.cron_section_present,
             default_timeout_secs: self.default_timeout_secs,
-            jobs: self.jobs.clone(), // Not actually used by write_jobs, we pass jobs separately
         };
-        crate::services::cron_service::write_jobs(&snapshot, &self.jobs)
+        crate::services::cron_service::write_jobs(&params, &self.jobs)
     }
 
     /// Go back to list mode.

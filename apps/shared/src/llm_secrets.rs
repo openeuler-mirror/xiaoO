@@ -122,8 +122,8 @@ fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
         .with_context(|| format!("failed to read secrets file {}", path.display()))?;
 
     let decrypted = if use_sdf {
-        use vault::sdf::{decrypt_secret, init_sdf_provider};
-        if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
+        use vault::sdf::{decrypt_secret, init_sdf_provider, DEFAULT_SDF_LIBRARY_PATH};
+        if let Err(e) = init_sdf_provider(DEFAULT_SDF_LIBRARY_PATH) {
             anyhow::bail!("SDF 初始化失败: {}", e);
         }
         decrypt_secret(&bytes).map_err(|e| anyhow::anyhow!("SDF 解密失败: {}", e))?
@@ -139,8 +139,8 @@ fn save_encrypted_store(path: &Path, store: &SecretsStore, use_sdf: bool) -> Res
     let json = serde_json::to_vec(store).context("failed to serialize secrets")?;
 
     let encrypted = if use_sdf {
-        use vault::sdf::{encrypt_secret, init_sdf_provider};
-        if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
+        use vault::sdf::{encrypt_secret, init_sdf_provider, DEFAULT_SDF_LIBRARY_PATH};
+        if let Err(e) = init_sdf_provider(DEFAULT_SDF_LIBRARY_PATH) {
             anyhow::bail!("SDF 初始化失败: {}", e);
         }
         encrypt_secret(json.as_ref()).map_err(|e| anyhow::anyhow!("SDF 加密失败: {}", e))?

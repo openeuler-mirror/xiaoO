@@ -1,21 +1,12 @@
-//! 工具装配门面。
+//! Tool assembly facade.
 //!
-//! serverside 的 `build_tool_registry` / `build_tool_runtime_services` 与 shared
-//! resolver 内已有逻辑（`hosted_runtime_resolver`）合并为单一实现，对外只
-//! pub 三个入口（[`discover_tools`] / [`discover_tool_names`] /
-//! [`build_tool_registry`]）与粗粒度输入、目录结构。
-//!
-//! 两条硬约束：
-//! - 入参出参不出现底层细粒度类型：`ToolSource` / `ToolRuntimeServices` /
-//!   `ToolRegistryBuilderImpl` / `ToolRegistryConfig` / `ToolVisibilityConfig` /
-//!   `SubagentRoleConfig` 一律在本模块内部使用（`pub(crate)` 级别），不暴露。
-//! - 新增 pub 项必须有应用消费者：endside `runtime_request::resolve_visible_tool_names`
-//!   消费 `discover_tool_names`；serverside `daemon_runtime` 装配消费
-//!   `build_tool_registry`。
-//!
-//! `SubagentControl` 类型名只出现在本模块的签名里（`ToolAssemblyInput.subagent_control`
-//! 字段），不向应用再导出：serverside 拿到 shared 的 `CoreBackedSessionService`
-//! 后作为值传入字段，unsized coercion 不需要 `use` trait 名。
+//! Single implementation behind three public entries
+//! ([`discover_tools`] / [`discover_tool_names`] / [`build_tool_registry`])
+//! with coarse-grained inputs. Fine-grained types (`ToolSource` /
+//! `ToolRuntimeServices` / `ToolRegistryBuilderImpl` / `ToolRegistryConfig` /
+//! `ToolVisibilityConfig` / `SubagentRoleConfig`) stay `pub(crate)` and are
+//! never exposed to applications: endside consumes `discover_tool_names`,
+//! serverside consumes `build_tool_registry`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;

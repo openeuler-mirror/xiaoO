@@ -5,11 +5,8 @@ use agent_types::common::HookerId;
 use agent_types::hook::HookPointId;
 
 pub struct HookerRegistryImpl {
-    // Stores all registered hookers (tool and LLM) by HookerId.
     hookers: HashMap<HookerId, Box<dyn Hooker>>,
-    // Stores which hookers are enabled by the registry config.
     enabled_hookers: HashSet<HookerId>,
-    // Stores per-hooker policy payloads from the registry config.
     policies: HashMap<HookerId, serde_json::Value>,
 }
 

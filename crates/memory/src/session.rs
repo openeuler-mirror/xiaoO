@@ -37,16 +37,28 @@ impl SessionMemoryPolicy {
             });
         }
 
-        if self.max_total_tokens < self.max_section_tokens {
-            return Err(MemoryError::InvalidConfiguration {
-                message:
-                    "session memory policy max_total_tokens must be greater than or equal to max_section_tokens"
-                        .to_string(),
-            });
-        }
-
-        Ok(())
+        ensure_total_ge_section(
+            "session memory policy max_total_tokens",
+            self.max_section_tokens,
+            self.max_total_tokens,
+        )
     }
+}
+
+fn ensure_total_ge_section(
+    context: &str,
+    max_section_tokens: usize,
+    max_total_tokens: usize,
+) -> MemoryResult<()> {
+    if max_total_tokens < max_section_tokens {
+        return Err(MemoryError::InvalidConfiguration {
+            message: format!(
+                "{} must be greater than or equal to max_section_tokens",
+                context
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,13 +244,11 @@ pub fn truncate_session_memory_summary(
         });
     }
 
-    if max_total_tokens < max_section_tokens {
-        return Err(MemoryError::InvalidConfiguration {
-            message:
-                "session memory truncation max_total_tokens must be greater than or equal to max_section_tokens"
-                    .to_string(),
-        });
-    }
+    ensure_total_ge_section(
+        "session memory truncation max_total_tokens",
+        max_section_tokens,
+        max_total_tokens,
+    )?;
 
     let sections = parse_summary_sections(summary);
     budget_session_sections(sections, estimator, max_section_tokens, max_total_tokens)

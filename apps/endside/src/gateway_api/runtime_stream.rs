@@ -173,8 +173,7 @@ impl GatewayRuntime {
                         metadata.task_goal,
                     );
                 }
-                SessionTurnUpdate::LoopEnd { agent_id, summary } => {
-                    let _ = summary.turn_count;
+                SessionTurnUpdate::LoopEnd { agent_id } => {
                     if !is_root_stream_agent(&agent_id, state) {
                         if let Some(lane) = state.chat_state.subagent_lanes.get_mut(&agent_id.0) {
                             lane.is_running = false;

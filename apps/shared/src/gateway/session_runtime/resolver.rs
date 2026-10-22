@@ -132,9 +132,11 @@ pub enum SessionRuntimeResolveError {
 pub trait SessionRuntimeResolver: Send + Sync {
     fn bind_subagent_control(&self, _control: Arc<dyn SubagentControl>) {}
 
-    /// 暴露一个不透明的已绑定控制句柄存储，供 `AppBootstrap` 启动期注入
-    /// 绑定（与 [`SessionRuntimeResolver::bind_subagent_control`] 二选一：
-    /// 解析器自行管理绑定时返回 `None`，否则返回共享 store 让 bootstrap 写入）。
+    /// Exposes an opaque store for the bound control handle so `AppBootstrap`
+    /// can inject the binding during startup (alternative to
+    /// [`SessionRuntimeResolver::bind_subagent_control`]: return `None` when
+    /// the resolver manages the binding itself, otherwise return the shared
+    /// store for bootstrap to write into).
     fn bound_control_store(&self) -> Option<&BoundControlStore> {
         None
     }
