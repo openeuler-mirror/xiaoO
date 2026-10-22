@@ -163,10 +163,12 @@ impl WhiteBoxKeyProvider {
         }
     }
 
-    fn verify_key(_key: &[u8; 32]) -> Result<(), KeyProviderError> {
-        // ⚠️ 警告: 当前实现允许 NULL 密钥 (全零)
-        // 仅适用于测试环境
-        // 生产环境应验证密钥有效性
+    fn verify_key(key: &[u8; 32]) -> Result<(), KeyProviderError> {
+        if key.iter().all(|&byte| byte == 0) {
+            return Err(KeyProviderError::InvalidInput(
+                "whitebox: reconstructed key is NULL (all-zero)".to_string(),
+            ));
+        }
         Ok(())
     }
 }

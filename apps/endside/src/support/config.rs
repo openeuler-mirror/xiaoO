@@ -10,7 +10,7 @@ use xiaoo_api::chat::HookerRegistryConfig;
 use xiaoo_api::chat::ReasoningEffort;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_shared::gateway::MemoryAutomationConfig;
-use xiaoo_shared::lsp_support::{AutoInstall, LspServiceRegistry, ServerConfig};
+use xiaoo_shared::lsp_support::{build_extra_server_configs, LspServiceRegistry};
 use xiaoo_shared::mcp_support::{self, McpSection};
 use xiaoo_shared::skills_support::SkillsConfig as ResolvedSkillsConfig;
 
@@ -36,6 +36,32 @@ pub struct ExtraServerConfig {
     pub args: Vec<String>,
     pub root_markers: Vec<String>,
     pub language_id: String,
+}
+
+impl xiaoo_shared::lsp_support::ExtraServerConfigView for ExtraServerConfig {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn extensions(&self) -> &[String] {
+        &self.extensions
+    }
+
+    fn command(&self) -> &str {
+        &self.command
+    }
+
+    fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    fn root_markers(&self) -> &[String] {
+        &self.root_markers
+    }
+
+    fn language_id(&self) -> &str {
+        &self.language_id
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -466,48 +492,6 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
 
 pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
     xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(config_path)
-}
-
-fn build_extra_server_configs(extra_servers: &[ExtraServerConfig]) -> Vec<ServerConfig> {
-    extra_servers
-        .iter()
-        .map(|c| {
-            let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
-            let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
-            let language_id: &'static str = Box::leak(c.language_id.clone().into_boxed_str());
-            let extensions: &'static [&'static str] = Box::leak(
-                c.extensions
-                    .iter()
-                    .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            let args: &'static [&'static str] = Box::leak(
-                c.args
-                    .iter()
-                    .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            let root_markers: &'static [&'static str] = Box::leak(
-                c.root_markers
-                    .iter()
-                    .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            ServerConfig {
-                id,
-                extensions,
-                command,
-                args,
-                root_markers,
-                language_id,
-                initialization_options: None,
-                auto_install: AutoInstall::None,
-            }
-        })
-        .collect()
 }
 
 fn default_agent_id() -> String {

@@ -33,10 +33,12 @@ impl SqliteDurableMemoryStore {
     ) -> MemoryResult<Self> {
         let db_path = db_path.as_ref().to_path_buf();
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| MemoryError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(|e| MemoryError::Storage {
+                message: format!("failed to create database directory: {e}"),
+            })?;
         }
 
-        let conn = Connection::open(&db_path).map_err(|e| MemoryError::Embedding {
+        let conn = Connection::open(&db_path).map_err(|e| MemoryError::Storage {
             message: format!("failed to open SQLite database: {e}"),
         })?;
 
@@ -102,7 +104,7 @@ impl SqliteDurableMemoryStore {
             );
             ",
         )
-        .map_err(|e| MemoryError::Embedding {
+        .map_err(|e| MemoryError::Storage {
             message: format!("failed to init SQLite schema: {e}"),
         })?;
         Ok(())
@@ -145,18 +147,18 @@ impl SqliteDurableMemoryStore {
                     current_dims
                 );
                 conn.execute("UPDATE memories SET embedding = NULL", [])
-                    .map_err(|e| MemoryError::Embedding {
+                    .map_err(|e| MemoryError::Storage {
                         message: format!("failed to invalidate embeddings: {e}"),
                     })?;
                 conn.execute("DELETE FROM embedding_cache", [])
-                    .map_err(|e| MemoryError::Embedding {
+                    .map_err(|e| MemoryError::Storage {
                         message: format!("failed to clear embedding cache: {e}"),
                     })?;
                 conn.execute(
                     "INSERT OR REPLACE INTO embedding_meta (id, model_name, dimensions) VALUES (1, ?1, ?2)",
                     rusqlite::params![current_name, current_dims],
                 )
-                .map_err(|e| MemoryError::Embedding {
+                .map_err(|e| MemoryError::Storage {
                     message: format!("failed to update embedding meta: {e}"),
                 })?;
                 Ok(())
@@ -167,7 +169,7 @@ impl SqliteDurableMemoryStore {
                     "INSERT INTO embedding_meta (id, model_name, dimensions) VALUES (1, ?1, ?2)",
                     rusqlite::params![current_name, current_dims],
                 )
-                .map_err(|e| MemoryError::Embedding {
+                .map_err(|e| MemoryError::Storage {
                     message: format!("failed to insert embedding meta: {e}"),
                 })?;
                 Ok(())
@@ -185,7 +187,7 @@ impl SqliteDurableMemoryStore {
             PRAGMA temp_store   = MEMORY;
             ",
         )
-        .map_err(|e| MemoryError::Embedding {
+        .map_err(|e| MemoryError::Storage {
             message: format!("failed to apply PRAGMA: {e}"),
         })?;
         Ok(())
@@ -602,7 +604,7 @@ impl SemanticMemoryStore for SqliteDurableMemoryStore {
             hybrid_merge(&vector_results, &keyword_results, vw, kw, limit)
         })
         .await
-        .map_err(|e| MemoryError::Embedding {
+        .map_err(|e| MemoryError::Storage {
             message: format!("search task failed: {e}"),
         })?;
 
@@ -613,7 +615,7 @@ impl SemanticMemoryStore for SqliteDurableMemoryStore {
             Self::load_memories_by_ids(&conn, &ids)
         })
         .await
-        .map_err(|e| MemoryError::Embedding {
+        .map_err(|e| MemoryError::Storage {
             message: format!("load task failed: {e}"),
         })?;
 
@@ -635,12 +637,12 @@ impl SemanticMemoryStore for SqliteDurableMemoryStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock();
             conn.execute_batch("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
-                .map_err(|e| MemoryError::Embedding {
+                .map_err(|e| MemoryError::Storage {
                     message: format!("FTS5 rebuild failed: {e}"),
                 })
         })
         .await
-        .map_err(|e| MemoryError::Embedding {
+        .map_err(|e| MemoryError::Storage {
             message: format!("reindex task failed: {e}"),
         })??;
 
@@ -650,12 +652,12 @@ impl SemanticMemoryStore for SqliteDurableMemoryStore {
             let conn = conn.lock();
             let mut stmt = conn
                 .prepare("SELECT id, content FROM memories WHERE embedding IS NULL")
-                .map_err(|e| MemoryError::Embedding {
+                .map_err(|e| MemoryError::Storage {
                     message: format!("select NULL embeddings failed: {e}"),
                 })?;
             let rows: Vec<(String, String)> = stmt
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(|e| MemoryError::Embedding {
+                .map_err(|e| MemoryError::Storage {
                     message: format!("query NULL embeddings failed: {e}"),
                 })?
                 .filter_map(|r| r.ok())
@@ -663,7 +665,7 @@ impl SemanticMemoryStore for SqliteDurableMemoryStore {
             Ok::<_, MemoryError>(rows)
         })
         .await
-        .map_err(|e| MemoryError::Embedding {
+        .map_err(|e| MemoryError::Storage {
             message: format!("reindex task failed: {e}"),
         })??;
 

@@ -65,6 +65,8 @@ pub enum MemoryError {
     DurableMemoryLimitExceeded { configured: usize, actual: usize },
     #[error("embedding error: {message}")]
     Embedding { message: String },
+    #[error("storage error: {message}")]
+    Storage { message: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("llm error: {0}")]

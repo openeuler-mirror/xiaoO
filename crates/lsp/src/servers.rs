@@ -27,33 +27,33 @@ pub enum AutoInstall {
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    pub id: &'static str,
-    pub extensions: &'static [&'static str],
-    pub command: &'static str,
-    pub args: &'static [&'static str],
-    pub root_markers: &'static [&'static str],
-    pub language_id: &'static str,
+    pub id: String,
+    pub extensions: Vec<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub root_markers: Vec<String>,
+    pub language_id: String,
     pub initialization_options: Option<Value>,
     pub auto_install: AutoInstall,
 }
 
 /// Resolve the binary path for `config`: check PATH/global-bin first, then try auto-install.
 pub async fn resolve_binary(config: &ServerConfig, env: &dyn LspEnv) -> Result<PathBuf, LspError> {
-    if let Some(path) = env.which(config.command) {
+    if let Some(path) = env.which(&config.command) {
         return Ok(path);
     }
     info!(
-        server = config.id,
-        command = config.command,
+        server = config.id.as_str(),
+        command = config.command.as_str(),
         "binary not found in PATH, attempting auto-install"
     );
     match try_auto_install(config, env).await {
         Ok(path) => {
-            info!(server = config.id, ?path, "auto-install succeeded");
+            info!(server = config.id.as_str(), ?path, "auto-install succeeded");
             Ok(path)
         }
         Err(msg) => {
-            warn!(server = config.id, %msg, "auto-install failed");
+            warn!(server = config.id.as_str(), %msg, "auto-install failed");
             Err(LspError::StartupFailed(msg))
         }
     }
@@ -102,7 +102,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
             if result.exit_code != Some(0) {
                 return Err(format!("go install {package} failed"));
             }
-            env.which(config.command)
+            env.which(&config.command)
                 .ok_or_else(|| format!("'{}' still not found after go install", config.command))
         }
 
@@ -115,7 +115,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
                 ));
             };
             let pip_str = pip.to_string_lossy().into_owned();
-            info!(server = config.id, %package, pip = %pip_str, "running: pip install --user");
+            info!(server = config.id.as_str(), %package, pip = %pip_str, "running: pip install --user");
             let result = env
                 .backend()
                 .exec()
@@ -133,7 +133,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
             if result.exit_code != Some(0) {
                 return Err(format!("pip install {package} failed"));
             }
-            env.which(config.command)
+            env.which(&config.command)
                 .ok_or_else(|| format!("'{}' still not found after pip install", config.command))
         }
 
@@ -145,7 +145,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
                 ));
             }
             let prefix = bin_dir.to_string_lossy().into_owned();
-            info!(server = config.id, %package, %prefix, "running: npm install --prefix");
+            info!(server = config.id.as_str(), %package, %prefix, "running: npm install --prefix");
             let result = env
                 .backend()
                 .exec()
@@ -164,7 +164,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
             if result.exit_code != Some(0) {
                 return Err(format!("npm install {package} failed"));
             }
-            env.which(config.command)
+            env.which(&config.command)
                 .ok_or_else(|| format!("'{}' still not found after npm install", config.command))
         }
 
@@ -176,7 +176,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
                 ));
             }
             let root_str = bin_dir.to_string_lossy().into_owned();
-            info!(server = config.id, %package, %root_str, "running: cargo install --root");
+            info!(server = config.id.as_str(), %package, %root_str, "running: cargo install --root");
             let result = env
                 .backend()
                 .exec()
@@ -196,7 +196,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
                 return Err(format!("cargo install {package} failed"));
             }
             // cargo install --root puts the binary in <root>/bin/<name>
-            let in_root_bin = bin_dir.join("bin").join(config.command);
+            let in_root_bin = bin_dir.join("bin").join(config.command.as_str());
             let in_root_bin_bp = BackendPath::from_raw(in_root_bin.to_string_lossy().into_owned());
             if env
                 .backend()
@@ -208,7 +208,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
             {
                 return Ok(in_root_bin);
             }
-            env.which(config.command)
+            env.which(&config.command)
                 .ok_or_else(|| format!("'{}' still not found after cargo install", config.command))
         }
     }
@@ -217,78 +217,99 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
 pub fn builtin_servers() -> Vec<ServerConfig> {
     vec![
         ServerConfig {
-            id: "rust-analyzer",
-            extensions: &["rs"],
-            command: "rust-analyzer",
-            args: &[],
-            root_markers: &["Cargo.toml"],
-            language_id: "rust",
+            id: "rust-analyzer".to_string(),
+            extensions: vec!["rs".to_string()],
+            command: "rust-analyzer".to_string(),
+            args: Vec::new(),
+            root_markers: vec!["Cargo.toml".to_string()],
+            language_id: "rust".to_string(),
             initialization_options: None,
             auto_install: AutoInstall::None,
         },
         ServerConfig {
-            id: "gopls",
-            extensions: &["go"],
-            command: "gopls",
-            args: &[],
-            root_markers: &["go.mod"],
-            language_id: "go",
+            id: "gopls".to_string(),
+            extensions: vec!["go".to_string()],
+            command: "gopls".to_string(),
+            args: Vec::new(),
+            root_markers: vec!["go.mod".to_string()],
+            language_id: "go".to_string(),
             initialization_options: None,
             auto_install: AutoInstall::GoInstall {
                 package: "golang.org/x/tools/gopls@latest",
             },
         },
         ServerConfig {
-            id: "pyright",
-            extensions: &["py"],
-            command: "pyright-langserver",
-            args: &["--stdio"],
-            root_markers: &["pyproject.toml", "setup.py", "requirements.txt"],
-            language_id: "python",
+            id: "pyright".to_string(),
+            extensions: vec!["py".to_string()],
+            command: "pyright-langserver".to_string(),
+            args: vec!["--stdio".to_string()],
+            root_markers: vec![
+                "pyproject.toml".to_string(),
+                "setup.py".to_string(),
+                "requirements.txt".to_string(),
+            ],
+            language_id: "python".to_string(),
             initialization_options: Some(serde_json::json!({
                 "python": { "pythonVersion": "3.11" }
             })),
             auto_install: AutoInstall::PipInstall { package: "pyright" },
         },
         ServerConfig {
-            id: "typescript-language-server",
-            extensions: &["ts", "tsx", "js", "jsx"],
-            command: "typescript-language-server",
-            args: &["--stdio"],
-            root_markers: &["package.json", "tsconfig.json"],
-            language_id: "typescript",
+            id: "typescript-language-server".to_string(),
+            extensions: vec![
+                "ts".to_string(),
+                "tsx".to_string(),
+                "js".to_string(),
+                "jsx".to_string(),
+            ],
+            command: "typescript-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
+            root_markers: vec!["package.json".to_string(), "tsconfig.json".to_string()],
+            language_id: "typescript".to_string(),
             initialization_options: None,
             auto_install: AutoInstall::NpmInstall {
                 package: "typescript-language-server",
             },
         },
         ServerConfig {
-            id: "clangd",
-            extensions: &["c", "cc", "cpp", "cxx", "h", "hh", "hpp"],
-            command: "clangd",
-            args: &[],
-            root_markers: &["compile_commands.json", "CMakeLists.txt", ".clangd"],
-            language_id: "c",
+            id: "clangd".to_string(),
+            extensions: vec![
+                "c".to_string(),
+                "cc".to_string(),
+                "cpp".to_string(),
+                "cxx".to_string(),
+                "h".to_string(),
+                "hh".to_string(),
+                "hpp".to_string(),
+            ],
+            command: "clangd".to_string(),
+            args: Vec::new(),
+            root_markers: vec![
+                "compile_commands.json".to_string(),
+                "CMakeLists.txt".to_string(),
+                ".clangd".to_string(),
+            ],
+            language_id: "c".to_string(),
             initialization_options: None,
             auto_install: AutoInstall::None,
         },
         ServerConfig {
-            id: "zls",
-            extensions: &["zig"],
-            command: "zls",
-            args: &[],
-            root_markers: &["build.zig"],
-            language_id: "zig",
+            id: "zls".to_string(),
+            extensions: vec!["zig".to_string()],
+            command: "zls".to_string(),
+            args: Vec::new(),
+            root_markers: vec!["build.zig".to_string()],
+            language_id: "zig".to_string(),
             initialization_options: None,
             auto_install: AutoInstall::None,
         },
         ServerConfig {
-            id: "lua-language-server",
-            extensions: &["lua"],
-            command: "lua-language-server",
-            args: &[],
-            root_markers: &[".luarc.json", ".luarc.jsonc"],
-            language_id: "lua",
+            id: "lua-language-server".to_string(),
+            extensions: vec!["lua".to_string()],
+            command: "lua-language-server".to_string(),
+            args: Vec::new(),
+            root_markers: vec![".luarc.json".to_string(), ".luarc.jsonc".to_string()],
+            language_id: "lua".to_string(),
             initialization_options: None,
             auto_install: AutoInstall::None,
         },

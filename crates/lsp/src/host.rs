@@ -37,7 +37,7 @@ pub trait LspEnv: Send + Sync {
     async fn spawn_process(
         &self,
         cmd: &str,
-        args: &[&str],
+        args: &[String],
         cwd: &Path,
     ) -> Result<SpawnedProcess, LspError>;
 }
@@ -105,7 +105,7 @@ impl LspEnv for LocalLspEnv {
     async fn spawn_process(
         &self,
         cmd: &str,
-        args: &[&str],
+        args: &[String],
         cwd: &Path,
     ) -> Result<SpawnedProcess, LspError> {
         let mut child = tokio::process::Command::new(cmd)
