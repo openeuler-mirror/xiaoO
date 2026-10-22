@@ -3,6 +3,7 @@ use super::memory_automation::{
     MemoryAutomationError, RecallMemory, TurnMemoryContext,
 };
 use serde_json::json;
+use std::future::Future;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::sync::{
@@ -10,7 +11,12 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
+
+// Queue semantics use virtual time: filesystem and worker scheduling latency
+// must not consume the 200 ms admission budget. Contention tests still advance
+// that same clock to exercise the unchanged deadline. Tokio inhibits automatic
+// time advancement while these filesystem blocking tasks are outstanding.
 
 /// Helper mirroring how production code (session_service_impl) builds a
 /// `CompletedTurnIngest` — field-by-field, no test-only constructor.
@@ -138,7 +144,7 @@ fn ram_a_mcp_arguments_match_the_published_tool_schemas() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn queued_ingest_survives_worker_restart() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory-queue.jsonl");
@@ -156,7 +162,7 @@ async fn queued_ingest_survives_worker_restart() {
     assert_eq!(drain_count(&restarted, 0).await, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn durable_ingest_queue_uses_jsonl_snapshot_records() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory-queue.jsonl");
@@ -172,7 +178,7 @@ async fn durable_ingest_queue_uses_jsonl_snapshot_records() {
     assert!(persisted.lines().next().unwrap().contains("\"message-1\""));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn preexisting_lock_file_does_not_block_queue_owner() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory-queue.jsonl");
@@ -191,7 +197,7 @@ async fn preexisting_lock_file_does_not_block_queue_owner() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn held_queue_lock_times_out_instead_of_removing_lock_file() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory-queue.jsonl");
@@ -218,7 +224,7 @@ async fn held_queue_lock_times_out_instead_of_removing_lock_file() {
     assert!(lock_path.exists());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn concurrent_queue_handles_merge_entries_without_lost_updates() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory-queue.jsonl");
@@ -239,7 +245,7 @@ async fn concurrent_queue_handles_merge_entries_without_lost_updates() {
     assert_eq!(drain_count(&restarted, 0).await, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn retry_worker_drains_entry_when_backoff_becomes_due() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory-queue.jsonl");
@@ -250,27 +256,31 @@ async fn retry_worker_drains_entry_when_backoff_becomes_due() {
     queue.enqueue(retrying).await.unwrap();
 
     let server_calls = Arc::new(AtomicUsize::new(0));
-    let _worker = queue.start_retry_worker(5, 1, Duration::from_millis(5), {
+    let ingested = Arc::new(Notify::new());
+    let worker = queue.start_retry_worker(5, 1, Duration::from_millis(5), {
+        let ingested = Arc::clone(&ingested);
         let server_calls = Arc::clone(&server_calls);
         move |_entry| {
             let server_calls = Arc::clone(&server_calls);
+            let ingested = Arc::clone(&ingested);
             async move {
                 server_calls.fetch_add(1, Ordering::SeqCst);
+                ingested.notify_one();
                 Ok(())
             }
         }
     });
-    tokio::time::sleep(Duration::from_millis(30)).await;
-
-    // The worker ticked and drained the due entry. Drop happens implicitly at
-    // scope end; give the aborted task a moment to settle before reopening.
+    ingested.notified().await;
+    // The callback runs before commit. A transaction on the same queue waits
+    // for that commit and verifies that it left no deliverable entry.
+    assert_eq!(drain_count(&queue, 0).await, 0);
     assert_eq!(server_calls.load(Ordering::SeqCst), 1);
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    drop(worker);
     let restarted = DurableIngestQueue::open(path, 4).await.unwrap();
     assert_eq!(drain_count(&restarted, 0).await, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exhausted_ingests_are_retained_until_retried_or_cleared() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory-queue.jsonl");
@@ -305,7 +315,7 @@ async fn exhausted_ingests_are_retained_until_retried_or_cleared() {
     assert_eq!(status.failed_ingests, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn concurrent_drainers_claim_entry_before_ingest() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory-queue.jsonl");
@@ -347,7 +357,7 @@ async fn concurrent_drainers_claim_entry_before_ingest() {
     assert_eq!(drain_count(&restarted, 0).await, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn concurrent_drainers_do_not_reclaim_slow_ingest() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory-queue.jsonl");
@@ -456,7 +466,7 @@ async fn queue_with_stalled_ingest() -> (
     (queue, first, temp)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stalled_same_queue_holder_exhausts_the_original_budget() {
     let (queue, first, _temp) = queue_with_stalled_ingest().await;
     let start = tokio::time::Instant::now();
@@ -473,7 +483,7 @@ async fn stalled_same_queue_holder_exhausts_the_original_budget() {
     assert_eq!(drain_count(&queue, 4_000).await, 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancelled_same_queue_waiter_does_not_block_the_next_transaction() {
     let (queue, first, _temp) = queue_with_stalled_ingest().await;
     let cancelled = {
@@ -490,7 +500,7 @@ async fn cancelled_same_queue_waiter_does_not_block_the_next_transaction() {
     assert_eq!(drain_count(&queue, 4_000).await, 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn timed_out_same_queue_waiter_can_be_followed_by_a_successful_waiter() {
     let (queue, first, _temp) = queue_with_stalled_ingest().await;
     let result = tokio::time::timeout(
@@ -502,4 +512,75 @@ async fn timed_out_same_queue_waiter_can_be_followed_by_a_successful_waiter() {
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
     assert_eq!(drain_count(&queue, 4_000).await, 1);
+}
+
+async fn check_pool_delayed_admission(elapsed: Duration, should_expire: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("queue.jsonl");
+    let queue = DurableIngestQueue::open(path.clone(), 4).await.unwrap();
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let (started, ready) = oneshot::channel();
+    let blocker = tokio::task::spawn_blocking(move || {
+        let _ = started.send(());
+        // Dropping the sender also releases this worker when an assertion fails.
+        let _ = held.recv();
+    });
+    ready.await.unwrap();
+    let mut enqueue = Box::pin(queue.enqueue(ingest_fixture("one", "hello", "reply")));
+    std::future::poll_fn(|cx| {
+        assert!(enqueue.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(elapsed).await;
+    if should_expire {
+        assert!(matches!(
+            enqueue.await,
+            Err(MemoryAutomationError::QueueLocked)
+        ));
+        drop(release);
+        blocker.await.unwrap();
+        // Drain the queued filesystem setup before checking for late effects.
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        assert!(!path.with_extension("lock").exists());
+        assert_eq!(queue.status().await.unwrap().pending_ingests, 0);
+        queue
+            .enqueue(ingest_fixture("one", "hello", "reply"))
+            .await
+            .unwrap();
+    } else {
+        drop(release);
+        blocker.await.unwrap();
+        enqueue.await.unwrap();
+    }
+    assert_eq!(drain_count(&queue, 0).await, 1);
+    assert_eq!(drain_count(&queue, 0).await, 0);
+}
+
+#[test]
+fn uncontended_admission_waits_within_the_original_budget() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(check_pool_delayed_admission(
+            Duration::from_millis(199),
+            false,
+        ));
+}
+
+#[test]
+fn uncontended_admission_expires_at_the_original_budget() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(check_pool_delayed_admission(
+            Duration::from_millis(200),
+            true,
+        ));
 }
