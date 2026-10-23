@@ -221,7 +221,7 @@ where
         }) => {
             let prompt = prompt.join(" ");
             if let Some(path) = config_path.as_ref() {
-                if let Err(error) = xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(path) {
+                if let Err(error) = xiaoo_shared::llm_secrets::init_llm_secrets(path) {
                     eprintln!(
                         "Failed to initialize LLM secrets from {}: {}",
                         path.display(),

@@ -542,12 +542,7 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
         bearer_token_env,
     } = options;
     let config_path = resolve_config_path(config_path)?;
-    xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(&config_path).with_context(|| {
-        format!(
-            "failed to initialize LLM secrets from {}",
-            config_path.display()
-        )
-    })?;
+    xiaoo_shared::llm_secrets::init_llm_secrets(&config_path)?;
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = DaemonConfig::load_with_mcp_config(
         &config_path,
