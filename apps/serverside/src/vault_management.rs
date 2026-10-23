@@ -76,7 +76,7 @@ pub fn vault_report(config: &DaemonConfig) -> VaultReport {
         provider: if config.app.vault.use_sdf {
             "sdf".to_string()
         } else {
-            "whitebox".to_string()
+            "instance".to_string()
         },
         store_path,
         store_exists,

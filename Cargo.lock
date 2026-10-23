@@ -2841,7 +2841,6 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
- "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -4188,20 +4187,13 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 name = "vault"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "async-trait",
- "base64",
- "cc",
- "chrono",
- "hex",
+ "hmac",
  "libloading",
  "rand 0.8.7",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
- "tokio",
+ "zeroize",
 ]
 
 [[package]]

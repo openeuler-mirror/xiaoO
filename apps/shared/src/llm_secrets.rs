@@ -195,13 +195,16 @@ pub fn auto_save_from_env(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Bootstrap LLM secrets for a startup path: persist a first-run API key from
-/// the environment, then load the whole store into the process environment.
-///
-/// The ordering is load-bearing and must not be inverted: injection
-/// overwrites the same env names from the store, so injecting first would
-/// mask the env-provided key and permanently block the first-run save.
+/// Startup path for LLM secrets: migrate a legacy v1 store, auto-save a
+/// first-run env key, then inject the store into the environment. Auto-save
+/// runs before injection so the env-provided key is not masked.
 pub fn init_llm_secrets(config_path: &Path) -> Result<()> {
+    migrate_legacy_store(config_path).with_context(|| {
+        format!(
+            "failed to migrate legacy LLM secrets from {}",
+            config_path.display()
+        )
+    })?;
     auto_save_from_env(config_path).with_context(|| {
         format!(
             "failed to auto-save LLM secrets from {}",
@@ -214,6 +217,42 @@ pub fn init_llm_secrets(config_path: &Path) -> Result<()> {
             config_path.display()
         )
     })
+}
+
+/// One-time upgrade of a legacy v1 store to the v2 per-instance master key,
+/// under the store lock with a fresh read so concurrent writers are safe.
+fn migrate_legacy_store(config_path: &Path) -> Result<()> {
+    let secrets_path = llm_secrets_path(config_path);
+    if !secrets_path.exists() || get_use_sdf_from_config(config_path) {
+        return Ok(());
+    }
+    if !is_legacy_v1(
+        &fs::read(&secrets_path)
+            .with_context(|| format!("failed to read secrets file {}", secrets_path.display()))?,
+    ) {
+        return Ok(());
+    }
+
+    let _guard = StoreLock::acquire(&secrets_path)?;
+    let bytes = fs::read(&secrets_path)
+        .with_context(|| format!("failed to read secrets file {}", secrets_path.display()))?;
+    if !is_legacy_v1(&bytes) {
+        return Ok(());
+    }
+
+    let decrypted = decrypt_aes_gcm(&bytes, &secrets_path)?;
+    let store: SecretsStore = serde_json::from_slice(&decrypted)
+        .with_context(|| format!("failed to parse secrets file {}", secrets_path.display()))?;
+    save_encrypted_store(&secrets_path, &store, false)?;
+    tracing::warn!(
+        "migrated legacy v1 secrets store {} to the per-instance master key",
+        secrets_path.display()
+    );
+    Ok(())
+}
+
+fn is_legacy_v1(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&1)
 }
 
 fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
@@ -239,7 +278,7 @@ fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
         }
         decrypt_secret(&bytes).map_err(|e| anyhow::anyhow!("SDF 解密失败: {}", e))?
     } else {
-        decrypt_aes_gcm(&bytes)?
+        decrypt_aes_gcm(&bytes, path)?
     };
 
     serde_json::from_slice(&decrypted)
@@ -262,7 +301,7 @@ fn save_encrypted_store(path: &Path, store: &SecretsStore, use_sdf: bool) -> Res
         }
         encrypt_secret(json.as_ref()).map_err(|e| anyhow::anyhow!("SDF 加密失败: {}", e))?
     } else {
-        encrypt_aes_gcm(&json)?
+        encrypt_aes_gcm(&json, path)?
     };
 
     let temp_path = temp_file_path(path);
@@ -304,24 +343,26 @@ fn temp_file_path(secrets_path: &Path) -> PathBuf {
     sibling_path(secrets_path, &format!(".tmp.{}", std::process::id()))
 }
 
-fn encrypt_aes_gcm(plaintext: &[u8]) -> Result<Vec<u8>> {
+/// Master key file for `secrets_path`, kept as a hidden sibling.
+fn master_key_path(secrets_path: &Path) -> PathBuf {
+    sibling_path(secrets_path, ".key")
+}
+
+/// v2 format: `[0x02][key tag 16B][nonce 12B][AES-256-GCM ciphertext]`; the
+/// tag lets a mismatched master key be rejected explicitly.
+fn encrypt_aes_gcm(plaintext: &[u8], secrets_path: &Path) -> Result<Vec<u8>> {
     use aes_gcm::{
         aead::{Aead, KeyInit},
         Aes256Gcm, Nonce,
     };
     use rand::RngCore;
-    use vault::WhiteBoxKeyProvider;
+    use vault::{instance_key::store_key_tag, InstanceKeyProvider};
 
-    tracing::warn!(
-        "LLM secrets are being encrypted with the whitebox test-grade key \
-         (vault.use_sdf=false); configure SDF or HSM for production environments"
-    );
-    let key_provider = WhiteBoxKeyProvider::new("default");
-    let master_key = key_provider
-        .get_key()
-        .context("failed to get key material")?;
+    let master_key = InstanceKeyProvider::new(master_key_path(secrets_path))
+        .load_or_create()
+        .context("failed to load master key")?;
 
-    let cipher = Aes256Gcm::new_from_slice(&master_key)
+    let cipher = Aes256Gcm::new_from_slice(&*master_key)
         .map_err(|_| anyhow::anyhow!("invalid master key"))?;
 
     let mut nonce_bytes = [0u8; 12];
@@ -332,46 +373,69 @@ fn encrypt_aes_gcm(plaintext: &[u8]) -> Result<Vec<u8>> {
         .encrypt(nonce, plaintext)
         .map_err(|_| anyhow::anyhow!("encryption failed"))?;
 
-    let mut result = vec![1u8];
+    let mut result = vec![2u8];
+    result.extend_from_slice(&store_key_tag(&master_key));
     result.extend(&nonce_bytes);
     result.extend(&ciphertext);
     Ok(result)
 }
 
-fn decrypt_aes_gcm(encrypted: &[u8]) -> Result<Vec<u8>> {
+/// Decrypt a v2 store with the per-instance master key, or a legacy v1
+/// store with the public source-derived key (migration path only).
+fn decrypt_aes_gcm(encrypted: &[u8], secrets_path: &Path) -> Result<Vec<u8>> {
     use aes_gcm::{
         aead::{Aead, KeyInit},
         Aes256Gcm, Nonce,
     };
-    use vault::WhiteBoxKeyProvider;
+    use vault::{instance_key::store_key_tag, whitebox::legacy_v1_master_key, InstanceKeyProvider};
 
     if encrypted.len() < 13 {
         bail!("encrypted data too short");
     }
 
-    let version = encrypted[0];
-    if version != 1 {
-        bail!("unsupported encryption version: {}", version);
+    match encrypted[0] {
+        1 => {
+            tracing::warn!(
+                "decrypting legacy v1 llm_secrets.json with the source-derived whitebox key; \
+                 it is re-encrypted with the per-instance master key on the next save or \
+                 startup migration"
+            );
+            let master_key =
+                legacy_v1_master_key().context("failed to derive legacy v1 master key")?;
+            let cipher = Aes256Gcm::new_from_slice(&master_key)
+                .map_err(|_| anyhow::anyhow!("invalid master key"))?;
+            let nonce = Nonce::from_slice(&encrypted[1..13]);
+            cipher
+                .decrypt(nonce, &encrypted[13..])
+                .map_err(|_| anyhow::anyhow!("decryption failed"))
+        }
+        2 => {
+            if encrypted.len() < 1 + 16 + 12 {
+                bail!("encrypted data too short");
+            }
+            let key_path = master_key_path(secrets_path);
+            let master_key = InstanceKeyProvider::new(&key_path)
+                .load()
+                .with_context(|| {
+                    format!("failed to load master key for {}", secrets_path.display())
+                })?;
+            if encrypted[1..17] != store_key_tag(&master_key)[..] {
+                bail!(
+                    "{} was encrypted with a different master key; restore the matching {} \
+                     from backup, or delete the store and re-enter credentials",
+                    secrets_path.display(),
+                    key_path.display()
+                );
+            }
+            let cipher = Aes256Gcm::new_from_slice(&*master_key)
+                .map_err(|_| anyhow::anyhow!("invalid master key"))?;
+            let nonce = Nonce::from_slice(&encrypted[17..29]);
+            cipher
+                .decrypt(nonce, &encrypted[29..])
+                .map_err(|_| anyhow::anyhow!("decryption failed"))
+        }
+        version => bail!("unsupported encryption version: {}", version),
     }
-
-    tracing::warn!(
-        "LLM secrets are being decrypted with the whitebox test-grade key \
-         (vault.use_sdf=false); configure SDF or HSM for production environments"
-    );
-    let key_provider = WhiteBoxKeyProvider::new("default");
-    let master_key = key_provider
-        .get_key()
-        .context("failed to get key material")?;
-
-    let cipher = Aes256Gcm::new_from_slice(&master_key)
-        .map_err(|_| anyhow::anyhow!("invalid master key"))?;
-
-    let nonce = Nonce::from_slice(&encrypted[1..13]);
-    let ciphertext = &encrypted[13..];
-
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| anyhow::anyhow!("decryption failed"))
 }
 
 pub fn llm_secrets_path(config_path: &Path) -> PathBuf {

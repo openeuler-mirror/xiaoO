@@ -1,8 +1,8 @@
 # Secrets 存储方案设计
 
-> **状态（截至 master `a58d79f`）：已实现，但与本设计文档的若干描述不符。**
+> **状态：已实现，但与本设计文档的若干描述不符。**
 >
-> 加密存储本身是真实可用的：`apps/vault`（WhiteBox / SDF）与
+> 加密存储本身是真实可用的：`apps/vault`（InstanceKey / SDF）与
 > `apps/shared/src/llm_secrets.rs` 均已落地，并通过
 > `xiaoo-daemon config vault|set-secret|delete-secret` 暴露。
 > 本文件中的**设计意图**予以保留，但凡与代码不一致处已按实际实现更正并标注
@@ -10,6 +10,10 @@
 >
 > 主要偏差：`vault.enabled` 不是开关（§2.3）；§1.2 的「按需解密、用完即销毁」不成立（§2.2）；
 > 早期版本描述的 `SecretProvider` / `gateway/decrypted_api_keys.rs` 集成层**不存在**（§4.2、§6.1）。
+>
+> **安全演进（修复 Issue #132）**：`use_sdf=false` 的软件加密已从「源码常量派生的
+> 白盒密钥」改为**每实例随机主密钥**（§3.1、§3.2）。旧 v1 格式文件在首次启动时
+> 自动迁移到 v2；白盒派生逻辑仅保留用于读取旧文件，不得用于新加密。
 
 ## 目录
 
@@ -34,15 +38,15 @@
 - **本地存储**：不依赖外部服务，所有数据存储在本地文件系统
 - **加密保护**：Secrets 加密后存储，防止泄露
 - **按需解密**: 发起 LLM 请求时从加密文件解密获取 API key，请求完成后立即销毁，不在内存中长期驻留
-- **多密钥支持**：支持 WhiteBox、TEE/SDF、HSM 三种密钥提供方式
+- **多密钥支持**：支持 InstanceKey（每实例随机主密钥）、TEE/SDF、HSM 三种密钥提供方式
 
 ### 1.3 支持的密钥类型
 
 | 密钥类型 | 说明 | 加密方式 | 适用环境 |
 |---------|------|---------|---------|
-| **WhiteBox** | 软件级白盒密钥 | AES-256-GCM | ⚠️ 仅测试环境 |
-| **TEE/SDF** | 国密硬件模块 | SDF 国密接口 | 生产环境 |
-| **HSM** | 硬件安全模块 | PKCS#11 | 生产环境 |
+| **InstanceKey** | 每实例随机主密钥（`llm_secrets.key`，0600） | AES-256-GCM | 通用（软件方案） |
+| **TEE/SDF** | 国密硬件模块 | SDF 国密接口 | 生产环境（高安全需求） |
+| **HSM** | 硬件安全模块 | PKCS#11 | 生产环境（高安全需求） |
 
 ---
 
@@ -52,7 +56,7 @@
 
 ```toml
 [vault]
-use_sdf = false  # false=WhiteBox+AES-GCM, true=SDF国密
+use_sdf = false  # false=InstanceKey+AES-GCM, true=SDF国密
 ```
 
 > ⚠️ **`enabled` 不是开关（截至 master `a58d79f`）**：`[vault] enabled` 在运行路径中
@@ -148,7 +152,7 @@ use_sdf = false  # false=WhiteBox+AES-GCM, true=SDF国密
 
 | 配置 | 数据保存 | 数据获取 | 安全性 |
 |------|---------|---------|--------|
-| `use_sdf=false` | 首次启动自动保存 / 经 `set-secret` 加密保存到 `llm_secrets.json`（WhiteBox+AES-GCM） | 启动时解密注入环境变量 | 仅测试 |
+| `use_sdf=false` | 首次启动自动保存 / 经 `set-secret` 加密保存到 `llm_secrets.json`（InstanceKey+AES-GCM） | 启动时解密注入环境变量 | 中（随机主密钥，需保护 `llm_secrets.key`） |
 | `use_sdf=true` | 首次启动自动保存 / 经 `set-secret` 加密保存到 `llm_secrets.json`（SDF 国密） | 启动时解密注入环境变量 | 高（需鲲鹏+SDF） |
 | `enabled=true/false` | **无影响**（该字段在运行路径中未被读取） | **无影响** | — |
 
@@ -156,106 +160,76 @@ use_sdf = false  # false=WhiteBox+AES-GCM, true=SDF国密
 
 ## 3. 详细设计方案
 
-### 3.1 WhiteBox + AES-GCM 流程
+### 3.1 InstanceKey + AES-GCM 流程（v2 格式，默认）
 
 #### 加密流程
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    WhiteBox + AES-GCM 加密流程                         │
+│                  InstanceKey + AES-GCM 加密流程                       │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
-│  1. WhiteBoxKeyProvider.get_key()                                   │
+│  1. InstanceKeyProvider.load_or_create()                            │
 │     │                                                                │
-│     │  从代码碎片重建 32 字节 master key                              │
+│     │  读取 .llm_secrets.json.key（32B 随机密钥 + 32B HMAC 自校验）；  │
+│     │  首次使用时经 OS CSPRNG 生成并以 0600 原子创建（O_EXCL 防竞态）   │
 │     ▼                                                                │
 │  2. 生成 12 字节随机 nonce                                          │
 │  3. AES-256-GCM 加密                                               │
 │     │                                                                │
-│     │  plaintext → [version(1) + nonce(12) + ciphertext]            │
+│     │  plaintext → [0x02 + key_tag(16) + nonce(12) + ciphertext]    │
 │     ▼                                                                │
-│  4. 写入 llm_secrets.json                                           │
+│  4. 原子写入 llm_secrets.json（temp + rename，0600）                 │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 解密流程（按需获取，用完即销毁）
+`key_tag` 是主密钥对固定 label 的 HMAC-SHA256 截断值：解密时先比对 tag，
+密钥不匹配立即报「master key 不一致」而非笼统的解密失败。
+
+#### 解密流程（按需获取）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    WhiteBox + AES-GCM 解密流程                         │
+│                  InstanceKey + AES-GCM 解密流程                       │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  1. 读取 llm_secrets.json                                           │
-│  2. 解析: version(1) + nonce(12) + ciphertext                      │
-│  3. WhiteBoxKeyProvider.get_key()                                   │
-│     │                                                                │
-│     │  从代码碎片重建 32 字节 master key                              │
-│     ▼                                                                │
-│  4. AES-256-GCM 解密                                               │
-│  5. 发起 LLM 请求时按需获取密钥                                      │
-│  6. 请求完成后立即销毁（不驻留内存）                                  │
+│  2. 解析: 0x02 + key_tag(16) + nonce(12) + ciphertext               │
+│  3. InstanceKeyProvider.load()（校验密钥文件 HMAC 自校验值）          │
+│  4. 比对 key_tag → 不匹配即报错（master key 丢失/不匹配）            │
+│  5. AES-256-GCM 解密                                                │
+│  6. 注入环境变量供 LLM 请求使用                                      │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 WhiteBox 密钥配置
+#### v1 → v2 迁移
 
-#### 3.2.1 当前状态
+`init_llm_secrets()` 启动时检测 version 字节为 `0x01` 的旧文件：在 store 锁内
+用公开的源码派生密钥解密（仅此一处使用，见 §3.2），随即以 v2 格式原子重写。
+任何一次 `set-secret` / 自动保存也会自然写出 v2。
 
-> ⚠️ **安全警告**: WhiteBox 密钥当前设为 NULL（全零），**仅适用于测试环境**。
->
-> **生产环境请使用 SDF 国密 (`use_sdf=true`) 或 HSM 方案。**
+### 3.2 密钥文件与遗留 v1 白盒派生
 
-**文件位置**: `apps/vault/src/whitebox.rs`
+#### 3.2.1 每实例主密钥（当前实现）
 
-**当前配置**:
-```rust
-const FRAG_A: [u8; 8] = [0u8; 8];  // 全零，仅测试用
-const FRAG_B: [u8; 8] = [0u8; 8];  // 全零，仅测试用
-const FRAG_C: [u8; 8] = [0u8; 8];  // 全零，仅测试用
-const FRAG_D: [u8; 8] = [0u8; 8];  // 全零，仅测试用
-```
+- **文件**: `llm_secrets.json` 同目录下的 `.llm_secrets.json.key`
+- **内容**: 32 字节随机密钥 + 32 字节 HMAC-SHA256 自校验 tag（共 64 字节）
+- **权限**: `0600`，`O_EXCL` 创建防止并发双写
+- **实现**: `apps/vault/src/instance_key.rs`
 
-#### 3.2.2 自定义密钥配置参考
+> ⚠️ **备份提示**: `.llm_secrets.json.key` 丢失后 v2 密文**不可恢复**。备份配置
+> 目录时必须连同该文件一起备份；密钥与密文同机存储，防的是「仅拿到源码/密文
+> 副本」的离线解密，不防「拿到整个用户目录」的攻击者——后者请使用 SDF/HSM。
 
-> 仅适用于测试环境。生产环境请使用 SDF 国密方案。
+#### 3.2.2 遗留 v1 白盒派生（只读，仅供迁移）
 
-如果需要在测试环境中使用自定义密钥，可通过修改代码碎片实现：
-
-```rust
-// 示例: 设置自定义密钥 "MySecretKey12345678901234567890" (32 bytes)
-
-const FRAG_A: [u8; 8] = [
-    'M' ^ 0x5A, 'y' ^ 0x5A, 'S' ^ 0x5A, 'e' ^ 0x5A,
-    'c' ^ 0x5A, 'r' ^ 0x5A, 'e' ^ 0x5A, 't' ^ 0x5A,
-];
-
-const FRAG_B: [u8; 8] = [
-    'K' ^ 0xA5, 'e' ^ 0xA5, 'y' ^ 0xA5, '1' ^ 0xA5,
-    '2' ^ 0xA5, '3' ^ 0xA5, '4' ^ 0xA5, '5' ^ 0xA5,
-];
-
-const FRAG_C: [u8; 8] = [
-    '6' ^ 0x3C, '7' ^ 0x3C, '8' ^ 0x3C, '9' ^ 0x3C,
-    '0' ^ 0x3C, '1' ^ 0x3C, '2' ^ 0x3C, '3' ^ 0x3C,
-];
-
-const FRAG_D: [u8; 8] = [
-    '4' ^ 0x7E, '5' ^ 0x7E, '6' ^ 0x7E, '7' ^ 0x7E,
-    '8' ^ 0x7E, '9' ^ 0x7E, '0' ^ 0x7E, '1' ^ 0x7E,
-];
-```
-
-**密钥生成方法**:
-
-```bash
-# 生成随机 32 字节密钥
-openssl rand -hex 32
-
-# 或使用 Python
-python3 -c "import secrets; print(secrets.token_hex(32))"
-```
+> ⚠️ **安全警告**: v1 白盒密钥由源码常量确定性派生，任何拿到源码的人都能算出，
+> 因此 v1 密文只有混淆作用、没有保密性。该派生逻辑（`legacy_v1_master_key()`，
+> `apps/vault/src/whitebox.rs`）**仅用于解密旧文件以完成 v2 迁移**，已从
+> `WhiteBoxKeyProvider` 收敛为自由函数，不再实现 `KeyProvider`，任何新加密
+> 均不得使用。
 
 ### 3.3 TEE/SDF 国密流程
 
@@ -363,9 +337,10 @@ pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
 apps/vault/src/
 ├── lib.rs                          # 主入口，导出所有 public API
 ├── key_provider.rs                 # KeyProvider trait 定义
-├── types.rs                        # KeyMaterial, KeyProviderConfig
+├── types.rs                        # KeyMaterial
 ├── key_provider_error.rs           # KeyProviderError
-├── whitebox.rs                     # WhiteBoxKeyProvider 实现
+├── instance_key.rs                 # InstanceKeyProvider（每实例随机主密钥）
+├── whitebox.rs                     # 遗留 v1 白盒派生（仅解密旧文件供迁移）
 ├── sdf.rs                          # SDF 国密接口封装 + TeeKeyProvider
 └── hsm.rs                          # HSM PKCS#11 接口（预留）
 ```
@@ -412,7 +387,8 @@ apps/endside/src/
 
 | 文件 | 作用 |
 |------|------|
-| `apps/vault/src/whitebox.rs` | 白盒密钥，从代码碎片重建 master key |
+| `apps/vault/src/instance_key.rs` | 每实例随机主密钥的生成、加载与 HMAC 自校验 |
+| `apps/vault/src/whitebox.rs` | 遗留 v1 白盒密钥派生（仅解密旧文件供迁移） |
 | `apps/vault/src/sdf.rs` | SDF 国密接口封装 |
 | `apps/vault/src/hsm.rs` | HSM PKCS#11 接口（预留） |
 | `apps/shared/src/llm_secrets.rs` | 加密/解密、加密文件读写、环境变量注入 |
@@ -444,7 +420,7 @@ apps/endside/src/
 │  │              └───────────┬───────────┘                │    │
 │  │                          │                              │    │
 │  │              ┌───────────▼───────────┐                │    │
-│  │              │  vault (whitebox/sdf) │                │    │
+│  │              │  vault (instance/sdf) │                │    │
 │  │              └───────────────────────┘                │    │
 │  │                          │                              │    │
 │  │              ┌───────────▼───────────┐                │    │
@@ -469,11 +445,11 @@ use_sdf = false  # 加密方式
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `enabled` | bool | `false` | 是否启用加密存储到 `llm_secrets.json` |
-| `use_sdf` | bool | `false` | false=WhiteBox(仅测试)，true=SDF国密(仅鲲鹏服务器) |
+| `use_sdf` | bool | `false` | false=InstanceKey(每实例随机主密钥)，true=SDF国密(仅鲲鹏服务器) |
 
 #### 5.2.2 配置文件示例
 
-**vault.enabled = true (加密存储 - WhiteBox)**
+**vault.enabled = true (加密存储 - InstanceKey)**
 
 ```toml
 [vault]
@@ -486,7 +462,9 @@ model = "anthropic/claude-sonnet-4"   # required when [llm.profiles] is absent
 api_key_env = "OPENROUTER_API_KEY"
 ```
 
-> ⚠️ **WhiteBox 警告**: `use_sdf=false` 仅适用于测试环境，生产环境请使用 `use_sdf=true`。
+> ⚠️ **密钥文件提示**: `use_sdf=false` 使用每实例随机主密钥（`.llm_secrets.json.key`）。
+> 备份配置目录时必须连同该文件一起备份，丢失后密文不可恢复；对「整个用户目录被拿走」
+> 的威胁模型请使用 `use_sdf=true`。
 
 **vault.enabled = true (加密存储 - SDF 国密)**
 
@@ -518,7 +496,7 @@ api_key_env = "OPENROUTER_API_KEY"
 | 配置 | Secrets 保存 | 启动时行为 |
 |------|-------------|-----------|
 | 任意 `enabled` 取值 | **无影响** —— 首次启动自动保存与显式 `config set-secret` 均可写入文件 | 若 `llm_secrets.json` 存在，解密后注入进程环境变量 |
-| `use_sdf=false` | `set-secret` / 自动保存用 WhiteBox+AES-GCM 加密 | 用 WhiteBox 密钥解密（仅测试） |
+| `use_sdf=false` | `set-secret` / 自动保存用 InstanceKey+AES-GCM 加密 | 用每实例主密钥解密 |
 | `use_sdf=true` | `set-secret` / 自动保存用 SDF 国密加密 | 用 SDF 密钥解密（仅鲲鹏） |
 
 真实的加密方式选择来自 `[vault] use_sdf`，由 `get_use_sdf_from_config()` 读取
@@ -547,7 +525,7 @@ api_key_env = "OPENROUTER_API_KEY"
 #### 编译
 
 ```bash
-# 默认编译 (WhiteBox + AES-GCM，仅测试环境)
+# 默认编译 (InstanceKey + AES-GCM)
 cargo build --release -p xiaoo-endside --bin xiaoo
 
 # 启用 SDF 国密 (仅鲲鹏服务器)
@@ -641,9 +619,12 @@ Secrets 的唯一入口是 daemon 的 `config` 子命令。全部经 `xiaoo-daem
 ### 6.3 密钥提供者
 
 ```rust
-// WhiteBox
-pub struct WhiteBoxKeyProvider { ... }
-impl KeyProvider for WhiteBoxKeyProvider { ... }
+// InstanceKey（每实例随机主密钥）
+pub struct InstanceKeyProvider { ... }
+impl KeyProvider for InstanceKeyProvider { ... }
+
+// 遗留 v1 白盒派生（仅解密旧文件供迁移，不实现 KeyProvider）
+pub fn legacy_v1_master_key() -> Result<[u8; 32], KeyProviderError>;
 
 // SDF 国密
 pub fn init_sdf_provider(path: &str) -> Result<()>;
@@ -665,10 +646,11 @@ impl KeyProvider for HsmKeyProvider { ... }
 
 ## 7. 已知限制
 
-### 7.1 WhiteBox
+### 7.1 InstanceKey
 
-- 密钥在软件中重建，理论上可被内存抓取攻击获取
-- 仅适用于开发/测试环境
+- 主密钥与密文同机同目录存储，防「源码 + 密文副本」的离线解密，不防拿到整个用户目录的攻击者；后者请使用 SDF/HSM
+- `.llm_secrets.json.key` 丢失后 v2 密文不可恢复，必须随配置目录一起备份
+- 旧 v1 文件在迁移完成前仍可被持有源码者解密；启动或首次保存即完成迁移
 
 ### 7.2 SDF 国密
 
@@ -687,7 +669,20 @@ impl KeyProvider for HsmKeyProvider { ... }
 
 ## 附录：加密格式
 
-### WhiteBox + AES-GCM
+### InstanceKey + AES-GCM（v2，当前格式）
+
+```
+┌──────────┬──────────────┬──────────────┬──────────────────┐
+│ Version  │  Key Tag     │  Nonce       │  Ciphertext      │
+│  1 byte  │  16 bytes    │  12 bytes    │  (含 auth tag)    │
+│   0x02   │  HMAC 截断   │   random     │  AES-256-GCM     │
+└──────────┴──────────────┴──────────────┴──────────────────┘
+```
+
+Key Tag 为主密钥对固定 label 的 HMAC-SHA256 截断值，用于解密前显式校验
+master key 匹配（`apps/vault/src/instance_key.rs` 的 `store_key_tag()`）。
+
+### 遗留 v1 白盒格式（只读，仅供迁移）
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -695,6 +690,9 @@ impl KeyProvider for HsmKeyProvider { ... }
 │         1          │     random          │  (含 auth tag)   │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+密钥由源码常量派生（`legacy_v1_master_key()`），无保密性；启动迁移或下次
+保存后即转为 v2。
 
 ### SDF 国密
 
