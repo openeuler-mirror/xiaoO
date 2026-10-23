@@ -94,7 +94,7 @@ fn input_history_path_from_home(home: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn normalize_entries(entries: &mut Vec<String>) {
-    entries.retain(|entry| !entry.trim().is_empty());
+    entries.retain(|entry| !entry.trim().is_empty() && !entry.trim_start().starts_with('/'));
     truncate_to_limit(entries);
 }
 

@@ -1055,7 +1055,9 @@ impl ChatState {
     }
 
     pub fn record_input_history(&mut self, input: &str) {
-        crate::services::input_history::append_entry(&mut self.input_history, input);
+        if !input.trim_start().starts_with('/') {
+            crate::services::input_history::append_entry(&mut self.input_history, input);
+        }
         self.reset_input_history_navigation();
     }
 
