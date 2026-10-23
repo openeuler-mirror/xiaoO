@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -338,8 +338,12 @@ impl SessionDiffTracker {
     }
 
     pub fn display_file_path(&self, file_path: &str) -> String {
-        let path = Path::new(file_path);
-        if let Ok(relative) = path.strip_prefix(&self.workspace) {
+        // Tool calls report both absolute and workspace-relative paths. Resolve
+        // either form under the workspace, then compare the two lexically: no
+        // filesystem access here, this runs for every visible entry each frame.
+        let workspace = lexical_path(&self.workspace);
+        let absolute = lexical_path(&resolve_workspace_file_path(&workspace, file_path));
+        if let Ok(relative) = absolute.strip_prefix(&workspace) {
             let display = relative.display().to_string();
             if !display.is_empty() {
                 return display;
@@ -459,6 +463,25 @@ pub fn file_change_delta_from_tool_args(tool: &str, args_preview: &str) -> Optio
         additions,
         deletions,
     })
+}
+
+/// Lexically normalize a path: drop `.` components and collapse `..` where it can
+/// be resolved without touching the filesystem (symlinks are NOT resolved).
+fn lexical_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let popped = out.pop();
+                if !popped {
+                    out.push(component.as_os_str());
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn resolve_workspace_file_path(workspace: &Path, file_path: &str) -> PathBuf {
