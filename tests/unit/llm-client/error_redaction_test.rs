@@ -851,3 +851,6 @@ fn authentication_headers() -> [(&'static str, &'static str); 5] {
         ("set-cookie", "SENTINEL-SETCOOKIE"),
     ]
 }
+
+#[path = "error_content_test.rs"]
+mod content;

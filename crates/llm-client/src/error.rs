@@ -339,7 +339,7 @@ pub(crate) fn write_redacted_stream_error_log(
     }
 }
 
-fn open_error_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+fn create_error_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -347,7 +347,11 @@ fn open_error_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options.open(path)?;
+    options.open(path)
+}
+
+fn open_error_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let file = create_error_log(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -193,7 +193,7 @@ async fn unicode_surrogates_and_mixed_encodings() {
 }
 
 #[derive(Clone)]
-struct TraceCapture(Arc<Mutex<String>>);
+pub(super) struct TraceCapture(pub(super) Arc<Mutex<String>>);
 struct Fields<'a>(&'a mut String);
 impl tracing::field::Visit for Fields<'_> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
