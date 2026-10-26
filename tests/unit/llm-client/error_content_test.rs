@@ -500,3 +500,125 @@ fn dense_credential_prefix_search() {
     }
     record_output("dense_credential_prefix_search", &records);
 }
+
+#[test]
+fn json_control_spellings_respect_escape_boundaries() {
+    let mut records = String::new();
+    let mut failures = vec![];
+    for key in [
+        "\tSECOND",
+        "\nSECOND",
+        "\rSECOND",
+        "\u{0008}SECOND",
+        "\u{000c}SECOND",
+        "\u{0001}SECOND",
+    ] {
+        let redactor = ErrorRedactor::new("http://api.example/", key);
+        let encoded = serde_json::to_string(key).unwrap();
+        let spelling = &encoded[1..encoded.len() - 1];
+        for preceding in 0..9 {
+            let prefix = "\\".repeat(preceding);
+            let input = format!(r#"{{"message":"{prefix}{spelling}"}}"#);
+            let expected = if preceding % 2 == 0 {
+                format!(r#"{{"message":"{prefix}[REDACTED]"}}"#)
+            } else {
+                input.clone()
+            };
+            let output = redactor.diagnostic(&input);
+            let valid = serde_json::from_str::<serde_json::Value>(&output).is_ok();
+            records.push_str(&format!("spelling={spelling} preceding={preceding} valid_json={valid}\ninput={input}\noutput={output}\nexpected={expected}\n"));
+            if output != expected || !valid {
+                failures.push((spelling.to_string(), preceding));
+            }
+        }
+        let raw = format!("KEEP {key} END");
+        let output = redactor.text(&raw);
+        records.push_str(&format!("raw_output={output}\n"));
+        if output != "KEEP [REDACTED] END" {
+            failures.push((spelling.to_string(), 99));
+        }
+    }
+    record_output("json_control_spellings_respect_escape_boundaries", &records);
+    assert!(failures.is_empty(), "escape boundary cases: {failures:?}");
+}
+
+#[test]
+fn rejected_json_spelling_does_not_hide_raw_credential() {
+    let mut redactor = ErrorRedactor::new("http://api.example/", "\tSECOND");
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-api-key",
+        reqwest::header::HeaderValue::from_static("SECOND"),
+    );
+    redactor.headers(&headers);
+    let input = r#"{"message":"\\tSECOND"}"#;
+    let output = redactor.diagnostic(input);
+    record_output(
+        "rejected_json_spelling_does_not_hide_raw_credential",
+        &output,
+    );
+    assert_eq!(output, r#"{"message":"\\t[REDACTED]"}"#);
+    assert!(serde_json::from_str::<serde_json::Value>(&output).is_ok());
+}
+
+#[test]
+fn common_request_url_wrappers_preserve_endpoint() {
+    let url = "http://secret.example/secret?alt=sse&key=secret";
+    let redactor = ErrorRedactor::new(url, "secret");
+    let clean = "http://secret.example/secret?alt=[REDACTED]&key=[REDACTED]";
+    let wrappers = [
+        ("<", ">"),
+        ("(", ")"),
+        ("[", "]"),
+        ("{", "}"),
+        ("\"", "\""),
+        ("'", "'"),
+        ("`", "`"),
+        (r#"\""#, r#"\""#),
+    ];
+    let mut records = String::new();
+    let mut failures = vec![];
+    for (left, right) in wrappers {
+        let input = format!("endpoint {left}{url}{right} denied secret");
+        let expected = format!("endpoint {left}{clean}{right} denied [REDACTED]");
+        let output = redactor.diagnostic(&input);
+        records.push_str(&format!(
+            "wrapper={left}...{right}\ninput={input}\noutput={output}\nexpected={expected}\n"
+        ));
+        if output != expected {
+            failures.push((left, right));
+        }
+    }
+    record_output("common_request_url_wrappers_preserve_endpoint", &records);
+    assert!(failures.is_empty(), "wrapper cases: {failures:?}");
+}
+
+#[test]
+fn nested_request_url_boundary_search() {
+    let url = "http://api.example/v1?alt=sse&key=TOKEN-SECRET";
+    let redactor = ErrorRedactor::new(url, "TOKEN-SECRET");
+    redactor.diagnostic("warm up");
+    let repeats: usize = std::env::var("XIAOO_NESTED_REPEATS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512);
+    let rounds: usize = std::env::var("XIAOO_NESTED_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    let input = format!(
+        "https://docs.example/help?lang=zh{}",
+        format!("&next={url}").repeat(repeats)
+    );
+    let expected = input.replace("TOKEN-SECRET", "[REDACTED]");
+    let mut times = vec![];
+    for _ in 0..rounds {
+        let start = Instant::now();
+        let output = redactor.diagnostic(&input);
+        times.push(start.elapsed().as_nanos());
+        assert_eq!(output, expected);
+        assert_eq!(output.matches("alt=sse").count(), repeats);
+        assert_eq!(output.matches("[REDACTED]").count(), repeats);
+    }
+    record_output("nested_request_url_boundary_search", &format!("repeats={repeats} bytes={} rounds={rounds} elapsed_ns={times:?} expected_output=true\n", input.len()));
+}

@@ -6,7 +6,7 @@ use super::LlmError;
 /// A request's credential values are distinct from its URL display policy.
 #[derive(Default)]
 pub(crate) struct ErrorRedactor {
-    spellings: Vec<String>,
+    spellings: Vec<(String, bool)>,
     urls: Vec<(String, String, bool)>,
     secret_matcher: OnceLock<Result<regex::Regex, regex::Error>>,
     url_matcher: OnceLock<Result<regex::Regex, regex::Error>>,
@@ -79,14 +79,23 @@ impl ErrorRedactor {
             return;
         }
         let lossy = String::from_utf8_lossy(bytes);
-        let mut spellings = vec![lossy.to_string(), json_spelling(&lossy)];
+        let json = json_spelling(&lossy);
+        let boundary = json.starts_with('\\');
+        let mut spellings = vec![(lossy.to_string(), false), (json, boundary)];
         for value in [bytes, lossy.as_bytes()] {
-            spellings.push(percent_spelling(value, false));
-            spellings.push(percent_spelling(value, true));
+            spellings.push((percent_spelling(value, false), false));
+            spellings.push((percent_spelling(value, true), false));
         }
-        for spelling in spellings {
-            if !self.spellings.contains(&spelling) {
-                self.spellings.push(spelling);
+        for (spelling, boundary) in spellings {
+            if let Some((_, known_boundary)) = self
+                .spellings
+                .iter_mut()
+                .find(|(known, _)| known == &spelling)
+            {
+                // An exact raw credential can also be another credential's JSON spelling.
+                *known_boundary &= boundary;
+            } else {
+                self.spellings.push((spelling, boundary));
                 self.secret_matcher.take();
             }
         }
@@ -115,13 +124,38 @@ impl ErrorRedactor {
         if self.spellings.is_empty() {
             return Cow::Borrowed(text);
         }
-        match self
+        let Ok(matcher) = self
             .secret_matcher
-            .get_or_init(|| matcher(self.spellings.iter().map(String::as_str)))
-        {
-            Ok(matcher) => matcher.replace_all(text, "[REDACTED]"),
+            .get_or_init(|| matcher(self.spellings.iter().map(|(spelling, _)| spelling.as_str())))
+        else {
             // A credential set too large for the matcher must not be exposed.
-            Err(_) => Cow::Borrowed("[REDACTED]"),
+            return Cow::Borrowed("[REDACTED]");
+        };
+        let mut boundary = EscapeBoundary::default();
+        let mut output = None;
+        let mut copied = 0;
+        let mut search = 0;
+        while let Some(found) = matcher.find_at(text, search) {
+            let guarded = self
+                .spellings
+                .iter()
+                .any(|(spelling, guarded)| *guarded && spelling == found.as_str());
+            if guarded && !boundary.allows(text, found.start()) {
+                // A rejected longer spelling may contain another raw credential.
+                search = found.start() + 1;
+                continue;
+            }
+            let result = output.get_or_insert_with(|| String::with_capacity(text.len()));
+            result.push_str(&text[copied..found.start()]);
+            result.push_str("[REDACTED]");
+            copied = found.end();
+            search = copied;
+        }
+        if let Some(mut output) = output {
+            output.push_str(&text[copied..]);
+            Cow::Owned(output)
+        } else {
+            Cow::Borrowed(text)
         }
     }
 
@@ -167,10 +201,11 @@ impl ErrorRedactor {
             .get_or_init(|| matcher(self.urls.iter().map(|(spelling, _, _)| spelling.as_str())))
             .as_ref()
             .ok()?;
+        let mut boundary = UrlBoundary::default();
         for found in matcher.find_iter(text) {
             let (start, end) = (found.start(), found.end());
             // A prefix or a value inside another URL remains free text.
-            if url_left_boundary(&text[..start]) && url_right_boundary(&text[end..]) {
+            if boundary.allows(text, start) && url_right_boundary(&text[end..]) {
                 let (_, known, encoded) = self
                     .urls
                     .iter()
@@ -243,20 +278,59 @@ fn percent_spelling(bytes: &[u8], upper: bool) -> String {
     output
 }
 
-fn url_left_boundary(prefix: &str) -> bool {
-    let separator = |ch: char| ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '"' | '\'');
-    let Some(last) = prefix.chars().next_back() else {
-        return true;
-    };
-    if separator(last) {
-        return true;
+/// Advance monotonically so a long run of backslashes is never rescanned.
+#[derive(Default)]
+struct EscapeBoundary {
+    position: usize,
+    odd: bool,
+}
+
+impl EscapeBoundary {
+    fn allows(&mut self, text: &str, end: usize) -> bool {
+        for byte in text.as_bytes()[self.position..end].iter().copied() {
+            self.odd = byte == b'\\' && !self.odd;
+        }
+        self.position = end;
+        !self.odd
     }
-    if !matches!(last, '=' | ':') {
-        return false;
+}
+
+fn url_separator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '<' | '"' | '\'' | '`')
+}
+
+/// Track only the current token's context, once per character before a candidate.
+#[derive(Default)]
+struct UrlBoundary {
+    position: usize,
+    token_start: usize,
+    has_scheme: bool,
+    last: Option<char>,
+}
+
+impl UrlBoundary {
+    fn allows(&mut self, text: &str, end: usize) -> bool {
+        for (offset, ch) in text[self.position..end].char_indices() {
+            let offset = self.position + offset;
+            if url_separator(ch) {
+                self.token_start = offset + ch.len_utf8();
+                self.has_scheme = false;
+            } else if ch == '/'
+                && offset >= 2
+                && text.as_bytes().get(offset - 2..offset + 1) == Some(b"://")
+            {
+                self.has_scheme = true;
+            }
+            self.last = Some(ch);
+        }
+        self.position = end;
+        match self.last {
+            None => true,
+            Some(ch) if url_separator(ch) => true,
+            Some('=' | ':') => !self.has_scheme && !text[self.token_start..end].starts_with("//"),
+            _ => false,
+        }
     }
-    // A known URL embedded as the value of another URL remains free text.
-    let head = prefix.rsplit(separator).next().unwrap_or(prefix);
-    !head.contains("://") && !head.starts_with("//")
 }
 
 fn url_right_boundary(suffix: &str) -> bool {
@@ -264,7 +338,7 @@ fn url_right_boundary(suffix: &str) -> bool {
         return true;
     }
     suffix.chars().next().is_none_or(|ch| {
-        ch.is_whitespace() || matches!(ch, ')' | ']' | '}' | '"' | '\'' | ',' | ';')
+        ch.is_whitespace() || matches!(ch, ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';')
     })
 }
 

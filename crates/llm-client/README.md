@@ -260,3 +260,20 @@ Unreserved URL bytes remain literal. Nonstandard or partial encodings, mixed
 hex case, hand-written Unicode escapes for otherwise literal characters, and
 other encodings of echoed credentials are not recognized. Diagnostic text is
 not decoded. Only credentials known to this request can be redacted.
+
+JSON spellings that begin with a backslash are matched only at an escape boundary:
+an odd number of immediately preceding backslashes makes the candidate a literal
+escaped backslash rather than the beginning of the credential spelling. Original
+credential values still match literally.
+
+Request URL wrappers supported in diagnostics are angle brackets (`<...>`),
+parentheses (`(...)`), square brackets (`[...]`), braces (`{...}`), double quotes,
+single quotes, backticks, and JSON-escaped double quotes (`\"...\"`). Whitespace,
+text start/end, left-side `=` or `:` labels, and right-side commas or semicolons
+also delimit URLs. A request URL embedded in another link's parameter remains
+ordinary text and receives only credential replacement. Boundary context is
+maintained in one forward scan.
+
+Literal matching can also mask a credential value inside an unrelated word; it
+does not infer the meaning of each occurrence. If a matcher cannot be built, the
+message is replaced with a static placeholder and detailed diagnostics are lost.
