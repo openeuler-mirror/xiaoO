@@ -750,7 +750,7 @@ async fn encoded_url_credentials() {
         "http://api:SENTINEL%2dUSERINFO@api.example/path?ApI_Key=SENTINEL%2dKEY&ToKeN=LONGTOKEN&other=LONG&alt=sse",
         None,
         "KEEP-CASE-encoded_url_credentials KEEP-BODY api passed classes sse LONG SENTINEL-USERINFO SENTINEL-KEY LONGTOKEN",
-        r"encoded SENTINEL%2DKEY SENTINEL\u002dUSERINFO",
+        "encoded SENTINEL-KEY SENTINEL-USERINFO",
         Some(200),
     );
     let log = home.record("unit logger returned ()", true);
@@ -758,8 +758,8 @@ async fn encoded_url_credentials() {
     assert!(log.contains("KEEP-BODY api passed classes sse LONG "));
     for secret in [
         "SENTINEL%2dKEY",
-        "SENTINEL%2DKEY",
-        r"SENTINEL\u002dUSERINFO",
+        "SENTINEL-KEY",
+        "SENTINEL-USERINFO",
         "LONGTOKEN",
     ] {
         assert!(!log.contains(secret));

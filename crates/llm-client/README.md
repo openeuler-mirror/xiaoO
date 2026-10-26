@@ -243,3 +243,20 @@ cargo test -p llm-client
 # - Zhipu (schema description generation)
 # - Factory (config builder, unknown provider, missing key, missing base)
 ```
+
+## Error diagnostics and credentials
+
+Error messages, llm-client tracing, and `~/.xiaoo/log/error.log` redact known
+credentials from the current request. Request URLs retain scheme, host, path,
+and parameter names while removing userinfo and masking query values and
+fragments. Other links retain their noncredential content. Logs retain the
+complete response body with credential replacement and are created with mode
+0600 on Unix.
+
+Credential matching is literal: it covers the original value, its standard
+`serde_json` string escaping (without surrounding quotes), and RFC 3986 percent
+encoding of the whole value, using either uppercase or lowercase hex digits.
+Unreserved URL bytes remain literal. Nonstandard or partial encodings, mixed
+hex case, hand-written Unicode escapes for otherwise literal characters, and
+other encodings of echoed credentials are not recognized. Diagnostic text is
+not decoded. Only credentials known to this request can be redacted.

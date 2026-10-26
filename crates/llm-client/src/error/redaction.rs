@@ -1,12 +1,15 @@
 use std::borrow::Cow;
+use std::sync::OnceLock;
 
 use super::LlmError;
 
 /// A request's credential values are distinct from its URL display policy.
 #[derive(Default)]
 pub(crate) struct ErrorRedactor {
-    secrets: Vec<Vec<u8>>,
-    urls: Vec<String>,
+    spellings: Vec<String>,
+    urls: Vec<(String, String, bool)>,
+    secret_matcher: OnceLock<Result<regex::Regex, regex::Error>>,
+    url_matcher: OnceLock<Result<regex::Regex, regex::Error>>,
 }
 
 impl ErrorRedactor {
@@ -29,7 +32,7 @@ impl ErrorRedactor {
         if let Some((start, end)) = authority_bounds(url) {
             if let Some((userinfo, _)) = url[start..end].rsplit_once('@') {
                 if let Some((_, password)) = userinfo.split_once(':') {
-                    self.add(&decode(password, true, false));
+                    self.add(&decode_url_value(password));
                 }
             }
         }
@@ -37,9 +40,8 @@ impl ErrorRedactor {
         if let Some((_, query)) = without_fragment.split_once('?') {
             for pair in query.split('&') {
                 if let Some((name, value)) = pair.split_once('=') {
-                    let name =
-                        String::from_utf8_lossy(&decode(&name.replace('+', " "), true, false))
-                            .to_ascii_lowercase();
+                    let name = String::from_utf8_lossy(&decode_url_value(&name.replace('+', " ")))
+                        .to_ascii_lowercase();
                     if [
                         "key",
                         "token",
@@ -53,7 +55,7 @@ impl ErrorRedactor {
                     .iter()
                     .any(|part| name.contains(part))
                     {
-                        self.add(&decode(&value.replace('+', " "), true, false));
+                        self.add(&decode_url_value(&value.replace('+', " ")));
                     }
                 }
             }
@@ -61,8 +63,14 @@ impl ErrorRedactor {
     }
 
     fn remember_url(&mut self, url: &str) {
-        if !url.is_empty() && !self.urls.iter().any(|known| known == url) {
-            self.urls.push(url.to_string());
+        if url.is_empty() {
+            return;
+        }
+        for (spelling, encoded) in [(url.to_string(), false), (json_spelling(url), true)] {
+            if !self.urls.iter().any(|(known, _, _)| known == &spelling) {
+                self.urls.push((spelling, url.to_string(), encoded));
+                self.url_matcher.take();
+            }
         }
     }
 
@@ -70,13 +78,17 @@ impl ErrorRedactor {
         if bytes.is_empty() {
             return;
         }
-        if !self.secrets.iter().any(|known| known == bytes) {
-            self.secrets.push(bytes.to_vec());
-        }
-        // HTTP text decoding can replace non-UTF-8 header bytes with U+FFFD.
         let lossy = String::from_utf8_lossy(bytes);
-        if !self.secrets.iter().any(|known| known == lossy.as_bytes()) {
-            self.secrets.push(lossy.as_bytes().to_vec());
+        let mut spellings = vec![lossy.to_string(), json_spelling(&lossy)];
+        for value in [bytes, lossy.as_bytes()] {
+            spellings.push(percent_spelling(value, false));
+            spellings.push(percent_spelling(value, true));
+        }
+        for spelling in spellings {
+            if !self.spellings.contains(&spelling) {
+                self.spellings.push(spelling);
+                self.secret_matcher.take();
+            }
         }
     }
 
@@ -98,60 +110,19 @@ impl ErrorRedactor {
         )
     }
 
-    /// Decode only while matching; no body-sized position table or match list.
+    /// Match only literal spellings produced by the supported encoders.
     pub(crate) fn text<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        let escaped = text.contains('%') || text.contains('\\');
-        let mut output = None;
-        let mut cursor = 0;
-        while let Some((start, end)) = self.next_secret(&text[cursor..], escaped) {
-            let result = output.get_or_insert_with(|| String::with_capacity(text.len()));
-            result.push_str(&text[cursor..cursor + start]);
-            result.push_str("[REDACTED]");
-            cursor += end;
+        if self.spellings.is_empty() {
+            return Cow::Borrowed(text);
         }
-        if let Some(mut output) = output {
-            output.push_str(&text[cursor..]);
-            Cow::Owned(output)
-        } else {
-            Cow::Borrowed(text)
+        match self
+            .secret_matcher
+            .get_or_init(|| matcher(self.spellings.iter().map(String::as_str)))
+        {
+            Ok(matcher) => matcher.replace_all(text, "[REDACTED]"),
+            // A credential set too large for the matcher must not be exposed.
+            Err(_) => Cow::Borrowed("[REDACTED]"),
         }
-    }
-
-    fn next_secret(&self, text: &str, escaped: bool) -> Option<(usize, usize)> {
-        if !escaped {
-            return self
-                .secrets
-                .iter()
-                .filter_map(|secret| {
-                    let secret = std::str::from_utf8(secret).ok()?;
-                    text.find(secret).map(|start| (start, start + secret.len()))
-                })
-                .min_by_key(|&(start, end)| (start, std::cmp::Reverse(end)));
-        }
-        let prefixes: Vec<_> = self
-            .secrets
-            .iter()
-            .flat_map(|secret| first_spellings(secret, true))
-            .collect();
-        let mut cursor = 0;
-        while let Some(start) = find_first(&text[cursor..], &prefixes) {
-            let start = cursor + start;
-            if let Some(len) = self
-                .secrets
-                .iter()
-                .filter_map(|secret| credential_match(&text[start..], secret))
-                .max()
-            {
-                return Some((start, start + len));
-            }
-            cursor = start
-                + text[start..]
-                    .chars()
-                    .next()
-                    .map(char::len_utf8)
-                    .unwrap_or(1);
-        }
-        None
     }
 
     pub(crate) fn url(&self, url: &str) -> String {
@@ -163,15 +134,19 @@ impl ErrorRedactor {
     /// Only registered request URLs receive structural display treatment.
     /// Every other link remains ordinary text subject to credential replacement.
     pub(crate) fn diagnostic<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        if self
+            .url_matcher
+            .get_or_init(|| matcher(self.urls.iter().map(|(spelling, _, _)| spelling.as_str())))
+            .is_err()
+        {
+            return Cow::Borrowed("[invalid URL]");
+        }
         let mut output = None;
         let mut cursor = 0;
-        while let Some((start, end, known)) = self.next_request_url(&text[cursor..]) {
+        while let Some((start, end, known, encoded)) = self.next_request_url(&text[cursor..]) {
             let result = output.get_or_insert_with(|| String::with_capacity(text.len()));
             result.push_str(&self.text(&text[cursor..cursor + start]));
-            result.push_str(&request_url_display(
-                &text[cursor + start..cursor + end],
-                known,
-            ));
+            result.push_str(&request_url_display(known, encoded));
             cursor += end;
         }
         let tail = self.text(&text[cursor..]);
@@ -183,61 +158,27 @@ impl ErrorRedactor {
         }
     }
 
-    fn next_request_url<'a>(&'a self, text: &str) -> Option<(usize, usize, &'a str)> {
-        let escaped = text.contains('\\');
-        let mut best = None;
-        for known in &self.urls {
-            let mut cursor = 0;
-            while cursor < text.len() {
-                let found = if escaped {
-                    let prefixes = first_spellings(known.as_bytes(), false);
-                    let mut position = cursor;
-                    let mut found = None;
-                    while let Some(start) = find_first(&text[position..], &prefixes) {
-                        let start = position + start;
-                        if let Some(len) = literal_match(&text[start..], known.as_bytes())
-                            .into_iter()
-                            .chain(match_bytes(&text[start..], known.as_bytes(), false))
-                            .max()
-                        {
-                            found = Some((start, start + len));
-                            break;
-                        }
-                        position = start
-                            + text[start..]
-                                .chars()
-                                .next()
-                                .map(char::len_utf8)
-                                .unwrap_or(1);
-                    }
-                    found
-                } else {
-                    text[cursor..]
-                        .find(known)
-                        .map(|start| (cursor + start, cursor + start + known.len()))
-                };
-                let Some((start, end)) = found else {
-                    break;
-                };
-                // Do not protect a request URL used merely as another URL's prefix.
-                if url_left_boundary(&text[..start]) && url_right_boundary(&text[end..]) {
-                    let candidate = (start, end, known.as_str());
-                    if best.as_ref().is_none_or(|&(s, e, _)| {
-                        (start, std::cmp::Reverse(end)) < (s, std::cmp::Reverse(e))
-                    }) {
-                        best = Some(candidate);
-                    }
-                    break;
-                }
-                cursor = start
-                    + text[start..]
-                        .chars()
-                        .next()
-                        .map(char::len_utf8)
-                        .unwrap_or(1);
+    fn next_request_url<'a>(&'a self, text: &str) -> Option<(usize, usize, &'a str, bool)> {
+        if self.urls.is_empty() {
+            return None;
+        }
+        let matcher = self
+            .url_matcher
+            .get_or_init(|| matcher(self.urls.iter().map(|(spelling, _, _)| spelling.as_str())))
+            .as_ref()
+            .ok()?;
+        for found in matcher.find_iter(text) {
+            let (start, end) = (found.start(), found.end());
+            // A prefix or a value inside another URL remains free text.
+            if url_left_boundary(&text[..start]) && url_right_boundary(&text[end..]) {
+                let (_, known, encoded) = self
+                    .urls
+                    .iter()
+                    .find(|(spelling, _, _)| spelling == found.as_str())?;
+                return Some((start, end, known, *encoded));
             }
         }
-        best
+        None
     }
     pub(crate) fn error_result<T>(&self, result: Result<T, LlmError>) -> Result<T, LlmError> {
         result.map_err(|error| self.error(error))
@@ -264,55 +205,42 @@ impl ErrorRedactor {
     }
 }
 
-fn find_first(text: &str, prefixes: &[String]) -> Option<usize> {
-    prefixes.iter().filter_map(|prefix| text.find(prefix)).min()
+/// The regex engine scans all literal alternatives together in O(m * n),
+/// where m is the fixed credential/URL pattern size and n is the text length.
+fn matcher<'a>(spellings: impl Iterator<Item = &'a str>) -> Result<regex::Regex, regex::Error> {
+    let mut spellings: Vec<_> = spellings.collect();
+    spellings.sort_by_key(|spelling| std::cmp::Reverse(spelling.len()));
+    let pattern = spellings
+        .into_iter()
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join("|");
+    regex::Regex::new(&pattern)
 }
 
-fn first_spellings(bytes: &[u8], percent: bool) -> Vec<String> {
-    let Some(&first) = bytes.first() else {
-        return Vec::new();
-    };
-    let mut prefixes = Vec::new();
-    if percent {
-        prefixes.extend(hex_spellings(&format!("%{first:02x}")));
-    }
-    let valid = match std::str::from_utf8(bytes) {
-        Ok(valid) => valid,
-        Err(error) => std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or(""),
-    };
-    if let Some(first) = valid.chars().next() {
-        prefixes.push(first.to_string());
-        let mut utf16 = [0; 2];
-        let first_unit = first.encode_utf16(&mut utf16)[0];
-        prefixes.extend(hex_spellings(&format!("\\u{first_unit:04x}")));
-        if let Ok(escaped) = serde_json::to_string(&first.to_string()) {
-            prefixes.push(escaped[1..escaped.len() - 1].to_string());
-        }
-    }
-    prefixes.sort();
-    prefixes.dedup();
-    prefixes
+fn json_spelling(text: &str) -> String {
+    let encoded = serde_json::to_string(text).expect("string serialization cannot fail");
+    encoded[1..encoded.len() - 1].to_string()
 }
 
-fn hex_spellings(input: &str) -> Vec<String> {
-    let mut variants = vec![String::new()];
-    for ch in input.chars() {
-        if ch.is_ascii_hexdigit() && ch.is_ascii_alphabetic() {
-            let mut upper = variants.clone();
-            for prefix in &mut variants {
-                prefix.push(ch.to_ascii_lowercase());
-            }
-            for prefix in &mut upper {
-                prefix.push(ch.to_ascii_uppercase());
-            }
-            variants.extend(upper);
+/// RFC 3986 percent encoding keeps only the unreserved bytes literal.
+fn percent_spelling(bytes: &[u8], upper: bool) -> String {
+    let hex = if upper {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
+    let mut output = String::new();
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            output.push(byte as char);
         } else {
-            for prefix in &mut variants {
-                prefix.push(ch);
-            }
+            output.push('%');
+            output.push(hex[(byte >> 4) as usize] as char);
+            output.push(hex[(byte & 15) as usize] as char);
         }
     }
-    variants
+    output
 }
 
 fn url_left_boundary(prefix: &str) -> bool {
@@ -332,6 +260,9 @@ fn url_left_boundary(prefix: &str) -> bool {
 }
 
 fn url_right_boundary(suffix: &str) -> bool {
+    if suffix.starts_with(r#"\""#) {
+        return true;
+    }
     suffix.chars().next().is_none_or(|ch| {
         ch.is_whitespace() || matches!(ch, ')' | ']' | '}' | '"' | '\'' | ',' | ';')
     })
@@ -400,153 +331,35 @@ fn replace_ranges(text: &str, edits: &[(usize, usize, &str)]) -> Option<String> 
     Some(output)
 }
 
-/// Map edit boundaries only within one matched URL, using constant cursor state.
-fn request_url_display(input: &str, known: &str) -> String {
-    let Some(edits) = url_edits(known) else {
-        return "[invalid URL]".to_string();
-    };
-    let mut mapped = Vec::with_capacity(edits.len());
-    let mut cursor = ByteCursor::new(input, false, true);
-    let mut consumed = 0;
-    for (start, end, replacement) in edits {
-        let Some(start) = map_offset(&mut cursor, &mut consumed, start) else {
-            return "[invalid URL]".to_string();
-        };
-        let Some(end) = map_offset(&mut cursor, &mut consumed, end) else {
-            return "[invalid URL]".to_string();
-        };
-        mapped.push((start, end, replacement));
-    }
-    replace_ranges(input, &mapped).unwrap_or_else(|| "[invalid URL]".to_string())
-}
-
-fn map_offset(cursor: &mut ByteCursor<'_>, consumed: &mut usize, offset: usize) -> Option<usize> {
-    if offset < *consumed {
-        return None;
-    }
-    while *consumed < offset {
-        cursor.next()?;
-        *consumed += 1;
-    }
-    cursor.at_boundary().then_some(cursor.position)
-}
-
-fn literal_match(text: &str, bytes: &[u8]) -> Option<usize> {
-    (text.as_bytes().starts_with(bytes) && text.is_char_boundary(bytes.len()))
-        .then_some(bytes.len())
-}
-
-fn credential_match(text: &str, bytes: &[u8]) -> Option<usize> {
-    literal_match(text, bytes)
-        .into_iter()
-        .chain(match_bytes(text, bytes, true))
-        .max()
-}
-
-fn match_bytes(text: &str, secret: &[u8], percent: bool) -> Option<usize> {
-    let mut cursor = ByteCursor::new(text, percent, true);
-    for byte in secret {
-        if cursor.next()? != *byte {
-            return None;
-        }
-    }
-    cursor.at_boundary().then_some(cursor.position)
-}
-
-fn decode(text: &str, percent: bool, json: bool) -> Vec<u8> {
-    ByteCursor::new(text, percent, json).collect()
-}
-
-/// A decoding view with at most one Unicode scalar buffered, never a position map.
-struct ByteCursor<'a> {
-    text: &'a str,
-    position: usize,
-    percent: bool,
-    json: bool,
-    pending: [u8; 4],
-    read: usize,
-    len: usize,
-}
-
-impl<'a> ByteCursor<'a> {
-    fn new(text: &'a str, percent: bool, json: bool) -> Self {
-        Self {
-            text,
-            position: 0,
-            percent,
-            json,
-            pending: [0; 4],
-            read: 0,
-            len: 0,
-        }
-    }
-    fn at_boundary(&self) -> bool {
-        self.read == self.len && self.text.is_char_boundary(self.position)
+fn request_url_display(known: &str, encoded: bool) -> String {
+    let display = url_edits(known)
+        .and_then(|edits| replace_ranges(known, &edits))
+        .unwrap_or_else(|| "[invalid URL]".to_string());
+    if encoded {
+        json_spelling(&display)
+    } else {
+        display
     }
 }
 
-impl Iterator for ByteCursor<'_> {
-    type Item = u8;
-    fn next(&mut self) -> Option<u8> {
-        if self.read < self.len {
-            let byte = self.pending[self.read];
-            self.read += 1;
-            return Some(byte);
-        }
-        let bytes = self.text.as_bytes();
-        if self.percent {
-            if let Some(byte) = percent_byte(bytes.get(self.position..)?) {
-                self.position += 3;
-                return Some(byte);
-            }
-        }
-        if self.json && bytes.get(self.position) == Some(&b'\\') {
-            if let Some((ch, len)) = json_char(self.text.get(self.position..)?) {
-                self.position += len;
-                self.len = ch.encode_utf8(&mut self.pending).len();
-                self.read = 1;
-                return Some(self.pending[0]);
-            }
-        }
-        let byte = *bytes.get(self.position)?;
-        self.position += 1;
-        Some(byte)
-    }
-}
-
-fn percent_byte(input: &[u8]) -> Option<u8> {
-    if input.len() < 3 || input[0] != b'%' {
-        return None;
-    }
-    Some(((input[1] as char).to_digit(16)? * 16 + (input[2] as char).to_digit(16)?) as u8)
-}
-
-fn json_char(input: &str) -> Option<(char, usize)> {
-    let bytes = input.as_bytes();
-    if bytes.first() != Some(&b'\\') {
-        return None;
-    }
-    let ch = match *bytes.get(1)? {
-        b'"' => '"',
-        b'\\' => '\\',
-        b'/' => '/',
-        b'b' => '\u{0008}',
-        b'f' => '\u{000c}',
-        b'n' => '\n',
-        b'r' => '\r',
-        b't' => '\t',
-        b'u' => {
-            let first = u16::from_str_radix(input.get(2..6)?, 16).ok()?;
-            if (0xd800..=0xdbff).contains(&first) {
-                if input.get(6..8)? != "\\u" {
-                    return None;
+/// Decode percent escapes only when collecting values from the request URL.
+/// Diagnostic text is never decoded.
+fn decode_url_value(text: &str) -> Vec<u8> {
+    let mut output = Vec::with_capacity(text.len());
+    let mut bytes = text.as_bytes().iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let mut following = bytes.clone();
+            if let (Some(hi), Some(lo)) = (following.next(), following.next()) {
+                if let (Some(hi), Some(lo)) = ((hi as char).to_digit(16), (lo as char).to_digit(16))
+                {
+                    output.push((hi * 16 + lo) as u8);
+                    bytes = following;
+                    continue;
                 }
-                let second = u16::from_str_radix(input.get(8..12)?, 16).ok()?;
-                return Some((char::decode_utf16([first, second]).next()?.ok()?, 12));
             }
-            return Some((char::from_u32(first as u32)?, 6));
         }
-        _ => return None,
-    };
-    Some((ch, 2))
+        output.push(byte);
+    }
+    output
 }

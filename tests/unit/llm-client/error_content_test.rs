@@ -390,3 +390,113 @@ async fn literal_escape_sequences_in_credentials() {
     assert_eq!(output.matches("[REDACTED]").count(), 8);
     assert_eq!(output.matches("KEEP-BODY KEY/TOKEN").count(), 4);
 }
+
+pub(super) fn percent_encode(bytes: &[u8], upper: bool) -> String {
+    bytes
+        .iter()
+        .map(|&byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                (byte as char).to_string()
+            } else if upper {
+                format!("%{byte:02X}")
+            } else {
+                format!("%{byte:02x}")
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn standard_credential_spellings() {
+    let mut records = String::new();
+    for key in [
+        "KEY%2fTOKEN",
+        r"KEY\u002fTOKEN",
+        "KEY+/\"\\\n\t\u{0001}密钥",
+    ] {
+        let redactor = ErrorRedactor::new("http://127.0.0.1/", key);
+        let json = serde_json::to_string(key).unwrap();
+        for spelling in [
+            key.to_string(),
+            json[1..json.len() - 1].to_string(),
+            percent_encode(key.as_bytes(), true),
+            percent_encode(key.as_bytes(), false),
+        ] {
+            let output = redactor
+                .text(&format!("KEEP-BODY {spelling} END"))
+                .into_owned();
+            records.push_str(&format!("{output}\n"));
+            assert_eq!(output, "KEEP-BODY [REDACTED] END");
+        }
+    }
+    record_output("standard_credential_spellings", &records);
+}
+
+#[test]
+fn nonstandard_echo_encodings_remain_literal() {
+    let redactor = ErrorRedactor::new("http://127.0.0.1/", "SENTINEL-KEY");
+    let text = r#"{"message":"\\u0053ENTINEL-KEY","partial":"SENTINEL%2dKEY","unicode":"\u0053ENTINEL-KEY"}"#;
+    let output = redactor.diagnostic(text);
+    record_output("nonstandard_echo_encodings_remain_literal", &output);
+    assert_eq!(output, text);
+    assert!(serde_json::from_str::<serde_json::Value>(&output).is_ok());
+}
+
+#[test]
+fn json_quoted_request_url_keeps_host_and_path() {
+    let url = "http://secret.example/secret?alt=sse&key=secret";
+    let redactor = ErrorRedactor::new(url, "secret");
+    let text = serde_json::to_string(&format!("endpoint \"{url}\" denied secret")).unwrap();
+    let output = redactor.diagnostic(&text);
+    record_output("json_quoted_request_url_keeps_host_and_path", &output);
+    assert_eq!(
+        output,
+        r#""endpoint \"http://secret.example/secret?alt=[REDACTED]&key=[REDACTED]\" denied [REDACTED]""#
+    );
+    assert!(serde_json::from_str::<String>(&output).is_ok());
+}
+
+#[test]
+fn standard_json_request_url_spelling() {
+    let url = "http://secret.example/secret?alt=\"sse\"&key=secret";
+    let redactor = ErrorRedactor::new(url, "secret");
+    let text = serde_json::to_string(&format!("endpoint \"{url}\" denied secret")).unwrap();
+    let output = redactor.diagnostic(&text);
+    record_output("standard_json_request_url_spelling", &output);
+    assert_eq!(
+        output,
+        r#""endpoint \"http://secret.example/secret?alt=[REDACTED]&key=[REDACTED]\" denied [REDACTED]""#
+    );
+    assert!(serde_json::from_str::<String>(&output).is_ok());
+}
+
+#[test]
+fn dense_credential_prefix_search() {
+    // A dense first byte plus an unrelated percent sign must remain a linear scan.
+    let key = "SENTINEL-KEY+/\"\\";
+    let redactor = ErrorRedactor::new("http://127.0.0.1/", key);
+    redactor.diagnostic("warm up S%\\");
+    let sizes: Vec<usize> = std::env::var("XIAOO_DENSE_BYTES")
+        .ok()
+        .map(|value| vec![value.parse().unwrap()])
+        .unwrap_or_else(|| vec![65536]);
+    let rounds: usize = std::env::var("XIAOO_DENSE_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3);
+    let mut records = String::new();
+    for size in sizes {
+        let body = format!("{}%", "S".repeat(size));
+        let before = memory_kib("VmRSS:");
+        let mut times = vec![];
+        for _ in 0..rounds {
+            let start = Instant::now();
+            let output = redactor.diagnostic(&body);
+            times.push(start.elapsed().as_nanos());
+            assert_eq!(output, body);
+            assert!(matches!(output, std::borrow::Cow::Borrowed(_)));
+        }
+        records.push_str(&format!("bytes={} rounds={rounds} elapsed_ns={times:?} rss_before_kib={before} peak_rss_kib={} unchanged=true\n", body.len(), memory_kib("VmHWM:")));
+    }
+    record_output("dense_credential_prefix_search", &records);
+}

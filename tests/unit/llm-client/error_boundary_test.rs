@@ -132,54 +132,72 @@ async fn ollama_basic_model_details() {
     assert!(!full.contains(basic));
 }
 
-async fn encoded_response(name: &str, stream: bool, encoded: &str) {
+async fn encoded_response(name: &str, stream: bool, percent: bool, upper: bool) {
+    let _lock = HOME_LOCK.lock().await;
+    let home = Home::new(name);
+    let key = "SENTINEL-KEY+/\"\\";
+    let encoded = if percent {
+        super::content::percent_encode(key.as_bytes(), upper)
+    } else {
+        let json = serde_json::to_string(key).unwrap();
+        json[1..json.len() - 1].to_string()
+    };
     let body = if stream {
         format!("data: {{\"type\":\"error\",\"error\":{{\"code\":\"x\",\"message\":\"key {encoded} rejected\"}}}}\n\n")
     } else {
         format!("{{\"error\":\"key {encoded} rejected\"}}")
     };
-    let error = response_error(
-        name,
-        "openai",
+    let server = Endpoint::new(
         if stream { 200 } else { 400 },
         if stream {
             "text/event-stream"
         } else {
             "application/json"
         },
-        &body,
-        stream,
+        body,
+        false,
         "",
         false,
-    )
-    .await;
+    );
+    let p = OpenAiFamilyProvider::new(
+        key.into(),
+        server.url.clone(),
+        "m".into(),
+        OpenAiFamilyAuthStyle::Bearer,
+        vec![],
+    );
+    let error = call(&p, stream).await.unwrap_err();
     assert!(matches!(error, LlmError::ApiError(_)));
     let full = full_error(&error);
-    assert!(!full.contains(encoded), "encoded credential leaked");
+    home.record(&full, false);
+    assert!(
+        !error.to_string().contains(&encoded),
+        "encoded credential leaked"
+    );
     assert!(!full.contains("SENTINEL-KEY"));
 }
 #[tokio::test]
 async fn percent_status_error() {
-    encoded_response("percent_status_error", false, "SENTINEL%2dKEY").await;
+    encoded_response("percent_status_error", false, true, false).await;
 }
 #[tokio::test]
-async fn unicode_status_error() {
-    encoded_response("unicode_status_error", false, r"SENTINEL\u002dKEY").await;
+async fn json_status_error() {
+    encoded_response("json_status_error", false, false, false).await;
 }
 #[tokio::test]
 async fn percent_sse_error() {
-    encoded_response("percent_sse_error", true, "SENTINEL%2DKEY").await;
+    encoded_response("percent_sse_error", true, true, true).await;
 }
 #[tokio::test]
-async fn unicode_sse_error() {
-    encoded_response("unicode_sse_error", true, r"SENTINEL\u002dKEY").await;
+async fn json_sse_error() {
+    encoded_response("json_sse_error", true, false, false).await;
 }
 
 #[tokio::test]
-async fn unicode_surrogates_and_mixed_encodings() {
+async fn utf8_and_standard_encoded_credentials() {
     let _lock = HOME_LOCK.lock().await;
-    let home = Home::new("unicode_surrogates_and_mixed_encodings");
-    let body = r"KEEP-CASE-unicode_surrogates_and_mixed_encodings KEEP-BODY \u5bc6\u94A5\ud83d\ude00 %e5%af%86%E9%92%A5%f0%9f%98%80 \u5bc6%E9%92%a5😀";
+    let home = Home::new("utf8_and_standard_encoded_credentials");
+    let body = "KEEP-CASE-utf8_and_standard_encoded_credentials KEEP-BODY 密钥😀 %e5%af%86%e9%92%a5%f0%9f%98%80 %E5%AF%86%E9%92%A5%F0%9F%98%80";
     write_stream_error_log(
         "http://127.0.0.1:9/path?token=%E5%AF%86%E9%92%A5%F0%9F%98%80",
         None,
