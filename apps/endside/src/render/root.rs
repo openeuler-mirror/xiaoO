@@ -208,7 +208,7 @@ impl App {
             layout::{Constraint, Direction, Layout},
             style::{Modifier, Style},
             text::{Line, Span},
-            widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+            widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
         };
 
         let theme = self.state.theme;
@@ -220,7 +220,7 @@ impl App {
                     (area.width * 3 / 4).clamp(40, 80),
                     (area.height * 3 / 4).clamp(10, 24),
                 );
-                frame.render_widget(Clear, dialog_area);
+                super::overlay::render_popup_backdrop(frame, dialog_area, area, theme.background);
 
                 let title = if dialog.cron_section_present {
                     format!(
@@ -237,6 +237,8 @@ impl App {
                         Style::default().add_modifier(Modifier::BOLD),
                     ))
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(theme.border_active))
                     .style(Style::default().fg(theme.foreground).bg(theme.background));
                 frame.render_widget(block, dialog_area);
 
@@ -291,7 +293,12 @@ impl App {
                 if let Some(job) = dialog.jobs.get(*job_index) {
                     let dialog_area =
                         super::utils::fit_popup_rect(area, 60.min(area.width.saturating_sub(4)), 6);
-                    frame.render_widget(Clear, dialog_area);
+                    super::overlay::render_popup_backdrop(
+                        frame,
+                        dialog_area,
+                        area,
+                        theme.background,
+                    );
 
                     let block = Block::default()
                         .title(Span::styled(
@@ -299,6 +306,8 @@ impl App {
                             Style::default().add_modifier(Modifier::BOLD),
                         ))
                         .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(theme.border_active))
                         .style(Style::default().fg(theme.foreground).bg(theme.background));
                     frame.render_widget(block, dialog_area);
 
@@ -327,7 +336,7 @@ impl App {
                     70.min(area.width.saturating_sub(4)),
                     (area.height.saturating_sub(2)).clamp(3, 22),
                 );
-                frame.render_widget(Clear, dialog_area);
+                super::overlay::render_popup_backdrop(frame, dialog_area, area, theme.background);
 
                 let title = " Edit Cron Job — Tab:next field  Enter:save  Esc:cancel ";
                 let block = Block::default()
@@ -336,6 +345,8 @@ impl App {
                         Style::default().add_modifier(Modifier::BOLD),
                     ))
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(theme.border_active))
                     .style(Style::default().fg(theme.foreground).bg(theme.background));
                 frame.render_widget(block, dialog_area);
 

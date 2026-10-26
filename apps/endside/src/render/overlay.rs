@@ -82,7 +82,12 @@ fn expand_popup_area(area: Rect, bounds: Rect, margin: u16) -> Rect {
     }
 }
 
-fn render_popup_backdrop(frame: &mut Frame, area: Rect, bounds: Rect, bg: ratatui::style::Color) {
+pub(super) fn render_popup_backdrop(
+    frame: &mut Frame,
+    area: Rect,
+    bounds: Rect,
+    bg: ratatui::style::Color,
+) {
     let backdrop = expand_popup_area(area, bounds, 1);
     frame.render_widget(Clear, backdrop);
     frame.render_widget(Block::default().style(Style::default().bg(bg)), backdrop);
