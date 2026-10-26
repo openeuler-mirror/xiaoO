@@ -622,3 +622,125 @@ fn nested_request_url_boundary_search() {
     }
     record_output("nested_request_url_boundary_search", &format!("repeats={repeats} bytes={} rounds={rounds} elapsed_ns={times:?} expected_output=true\n", input.len()));
 }
+
+#[test]
+fn rejected_json_spelling_keeps_same_start_raw_match() {
+    let mut redactor = ErrorRedactor::new("http://api.example/", "\t\"SECOND");
+    let header = r#"\t\""#;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-api-key",
+        reqwest::header::HeaderValue::from_str(header).unwrap(),
+    );
+    redactor.headers(&headers);
+    let input = r#"\\t\"SECOND"#;
+    let output = redactor.diagnostic(input);
+    record_output(
+        "rejected_json_spelling_keeps_same_start_raw_match",
+        &format!("input={input}\nheader={header}\noutput={output}\n"),
+    );
+    assert_eq!(output, r"\[REDACTED]SECOND");
+    assert!(!output.contains(header));
+}
+
+#[test]
+fn same_start_credential_candidates() {
+    let key = "\t\"SECOND-LONG";
+    let encoded = serde_json::to_string(key).unwrap();
+    let encoded = &encoded[1..encoded.len() - 1];
+    let raw_candidates = [
+        r#"\t\""#,
+        r#"\t\"S"#,
+        r#"\t\"SEC"#,
+        r#"\t\"SECOND"#,
+        r#"\t\"SECOND-LONG"#,
+    ];
+    let mut records = String::new();
+    let mut failures = vec![];
+    for mask in 0..(1 << raw_candidates.len()) {
+        for reversed in [false, true] {
+            // Two guarded spellings and up to five raw prefixes share one start.
+            let mut redactor = ErrorRedactor::new("http://api.example/?token=%09%22SECOND", key);
+            let mut selected: Vec<_> = raw_candidates
+                .iter()
+                .enumerate()
+                .filter_map(|(i, value)| (mask & (1 << i) != 0).then_some(*value))
+                .collect();
+            let longest = selected.iter().map(|value| value.len()).max();
+            if reversed {
+                selected.reverse();
+            }
+            let mut headers = reqwest::header::HeaderMap::new();
+            for value in &selected {
+                headers.append(
+                    "x-api-key",
+                    reqwest::header::HeaderValue::from_str(value).unwrap(),
+                );
+            }
+            headers.insert("cookie", reqwest::header::HeaderValue::from_static("/MORE"));
+            redactor.headers(&headers);
+            for preceding in 0..9 {
+                let prefix = "\\".repeat(preceding);
+                let input = format!("{prefix}{encoded} KEEP %2fMORE %2FMORE");
+                let expected = if preceding % 2 == 0 {
+                    format!("{prefix}[REDACTED] KEEP [REDACTED] [REDACTED]")
+                } else if let Some(len) = longest {
+                    format!(
+                        "{prefix}[REDACTED]{} KEEP [REDACTED] [REDACTED]",
+                        &encoded[len..]
+                    )
+                } else {
+                    format!("{prefix}{encoded} KEEP [REDACTED] [REDACTED]")
+                };
+                let output = redactor.diagnostic(&input);
+                records.push_str(&format!("mask={mask} reversed={reversed} preceding={preceding} longest={longest:?}\ninput={input}\noutput={output}\nexpected={expected}\n"));
+                if output != expected {
+                    failures.push((mask, reversed, preceding));
+                }
+            }
+        }
+    }
+    record_output("same_start_credential_candidates", &records);
+    assert!(
+        failures.is_empty(),
+        "same-start candidate cases: {failures:?}"
+    );
+}
+
+#[test]
+fn repeated_same_start_credential_search() {
+    let mut redactor = ErrorRedactor::new("http://api.example/", "\t\"SECOND-LONG");
+    let mut headers = reqwest::header::HeaderMap::new();
+    for value in [r#"\t\""#, r#"\t\"S"#, r#"\t\"SECOND"#] {
+        headers.append(
+            "x-api-key",
+            reqwest::header::HeaderValue::from_str(value).unwrap(),
+        );
+    }
+    redactor.headers(&headers);
+    redactor.diagnostic("warm up");
+    let unit = r#"\\t\"SECOND-LONG KEEP "#;
+    let repeats: usize = std::env::var("XIAOO_SAME_START_REPEATS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512);
+    let rounds: usize = std::env::var("XIAOO_SAME_START_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    let body = unit.repeat(repeats);
+    let expected = r"\[REDACTED]-LONG KEEP ".repeat(repeats);
+    let mut elapsed = vec![];
+    let mut correct = true;
+    for _ in 0..rounds {
+        let start = Instant::now();
+        let output = redactor.diagnostic(&body);
+        elapsed.push(start.elapsed().as_nanos());
+        correct &= output == expected;
+    }
+    record_output("repeated_same_start_credential_search", &format!("repeats={repeats} bytes={} rounds={rounds} elapsed_ns={elapsed:?} expected_output={correct}\n", body.len()));
+    assert!(
+        correct,
+        "same-start raw credential remained in repeated output"
+    );
+}

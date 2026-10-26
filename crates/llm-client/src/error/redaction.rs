@@ -140,15 +140,30 @@ impl ErrorRedactor {
                 .spellings
                 .iter()
                 .any(|(spelling, guarded)| *guarded && spelling == found.as_str());
-            if guarded && !boundary.allows(text, found.start()) {
-                // A rejected longer spelling may contain another raw credential.
-                search = found.start() + 1;
-                continue;
-            }
+            let end = if guarded && !boundary.allows(text, found.start()) {
+                // Rejecting a JSON spelling must not hide a raw spelling at the same start.
+                let alternative = self
+                    .spellings
+                    .iter()
+                    .filter(|(spelling, guarded)| {
+                        !guarded && text[found.start()..].starts_with(spelling)
+                    })
+                    .map(|(spelling, _)| spelling.len())
+                    .max();
+                if let Some(len) = alternative {
+                    found.start() + len
+                } else {
+                    // Other credentials may still begin inside the rejected spelling.
+                    search = found.start() + 1;
+                    continue;
+                }
+            } else {
+                found.end()
+            };
             let result = output.get_or_insert_with(|| String::with_capacity(text.len()));
             result.push_str(&text[copied..found.start()]);
             result.push_str("[REDACTED]");
-            copied = found.end();
+            copied = end;
             search = copied;
         }
         if let Some(mut output) = output {

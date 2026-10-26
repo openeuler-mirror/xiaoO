@@ -264,7 +264,9 @@ not decoded. Only credentials known to this request can be redacted.
 JSON spellings that begin with a backslash are matched only at an escape boundary:
 an odd number of immediately preceding backslashes makes the candidate a literal
 escaped backslash rather than the beginning of the credential spelling. Original
-credential values still match literally.
+credential values still match literally. If an escaped spelling is rejected,
+unrestricted spellings at that same position are still considered; the longest
+accepted spelling is replaced before the scan advances.
 
 Request URL wrappers supported in diagnostics are angle brackets (`<...>`),
 parentheses (`(...)`), square brackets (`[...]`), braces (`{...}`), double quotes,
