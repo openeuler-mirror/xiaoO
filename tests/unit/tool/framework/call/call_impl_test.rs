@@ -71,10 +71,10 @@ impl ToolExecutor for TestToolExecutor {
     }
 }
 
-fn test_tool_call_impl() -> ToolCallImpl {
+pub(super) fn test_tool_call_impl(tool_name: &str) -> ToolCallImpl {
     let spec = Arc::new(TestToolSpec {
         id: ToolId("test_tool".to_string()),
-        name: ToolName("test_tool".to_string()),
+        name: ToolName(tool_name.to_string()),
         description: "test tool".to_string(),
         input_schema: InputSchemaRef {
             schema: serde_json::json!({"type": "object"}),
@@ -86,7 +86,7 @@ fn test_tool_call_impl() -> ToolCallImpl {
     ToolCallImpl::new(
         FinalToolCall {
             call_id: "call-1".to_string(),
-            tool_name: "test_tool".to_string(),
+            tool_name: tool_name.to_string(),
             input: serde_json::json!({"value": 1}),
             ..Default::default()
         },
@@ -95,11 +95,11 @@ fn test_tool_call_impl() -> ToolCallImpl {
     )
 }
 
-fn test_execution_state() -> ToolExecutionState {
+pub(super) fn test_execution_state(tool_name: &str) -> ToolExecutionState {
     ToolExecutionState {
         final_call: FinalToolCall {
             call_id: "call-1".to_string(),
-            tool_name: "test_tool".to_string(),
+            tool_name: tool_name.to_string(),
             input: serde_json::json!({"value": 1}),
             ..Default::default()
         },
@@ -115,8 +115,8 @@ fn test_execution_state() -> ToolExecutionState {
 
 #[test]
 fn build_denied_result_uses_pre_hook_reason_when_error_missing() {
-    let call_impl = test_tool_call_impl();
-    let mut state = test_execution_state();
+    let call_impl = test_tool_call_impl("test_tool");
+    let mut state = test_execution_state("test_tool");
     state.pre_hook_results = vec![PreHookResult::Deny {
         reason: "blocked by policy".to_string(),
     }];
@@ -136,8 +136,8 @@ fn build_denied_result_uses_pre_hook_reason_when_error_missing() {
 
 #[test]
 fn build_denied_result_preserves_existing_execution_error() {
-    let call_impl = test_tool_call_impl();
-    let mut state = test_execution_state();
+    let call_impl = test_tool_call_impl("test_tool");
+    let mut state = test_execution_state("test_tool");
     state.pre_hook_results = vec![PreHookResult::Deny {
         reason: "blocked by policy".to_string(),
     }];

@@ -77,6 +77,12 @@ impl ToolCall for ToolCallImpl {
                     error = %error,
                     "pre-hook phase failed"
                 );
+                state.pre_hook_results = vec![PreHookResult::Deny {
+                    reason: format!(
+                        "pre-hook phase failed, tool call denied (fail-closed): {}",
+                        error
+                    ),
+                }];
             }
         }
 

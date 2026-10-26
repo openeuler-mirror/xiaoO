@@ -195,7 +195,6 @@ async fn file_edit_forwards_extra_on_both_write_paths() {
             "new_string": new_string
         }),
         extra: Some(extra_channel.clone()),
-        ..Default::default()
     };
 
     let temp = tempfile::tempdir().expect("tempdir");

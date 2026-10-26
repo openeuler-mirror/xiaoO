@@ -14,7 +14,6 @@ fn call_with_extra(input: serde_json::Value, extra: serde_json::Value) -> FinalT
         tool_name: "file_write".to_string(),
         input,
         extra: Some(extra),
-        ..Default::default()
     }
 }
 

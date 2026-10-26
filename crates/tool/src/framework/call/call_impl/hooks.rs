@@ -6,7 +6,7 @@ use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, FinalToolCall, PostHookResult, PostToolHookInput,
     PreHookResult, PreToolHookInput, RawToolOutcome, ToolExecutionError,
 };
-use hook::{resolve_hook_point_category, HookPointCategory};
+use hook::{escape_hook_point_segment, resolve_hook_point_category, HookPointCategory};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 
@@ -20,6 +20,20 @@ impl ToolCallImpl {
         runtime: &dyn RuntimeView,
     ) -> Result<Vec<PreHookResult>, ToolExecutionError> {
         let hook_point = self.build_tool_hook_point(runtime, &state.final_call.tool_name, "pre");
+        let mut hookers = runtime.hookers().list_for_hook_point(&hook_point);
+        hookers.retain(|hooker| runtime.hookers().is_enabled(hooker.id()));
+        hookers.sort_by(|left, right| left.id().0.cmp(&right.id().0));
+
+        // `build_tool_hook_point` escapes dots in the agent and tool name
+        // segments, so the point is always well formed and wildcard patterns
+        // like `*.Tool.*.pre` match dotted tool names too. An empty match
+        // therefore genuinely means "no enabled hooker is attached to this
+        // tool phase" and the phase is skipped, including hook-free
+        // deployments.
+        if hookers.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let category = resolve_hook_point_category(&hook_point).map_err(|error| {
             ToolExecutionError::ExecutionFailed {
                 message: format!(
@@ -36,14 +50,6 @@ impl ToolCallImpl {
                     category, hook_point.0
                 ),
             });
-        }
-
-        let mut hookers = runtime.hookers().list_for_hook_point(&hook_point);
-        hookers.retain(|hooker| runtime.hookers().is_enabled(hooker.id()));
-        hookers.sort_by(|left, right| left.id().0.cmp(&right.id().0));
-
-        if hookers.is_empty() {
-            return Ok(Vec::new());
         }
 
         let mut results = Vec::new();
@@ -89,7 +95,14 @@ impl ToolCallImpl {
                             json!({"error": error.to_string()}),
                         )
                         .await;
-                    continue;
+                    results.push(PreHookResult::Deny {
+                        reason: format!(
+                            "pre-hooker '{}' failed, tool call denied (fail-closed): {}",
+                            hooker.id().0,
+                            error
+                        ),
+                    });
+                    return Ok(results);
                 }
             };
 
@@ -110,7 +123,13 @@ impl ToolCallImpl {
                             json!({"error": "unexpected output variant"}),
                         )
                         .await;
-                    continue;
+                    results.push(PreHookResult::Deny {
+                        reason: format!(
+                            "pre-hooker '{}' returned non-pre output, tool call denied (fail-closed)",
+                            hooker.id().0
+                        ),
+                    });
+                    return Ok(results);
                 }
             };
 
@@ -160,7 +179,17 @@ impl ToolCallImpl {
         stage: &str,
     ) -> HookPointId {
         let agent_id = &runtime.agent_context().metadata().agent_id;
-        HookPointId(format!("{}.Tool.{}.{}", agent_id, tool_name, stage))
+        // The agent id and tool name are free-form and may contain dots
+        // (e.g. MCP tools like `mcp__srv__github.create_issue`); escaping
+        // them keeps the point at exactly 4 segments so category resolution
+        // succeeds and 4-segment wildcard patterns (`*.Tool.*.pre`) still
+        // match. Exact registrations target the escaped spelling.
+        HookPointId(format!(
+            "{}.Tool.{}.{}",
+            escape_hook_point_segment(agent_id),
+            escape_hook_point_segment(tool_name),
+            stage
+        ))
     }
 
     pub(super) async fn run_post_hook_sequence(
@@ -178,6 +207,17 @@ impl ToolCallImpl {
         };
 
         let hook_point = self.build_tool_hook_point(runtime, &state.final_call.tool_name, "post");
+        let mut hookers = runtime.hookers().list_for_hook_point(&hook_point);
+        hookers.retain(|hooker| runtime.hookers().is_enabled(hooker.id()));
+        hookers.sort_by(|left, right| left.id().0.cmp(&right.id().0));
+
+        // Same criterion as the pre-hook sequence: the escaped hook point is
+        // always well formed, so an empty match means no enabled hooker is
+        // attached to this tool phase and the phase is skipped.
+        if hookers.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let category = resolve_hook_point_category(&hook_point).map_err(|error| {
             ToolExecutionError::ExecutionFailed {
                 message: format!(
@@ -194,14 +234,6 @@ impl ToolCallImpl {
                     category, hook_point.0
                 ),
             });
-        }
-
-        let mut hookers = runtime.hookers().list_for_hook_point(&hook_point);
-        hookers.retain(|hooker| runtime.hookers().is_enabled(hooker.id()));
-        hookers.sort_by(|left, right| left.id().0.cmp(&right.id().0));
-
-        if hookers.is_empty() {
-            return Ok(Vec::new());
         }
 
         let mut results = Vec::new();
@@ -312,6 +344,17 @@ impl ToolCallImpl {
         runtime: &dyn RuntimeView,
     ) -> Result<Vec<ErrorHookResult>, ToolExecutionError> {
         let hook_point = self.build_tool_hook_point(runtime, &state.final_call.tool_name, "error");
+        let mut hookers = runtime.hookers().list_for_hook_point(&hook_point);
+        hookers.retain(|hooker| runtime.hookers().is_enabled(hooker.id()));
+        hookers.sort_by(|left, right| left.id().0.cmp(&right.id().0));
+
+        // Same criterion as the pre-hook sequence: the escaped hook point is
+        // always well formed, so an empty match means no enabled hooker is
+        // attached to this tool phase and the phase is skipped.
+        if hookers.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let category = resolve_hook_point_category(&hook_point).map_err(|error| {
             ToolExecutionError::ExecutionFailed {
                 message: format!(
@@ -328,14 +371,6 @@ impl ToolCallImpl {
                     category, hook_point.0
                 ),
             });
-        }
-
-        let mut hookers = runtime.hookers().list_for_hook_point(&hook_point);
-        hookers.retain(|hooker| runtime.hookers().is_enabled(hooker.id()));
-        hookers.sort_by(|left, right| left.id().0.cmp(&right.id().0));
-
-        if hookers.is_empty() {
-            return Ok(Vec::new());
         }
 
         let mut results = Vec::new();
