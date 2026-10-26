@@ -247,85 +247,97 @@ fn anthropic_response_text(response: &serde_json::Value) -> Option<String> {
 impl LlmProvider for AnthropicProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/messages", self.base_url);
-        let body = self.build_body(request, false);
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let started = std::time::Instant::now();
+        let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
+        let result = async {
+            let body = self.build_body(request, false);
+            let body_str = serde_json::to_string(&body).unwrap_or_default();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            let request = self
+                .client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .build()
+                .map_err(map_reqwest_error)?;
+            redactor.headers(request.headers());
+            let response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(map_reqwest_error)?;
 
-        let status = response.status();
-        let headers = response.headers().clone();
-        let resp_body = response.text().await.unwrap_or_default();
+            let status = response.status();
+            let headers = response.headers().clone();
+            redactor.headers(&headers);
+            let resp_body = response.text().await.unwrap_or_default();
 
-        if !status.is_success() {
-            return Err(map_api_status_error(
-                status,
-                &resp_body,
-                &body_str,
-                Some(&headers),
-            ));
-        }
+            if !status.is_success() {
+                return Err(map_api_status_error(
+                    status,
+                    &resp_body,
+                    &body_str,
+                    Some(&headers),
+                ));
+            }
 
-        let anthropic_response: serde_json::Value =
-            serde_json::from_str(&resp_body).map_err(map_serde_error)?;
+            let anthropic_response: serde_json::Value =
+                serde_json::from_str(&resp_body).map_err(map_serde_error)?;
 
-        let content = anthropic_response_text(&anthropic_response);
-        let reasoning_content = anthropic_response["content"].as_array().and_then(|arr| {
-            let thinking = arr
+            let content = anthropic_response_text(&anthropic_response);
+            let reasoning_content = anthropic_response["content"].as_array().and_then(|arr| {
+                let thinking = arr
+                    .iter()
+                    .filter_map(|c| c["thinking"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("");
+                (!thinking.is_empty()).then_some(thinking)
+            });
+            let tool_calls = extract_anthropic_tool_calls(&anthropic_response["content"]);
+
+            let usage_val = &anthropic_response["usage"];
+            let usage = Usage {
+                prompt_tokens: usage_val["input_tokens"].as_u64().unwrap_or(0) as usize,
+                completion_tokens: usage_val["output_tokens"].as_u64().unwrap_or(0) as usize,
+                total_tokens: (usage_val["input_tokens"].as_u64().unwrap_or(0)
+                    + usage_val["output_tokens"].as_u64().unwrap_or(0))
+                    as usize,
+                cached_tokens: usage_val["cache_read_input_tokens"].as_u64().unwrap_or(0) as usize,
+            };
+
+            let finish_reason = anthropic_response["stop_reason"]
+                .as_str()
+                .unwrap_or("end_turn");
+            let stop_reason = anthropic_stop_reason(finish_reason);
+
+            let tool_use_blocks: Vec<ToolUseBlock> = tool_calls
                 .iter()
-                .filter_map(|c| c["thinking"].as_str())
-                .collect::<Vec<_>>()
-                .join("");
-            (!thinking.is_empty()).then_some(thinking)
-        });
-        let tool_calls = extract_anthropic_tool_calls(&anthropic_response["content"]);
+                .map(|tc| ToolUseBlock {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.function.name.clone(),
+                    input: parse_tool_arguments(&tc.function.arguments),
+                })
+                .collect();
 
-        let usage_val = &anthropic_response["usage"];
-        let usage = Usage {
-            prompt_tokens: usage_val["input_tokens"].as_u64().unwrap_or(0) as usize,
-            completion_tokens: usage_val["output_tokens"].as_u64().unwrap_or(0) as usize,
-            total_tokens: (usage_val["input_tokens"].as_u64().unwrap_or(0)
-                + usage_val["output_tokens"].as_u64().unwrap_or(0))
-                as usize,
-            cached_tokens: usage_val["cache_read_input_tokens"].as_u64().unwrap_or(0) as usize,
-        };
-
-        let finish_reason = anthropic_response["stop_reason"]
-            .as_str()
-            .unwrap_or("end_turn");
-        let stop_reason = anthropic_stop_reason(finish_reason);
-
-        let tool_use_blocks: Vec<ToolUseBlock> = tool_calls
-            .iter()
-            .map(|tc| ToolUseBlock {
-                call_id: tc.id.clone(),
-                tool_name: tc.function.name.clone(),
-                input: parse_tool_arguments(&tc.function.arguments),
-            })
-            .collect();
-
-        Ok(LlmResponse {
-            message: AssistantMessage {
-                text: if tool_use_blocks.is_empty() {
-                    content
-                } else {
-                    None
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: if tool_use_blocks.is_empty() {
+                        content
+                    } else {
+                        None
+                    },
+                    reasoning_content,
+                    tool_calls: tool_use_blocks,
+                    usage,
+                    stop_reason,
                 },
-                reasoning_content,
-                tool_calls: tool_use_blocks,
-                usage,
-                stop_reason,
-            },
-            kv_cache_chunk_hashes: vec![],
-        })
+                kv_cache_chunk_hashes: vec![],
+            })
+        }
+        .await;
+        redactor.error_result(result)
     }
 
     async fn complete_stream(
@@ -333,152 +345,164 @@ impl LlmProvider for AnthropicProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        let started = std::time::Instant::now();
         let url = format!("{}/messages", self.base_url);
-        let body = self.build_body(request, true);
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let started = std::time::Instant::now();
+        let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
+        let result = async {
+            let body = self.build_body(request, true);
+            let body_str = serde_json::to_string(&body).unwrap_or_default();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            let request = self
+                .client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .build()
+                .map_err(map_reqwest_error)?;
+            redactor.headers(request.headers());
+            let response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(map_reqwest_error)?;
 
-        let status = response.status();
-        let headers = response.headers().clone();
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(map_api_status_error(
-                status,
-                &error_body,
-                &body_str,
-                Some(&headers),
-            ));
-        }
+            let status = response.status();
+            let headers = response.headers().clone();
+            redactor.headers(&headers);
+            if !status.is_success() {
+                let error_body = response.text().await.unwrap_or_default();
+                return Err(map_api_status_error(
+                    status,
+                    &error_body,
+                    &body_str,
+                    Some(&headers),
+                ));
+            }
 
-        // Same gate as the other SSE providers: a 200 with a non-SSE
-        // content type is an error page or misrouted endpoint, and feeding
-        // it to the SSE parser would silently yield an empty stream.
-        let content_type = headers
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !content_type.to_lowercase().starts_with("text/event-stream") {
-            let full_response = response.text().await.unwrap_or_default();
-            return Err(crate::error::map_protocol_mismatch(
-                &url,
-                status.as_u16(),
-                &headers,
-                format!("unexpected content type: {}", content_type),
-                started,
-                &full_response,
-            ));
-        }
-
-        let mut full_text = String::new();
-        let mut full_reasoning = String::new();
-        let mut full_tool_calls: Vec<crate::wire_types::WireToolCall> = Vec::new();
-        let mut final_usage = None;
-        let mut final_stop_reason = StopReason::EndTurn;
-
-        let mut decoder = StreamUtf8Decoder::default();
-        let mut buffer = String::new();
-        let mut byte_stream = response.bytes_stream();
-        let mut bytes_received: usize = 0;
-        // Per-stream event_type state. Scoped locally so concurrent streams
-        // on the same shared provider don't race on a shared Mutex.
-        let mut current_event: Option<String> = None;
-
-        while let Some(chunk_result) = byte_stream.next().await {
-            let bytes = chunk_result.map_err(|e| {
-                crate::error::map_stream_read_error(
+            let content_type = headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !content_type.to_lowercase().starts_with("text/event-stream") {
+                let full_response = response.text().await.unwrap_or_default();
+                return Err(crate::error::map_protocol_mismatch(
                     &url,
+                    &redactor,
                     status.as_u16(),
                     &headers,
-                    &e,
+                    format!("unexpected content type: {}", content_type),
                     started,
-                    bytes_received,
-                    &buffer,
-                )
-            })?;
-            bytes_received += bytes.len();
-            decoder.push(&bytes, &mut buffer);
+                    &full_response,
+                ));
+            }
 
-            // Cursor-based SSE scanning: find each '\n' without rebuilding
-            // the buffer per line; drain the consumed prefix in place.
-            let mut start = 0;
-            while let Some(relative) = buffer[start..].find('\n') {
-                let pos = start + relative;
-                let line = &buffer[start..pos];
-                start = pos + 1;
+            let mut full_text = String::new();
+            let mut full_reasoning = String::new();
+            let mut full_tool_calls: Vec<crate::wire_types::WireToolCall> = Vec::new();
+            let mut final_usage = None;
+            let mut final_stop_reason = StopReason::EndTurn;
 
-                if line.is_empty() {
-                    continue;
+            let mut decoder = StreamUtf8Decoder::default();
+            let mut buffer = String::new();
+            let mut byte_stream = response.bytes_stream();
+            let mut bytes_received: usize = 0;
+            // Per-stream event_type state. Scoped locally so concurrent streams
+            // on the same shared provider don't race on a shared Mutex.
+            let mut current_event: Option<String> = None;
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let bytes = chunk_result.map_err(|e| {
+                    crate::error::map_stream_read_error(
+                        &url,
+                        &redactor,
+                        status.as_u16(),
+                        &headers,
+                        &e,
+                        started,
+                        bytes_received,
+                        &buffer,
+                    )
+                })?;
+                bytes_received += bytes.len();
+                decoder.push(&bytes, &mut buffer);
+
+                // Cursor-based SSE scanning: find each '\n' without rebuilding
+                // the buffer per line; drain the consumed prefix in place.
+                let mut start = 0;
+                while let Some(relative) = buffer[start..].find('\n') {
+                    let pos = start + relative;
+                    let line = &buffer[start..pos];
+                    start = pos + 1;
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    if let Some(parsed) =
+                        Self::parse_anthropic_stream_line(&mut current_event, line)?
+                    {
+                        if let Some(ref content) = parsed.content {
+                            full_text.push_str(content);
+                        }
+                        if let Some(ref reasoning) = parsed.reasoning {
+                            full_reasoning.push_str(reasoning);
+                        }
+                        if let Some(ref usage) = parsed.usage {
+                            final_usage =
+                                Some(merge_usage(final_usage.take(), wire_usage_to_usage(usage)));
+                        }
+                        if let Some(ref reason) = parsed.finish_reason {
+                            final_stop_reason = anthropic_stop_reason(reason);
+                        }
+                        super::openai_family::accumulate_tool_call_deltas_pub(
+                            &mut full_tool_calls,
+                            &parsed,
+                        );
+
+                        let stream_chunk = parsed_chunk_to_stream_chunk(&parsed);
+                        on_chunk(stream_chunk);
+                    }
                 }
-
-                if let Some(parsed) = Self::parse_anthropic_stream_line(&mut current_event, line)? {
-                    if let Some(ref content) = parsed.content {
-                        full_text.push_str(content);
-                    }
-                    if let Some(ref reasoning) = parsed.reasoning {
-                        full_reasoning.push_str(reasoning);
-                    }
-                    if let Some(ref usage) = parsed.usage {
-                        final_usage =
-                            Some(merge_usage(final_usage.take(), wire_usage_to_usage(usage)));
-                    }
-                    if let Some(ref reason) = parsed.finish_reason {
-                        final_stop_reason = anthropic_stop_reason(reason);
-                    }
-                    super::openai_family::accumulate_tool_call_deltas_pub(
-                        &mut full_tool_calls,
-                        &parsed,
-                    );
-
-                    let stream_chunk = parsed_chunk_to_stream_chunk(&parsed);
-                    on_chunk(stream_chunk);
+                // Drop the consumed prefix in place; no per-line allocation.
+                if start > 0 {
+                    buffer.drain(..start);
                 }
             }
-            // Drop the consumed prefix in place; no per-line allocation.
-            if start > 0 {
-                buffer.drain(..start);
-            }
-        }
 
-        decoder.finish(&mut buffer);
+            decoder.finish(&mut buffer);
 
-        let tool_use_blocks: Vec<ToolUseBlock> = full_tool_calls
-            .iter()
-            .map(|tc| ToolUseBlock {
-                call_id: tc.id.clone(),
-                tool_name: tc.function.name.clone(),
-                input: parse_tool_arguments(&tc.function.arguments),
+            let tool_use_blocks: Vec<ToolUseBlock> = full_tool_calls
+                .iter()
+                .map(|tc| ToolUseBlock {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.function.name.clone(),
+                    input: parse_tool_arguments(&tc.function.arguments),
+                })
+                .collect();
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: if full_text.is_empty() {
+                        None
+                    } else {
+                        Some(full_text)
+                    },
+                    reasoning_content: if full_reasoning.is_empty() {
+                        None
+                    } else {
+                        Some(full_reasoning)
+                    },
+                    tool_calls: tool_use_blocks,
+                    usage: final_usage.unwrap_or_default(),
+                    stop_reason: final_stop_reason,
+                },
+                kv_cache_chunk_hashes: vec![],
             })
-            .collect();
-
-        Ok(LlmResponse {
-            message: AssistantMessage {
-                text: if full_text.is_empty() {
-                    None
-                } else {
-                    Some(full_text)
-                },
-                reasoning_content: if full_reasoning.is_empty() {
-                    None
-                } else {
-                    Some(full_reasoning)
-                },
-                tool_calls: tool_use_blocks,
-                usage: final_usage.unwrap_or_default(),
-                stop_reason: final_stop_reason,
-            },
-            kv_cache_chunk_hashes: vec![],
-        })
+        }
+        .await;
+        redactor.error_result(result)
     }
 
     fn capabilities(&self) -> &ProviderCapabilities {

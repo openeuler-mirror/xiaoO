@@ -139,10 +139,12 @@ impl OpenRouterCatalog {
             .map_err(map_reqwest_error)?;
         let status = response.status();
         if !status.is_success() {
+            let mut redactor = crate::error::ErrorRedactor::new(&self.url, "");
+            redactor.headers(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
+            return Err(redactor.error(LlmError::ApiError(format!(
                 "OpenRouter models request failed: HTTP {status}: {body}"
-            )));
+            ))));
         }
         let payload: serde_json::Value = response.json().await.map_err(map_reqwest_error)?;
         parse_catalog_payload(&payload)
@@ -273,3 +275,7 @@ pub(crate) async fn lookup_context_length(model: &str) -> Option<u64> {
         .lookup_context_length(model)
         .await
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/llm-client/models/openrouter_test.rs"]
+mod tests;

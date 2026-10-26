@@ -9,8 +9,7 @@ use crate::convert::{
     wire_response_to_llm_response, wire_usage_to_usage,
 };
 use crate::error::{
-    map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error,
-    redact_credentials, LlmError,
+    map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error, LlmError,
 };
 use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::url_fallback::{
@@ -42,18 +41,13 @@ pub(crate) struct OpenAiFamilyProvider {
     cached_endpoint_url: Arc<RwLock<Option<String>>>,
 }
 
-/// Protocol dialect for `reasoning_effort` values.
+/// `reasoning_effort` 取值的协议方言。
 ///
-/// OpenAI-compatible endpoints generally accept `xhigh`; Zhipu's
-/// chat-completions API only documents `low`/`high`/`max` (`xhigh` is
-/// rejected), and its newer models (glm-5.3+) cannot disable thinking — Off
-/// can only omit the parameter and take the server default. The dialect is
-/// declared per endpoint (not per model name) in the provider registry via
-/// [`crate::provider_registry::ProviderProfile::reasoning_dialect`]; adding
-/// a Zhipu-dialect endpoint to an OpenAI-compatible provider needs only a
-/// registry entry, not a change here. Note: the native Zhipu protocol
-/// (`ZhipuProvider`) bypasses the registry and hardcodes its dialect in
-/// `zhipu.rs`.
+/// OpenAI 兼容端点普遍接受 `xhigh`；Zhipu 的 chat-completions API 只文档化
+/// 了 `low`/`high`/`max`（`xhigh` 会被拒），且新模型（glm-5.3+）无法禁用
+/// 思考——Off 只能不发参数、走服务端默认。由 provider 注册表以
+/// [`crate::provider_registry::ProviderProfile::reasoning_dialect`] 声明，
+/// 按端点而非模型名区分，新增 provider / GLM 模型无需改代码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReasoningDialect {
     #[default]
@@ -96,8 +90,7 @@ impl OpenAiFamilyProvider {
         }
     }
 
-    /// Overrides the default (OpenAI) dialect; Zhipu-protocol endpoints must
-    /// pass [`ReasoningDialect::Zhipu`].
+    /// 覆盖默认（OpenAI）方言；Zhipu 协议端点须传 [`ReasoningDialect::Zhipu`]。
     pub(crate) fn with_reasoning_dialect(mut self, dialect: ReasoningDialect) -> Self {
         self.reasoning_dialect = dialect;
         self
@@ -144,214 +137,181 @@ impl OpenAiFamilyProvider {
         url: &str,
         request: &LlmRequest,
     ) -> Result<LlmResponse, LlmError> {
-        let body = self.build_body(request, false)?;
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
-
-        let response = self
-            .apply_common_headers(self.client.post(url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
-
-        let status = response.status();
-        let headers = response.headers().clone();
-        let content_type = headers
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let resp_body = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(map_api_status_error(
-                status,
-                &resp_body,
-                &body_str,
-                Some(&headers),
-            ));
-        }
-
-        if !content_type.to_lowercase().starts_with("application/json") {
-            return Err(LlmError::ApiError(format!(
-                "unexpected content type: {content_type}; expected application/json. \
-                 Response body preview: {}",
-                resp_body.chars().take(200).collect::<String>(),
-            )));
-        }
-
-        let wire_response: crate::wire_types::WireResponse =
-            serde_json::from_str(&resp_body).map_err(map_serde_error)?;
-        let mut llm_response = wire_response_to_llm_response(&wire_response);
-        llm_response.message.usage = wire_usage_to_usage(&wire_response.usage);
-        Ok(llm_response)
-    }
-
-    async fn try_stream_endpoint(
-        &self,
-        url: &str,
-        request: &LlmRequest,
-        on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
-    ) -> Result<LlmResponse, LlmError> {
-        // Anchor for this attempt's elapsed_ms in the stream-error log;
-        // per-URL so fallback retries each report their own duration.
         let started = std::time::Instant::now();
-        let body = self.build_body(request, true)?;
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
+        let result = async {
+            let body = self.build_body(request, false)?;
+            let body_str = serde_json::to_string(&body).unwrap_or_default();
 
-        let response = self
-            .apply_common_headers(self.client.post(url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            let request = self
+                .apply_common_headers(self.client.post(url))
+                .json(&body)
+                .build()
+                .map_err(map_reqwest_error)?;
+            redactor.headers(request.headers());
+            let response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(map_reqwest_error)?;
 
-        let status = response.status();
-        let headers = response.headers().clone();
-        let content_type = headers
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+            let status = response.status();
+            let headers = response.headers().clone();
+            redactor.headers(&headers);
+            let content_type = headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let resp_body = response.text().await.unwrap_or_default();
 
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(map_api_status_error(
-                status,
-                &error_body,
-                &body_str,
-                Some(&headers),
-            ));
-        }
+            if !status.is_success() {
+                return Err(map_api_status_error(
+                    status,
+                    &resp_body,
+                    &body_str,
+                    Some(&headers),
+                ));
+            }
 
-        if !content_type.to_lowercase().starts_with("text/event-stream") {
-            let full_response = response.text().await.unwrap_or_default();
-            return Err(crate::error::map_protocol_mismatch(
-                url,
-                status.as_u16(),
-                &headers,
-                format!("unexpected content type: {}", content_type),
-                started,
-                &full_response,
-            ));
-        }
-
-        let mut full_text = String::new();
-        let mut full_reasoning = String::new();
-        let mut full_tool_calls = Vec::new();
-        let mut final_usage = None;
-        let mut final_finish_reason = None;
-        let mut final_kv_transfer_params = None;
-
-        let mut decoder = StreamUtf8Decoder::default();
-        let mut buffer = String::new();
-        let mut byte_stream = response.bytes_stream();
-        let mut bytes_received: usize = 0;
-
-        while let Some(chunk_result) = byte_stream.next().await {
-            let bytes = chunk_result.map_err(|e| {
-                crate::error::map_stream_read_error(
+            let content_type = headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !content_type.to_lowercase().starts_with("text/event-stream") {
+                let full_response = response.text().await.unwrap_or_default();
+                return Err(crate::error::map_protocol_mismatch(
                     url,
+                    &redactor,
                     status.as_u16(),
                     &headers,
-                    &e,
+                    format!("unexpected content type: {}", content_type),
                     started,
-                    bytes_received,
-                    &buffer,
-                )
-            })?;
-            bytes_received += bytes.len();
-            decoder.push(&bytes, &mut buffer);
+                    &full_response,
+                ));
+            }
 
-            // Cursor-based SSE scanning: find each '\n' without rebuilding
-            // the buffer per line; drain the consumed prefix in place.
-            let mut start = 0;
-            while let Some(relative) = buffer[start..].find('\n') {
-                let pos = start + relative;
-                let line = &buffer[start..pos];
-                start = pos + 1;
+            let mut full_text = String::new();
+            let mut full_reasoning = String::new();
+            let mut full_tool_calls = Vec::new();
+            let mut final_usage = None;
+            let mut final_finish_reason = None;
+            let mut final_kv_transfer_params = None;
 
-                if line.is_empty() {
-                    continue;
+            let mut decoder = StreamUtf8Decoder::default();
+            let mut buffer = String::new();
+            let mut byte_stream = response.bytes_stream();
+            let mut bytes_received: usize = 0;
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let bytes = chunk_result.map_err(|e| {
+                    crate::error::map_stream_read_error(
+                        url,
+                        &redactor,
+                        status.as_u16(),
+                        &headers,
+                        &e,
+                        started,
+                        bytes_received,
+                        &buffer,
+                    )
+                })?;
+                bytes_received += bytes.len();
+                decoder.push(&bytes, &mut buffer);
+
+                // Cursor-based SSE scanning: find each '\n' without rebuilding
+                // the buffer per line; drain the consumed prefix in place.
+                let mut start = 0;
+                while let Some(relative) = buffer[start..].find('\n') {
+                    let pos = start + relative;
+                    let line = &buffer[start..pos];
+                    start = pos + 1;
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    if let Some(parsed) = parse_openai_family_stream_line(line)? {
+                        if let Some(ref content) = parsed.content {
+                            full_text.push_str(content);
+                        }
+                        if let Some(ref reasoning) = parsed.reasoning {
+                            full_reasoning.push_str(reasoning);
+                        }
+                        if let Some(ref usage) = parsed.usage {
+                            final_usage = Some(usage.clone());
+                        }
+                        if let Some(ref reason) = parsed.finish_reason {
+                            final_finish_reason = Some(reason.clone());
+                        }
+                        if parsed.kv_transfer_params.is_some() {
+                            final_kv_transfer_params = parsed.kv_transfer_params.clone();
+                        }
+                        accumulate_tool_call_deltas(&mut full_tool_calls, &parsed);
+
+                        let stream_chunk = parsed_chunk_to_stream_chunk(&parsed);
+                        on_chunk(stream_chunk);
+                    }
                 }
-
-                if let Some(parsed) = parse_openai_family_stream_line(line)? {
-                    if let Some(ref content) = parsed.content {
-                        full_text.push_str(content);
-                    }
-                    if let Some(ref reasoning) = parsed.reasoning {
-                        full_reasoning.push_str(reasoning);
-                    }
-                    if let Some(ref usage) = parsed.usage {
-                        final_usage = Some(usage.clone());
-                    }
-                    if let Some(ref reason) = parsed.finish_reason {
-                        final_finish_reason = Some(reason.clone());
-                    }
-                    if parsed.kv_transfer_params.is_some() {
-                        final_kv_transfer_params = parsed.kv_transfer_params.clone();
-                    }
-                    accumulate_tool_call_deltas(&mut full_tool_calls, &parsed);
-
-                    let stream_chunk = parsed_chunk_to_stream_chunk(&parsed);
-                    on_chunk(stream_chunk);
+                // Drop the consumed prefix in place; no per-line allocation.
+                if start > 0 {
+                    buffer.drain(..start);
                 }
             }
-            // Drop the consumed prefix in place; no per-line allocation.
-            if start > 0 {
-                buffer.drain(..start);
-            }
-        }
 
-        decoder.finish(&mut buffer);
+            decoder.finish(&mut buffer);
 
-        let usage = final_usage
-            .map(|u| wire_usage_to_usage(&u))
-            .unwrap_or_default();
+            let usage = final_usage
+                .map(|u| wire_usage_to_usage(&u))
+                .unwrap_or_default();
 
-        let stop_reason = match final_finish_reason.as_deref() {
-            Some("stop") | Some("end_turn") => StopReason::EndTurn,
-            Some("length") | Some("max_tokens") => StopReason::MaxTokens,
-            Some("tool_calls") | Some("tool_use") => StopReason::ToolUse,
-            Some("content_filter") => StopReason::ContentFilter,
-            _ => StopReason::EndTurn,
-        };
+            let stop_reason = match final_finish_reason.as_deref() {
+                Some("stop") | Some("end_turn") => StopReason::EndTurn,
+                Some("length") | Some("max_tokens") => StopReason::MaxTokens,
+                Some("tool_calls") | Some("tool_use") => StopReason::ToolUse,
+                Some("content_filter") => StopReason::ContentFilter,
+                _ => StopReason::EndTurn,
+            };
 
-        let tool_use_blocks: Vec<ToolUseBlock> = full_tool_calls
-            .iter()
-            .map(|tc| ToolUseBlock {
-                call_id: tc.id.clone(),
-                tool_name: tc.function.name.clone(),
-                input: parse_tool_arguments(&tc.function.arguments),
-            })
-            .collect();
+            let tool_use_blocks: Vec<ToolUseBlock> = full_tool_calls
+                .iter()
+                .map(|tc| ToolUseBlock {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.function.name.clone(),
+                    input: parse_tool_arguments(&tc.function.arguments),
+                })
+                .collect();
 
-        if full_text.is_empty() && full_reasoning.is_empty() && tool_use_blocks.is_empty() {
-            return Err(LlmError::ApiError(
-                "empty stream response: stream completed but received no content. \
+            if full_text.is_empty() && full_reasoning.is_empty() && tool_use_blocks.is_empty() {
+                return Err(LlmError::ApiError(
+                    "empty stream response: stream completed but received no content. \
                  The endpoint may not support SSE streaming or returned an unexpected response."
-                    .to_string(),
-            ));
-        }
+                        .to_string(),
+                ));
+            }
 
-        Ok(LlmResponse {
-            message: AssistantMessage {
-                text: if full_text.is_empty() {
-                    None
-                } else {
-                    Some(full_text)
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: if full_text.is_empty() {
+                        None
+                    } else {
+                        Some(full_text)
+                    },
+                    reasoning_content: if full_reasoning.is_empty() {
+                        None
+                    } else {
+                        Some(full_reasoning)
+                    },
+                    tool_calls: tool_use_blocks,
+                    usage,
+                    stop_reason,
                 },
-                reasoning_content: if full_reasoning.is_empty() {
-                    None
-                } else {
-                    Some(full_reasoning)
-                },
-                tool_calls: tool_use_blocks,
-                usage,
-                stop_reason,
-            },
-            kv_cache_chunk_hashes: final_kv_transfer_params
-                .map(|p| p.chunk_hashes)
-                .unwrap_or_default(),
-        })
+                kv_cache_chunk_hashes: final_kv_transfer_params
+                    .map(|p| p.chunk_hashes)
+                    .unwrap_or_default(),
+            })
+        }
+        .await;
+        redactor.error_result(result)
     }
 
     /// Dispatch to the endpoint request matching the call style.
@@ -391,34 +351,28 @@ impl OpenAiFamilyProvider {
             .and_then(|guard| guard.clone());
 
         if let Some(url) = cached_url {
-            // Masked copy for the tracing sites below: a configured
-            // base_url can carry credentials in its query string, and
-            // build_url_fallback_error_message already masks its copy —
-            // tracing output must not become the bypass. `url` itself
-            // stays raw because it drives the request and the cache.
-            let log_url = redact_credentials(&url);
             match &call {
                 EndpointCall::Complete => {
                     tracing::debug!(
-                        url = %log_url,
+                        url,
                         "Using cached endpoint URL from previous successful call"
                     );
                 }
                 EndpointCall::Stream(_) => {
-                    tracing::debug!(url = %log_url, "Using cached endpoint URL for streaming request");
+                    tracing::debug!(url, "Using cached endpoint URL for streaming request");
                 }
             }
 
             match self.try_endpoint(&url, request, &call).await {
                 Ok(response) => {
-                    tracing::debug!(url = %log_url, "Cached URL succeeded{}", label);
+                    tracing::debug!(url, "Cached URL succeeded{}", label);
                     return Ok(response);
                 }
                 Err(error) => {
                     if is_configuration_error(&error) {
                         tracing::error!(
                             error = error.to_string(),
-                            url = %log_url,
+                            url,
                             "Cached URL failed with configuration error{} - not retrying",
                             label
                         );
@@ -428,7 +382,7 @@ impl OpenAiFamilyProvider {
                     if is_retryable_network_error(&error) {
                         tracing::warn!(
                             error = error.to_string(),
-                            url = %log_url,
+                            url,
                             "Cached URL failed with retryable network error{} - will retry 3 times with 1s interval",
                             label
                         );
@@ -437,7 +391,7 @@ impl OpenAiFamilyProvider {
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
                             tracing::info!(
-                                url = %log_url,
+                                url,
                                 attempt,
                                 total_attempts = 3,
                                 "Retrying cached URL{}",
@@ -447,7 +401,7 @@ impl OpenAiFamilyProvider {
                             match self.try_endpoint(&url, request, &call).await {
                                 Ok(response) => {
                                     tracing::info!(
-                                        url = %log_url,
+                                        url,
                                         attempt,
                                         "✓ Cached URL retry succeeded{}",
                                         label
@@ -458,7 +412,7 @@ impl OpenAiFamilyProvider {
                                     if is_configuration_error(&retry_error) {
                                         tracing::error!(
                                             error = retry_error.to_string(),
-                                            url = %log_url,
+                                            url,
                                             attempt,
                                             "Retry failed with configuration error{} - stopping retries",
                                             label
@@ -469,7 +423,7 @@ impl OpenAiFamilyProvider {
                                     if attempt < 3 {
                                         tracing::warn!(
                                             error = retry_error.to_string(),
-                                            url = %log_url,
+                                            url,
                                             attempt,
                                             "Retry attempt failed{} - will retry again",
                                             label
@@ -477,7 +431,7 @@ impl OpenAiFamilyProvider {
                                     } else {
                                         tracing::error!(
                                             error = retry_error.to_string(),
-                                            url = %log_url,
+                                            url,
                                             attempt,
                                             "All 3 retry attempts failed{} - returning error",
                                             label
@@ -492,14 +446,14 @@ impl OpenAiFamilyProvider {
                         if matches!(error, LlmError::RateLimited { .. }) {
                             tracing::error!(
                                 error = error.to_string(),
-                                url = %log_url,
+                                url,
                                 "Rate limited{} - quota exhausted or policy triggered, not retrying",
                                 label
                             );
                         } else {
                             tracing::error!(
                                 error = error.to_string(),
-                                url = %log_url,
+                                url,
                                 "Cached URL failed with non-retryable error{} - returning error",
                                 label
                             );
@@ -522,14 +476,10 @@ impl OpenAiFamilyProvider {
         let mut attempts = Vec::new();
 
         for (idx, url) in final_urls.iter().enumerate() {
-            // Same masked copy as the cached-URL block above; `url` stays
-            // raw for the request itself and for UrlAttemptRecord (which
-            // build_url_fallback_error_message masks at render time).
-            let log_url = redact_credentials(url);
             match self.try_endpoint(url, request, &call).await {
                 Ok(response) => {
                     tracing::info!(
-                        url = %log_url,
+                        url,
                         attempt_number = idx + 1,
                         total_candidates = final_urls.len(),
                         "✓ URL fallback succeeded{} - caching this URL for future calls",
@@ -557,13 +507,13 @@ impl OpenAiFamilyProvider {
                             tracing::warn!(
                                 "Phase 1 candidate #{} failed: {} - trying next candidate",
                                 idx + 1,
-                                log_url
+                                url
                             );
                         } else {
                             tracing::warn!(
                                 "Phase 2 candidate #{} failed with endpoint error: {} - trying next",
                                 idx + 1,
-                                log_url
+                                url
                             );
                         }
                         continue;
@@ -572,7 +522,7 @@ impl OpenAiFamilyProvider {
                     if is_configuration_error(&error) {
                         tracing::error!(
                             error = error.to_string(),
-                            url = %log_url,
+                            url,
                             "Configuration/parameter error detected{} - not trying more URLs",
                             label
                         );
@@ -585,7 +535,7 @@ impl OpenAiFamilyProvider {
                     // "All N candidates failed" summary.
                     if !has_more_candidates && is_http_unauthorized_error(&error) {
                         tracing::error!(
-                            url = %log_url,
+                            url,
                             error = error.to_string(),
                             "All candidates returned HTTP 401{} - surfacing real auth error instead of wrapped URL fallback",
                             label
@@ -612,9 +562,8 @@ enum EndpointCall<'a> {
     Stream(&'a (dyn Fn(StreamChunk) + Send + Sync)),
 }
 
-/// Model families with known `reasoning_effort` deviations on
-/// OpenAI-compatible endpoints, classified by the id's last segment (vendor
-/// prefix stripped, case-insensitive).
+/// OpenAI 兼容端点上 `reasoning_effort` 取值存在已知差异的模型家族，
+/// 按 id 末段（去 vendor 前缀、大小写不敏感）判定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelFamily {
     Gpt56,
@@ -641,30 +590,23 @@ fn classify_model(model: &str) -> ModelFamily {
     }
 }
 
-/// `reasoning_effort` tier → request-body value. High is always `high`; the
-/// deviations sit at the Off end (send explicitly or omit) and the Max end
-/// (`xhigh` vs `max`):
+/// `reasoning_effort` 档位 → 请求体取值。High 一律 `high`；差异集中在
+/// Off（是否显式下发）与 Max（`xhigh` vs `max`）两端：
 ///
-/// | Endpoint / model                | Off     | Max     |
-/// |---------------------------------|---------|---------|
-/// | generic OpenAI-compatible       | omit    | `xhigh` |
-/// | GPT-5.6                         | `none`  | `max`   |
-/// | Kimi K3 / GLM-5.2               | omit    | `max`   |
-/// | Zhipu dialect (any model)       | omit    | `max`   |
-///
-/// The table covers only the `reasoning_effort` field; on Off, GLM-5.2's
-/// `build_body` additionally sends `thinking: {"type": "disabled"}`
-/// (`Glm52` is an exact `classify_model` match — new GLM families on
-/// generic endpoints must be registered there).
+/// | 端点 / 模型            | Off    | Max     |
+/// |------------------------|--------|---------|
+/// | 通用 OpenAI 兼容端点    | 不发   | `xhigh` |
+/// | GPT-5.6                | `none` | `max`   |
+/// | Kimi K3 / GLM-5.2      | 不发   | `max`   |
+/// | Zhipu 方言（任意模型）  | 不发   | `max`   |
 fn reasoning_effort_for_model(
     dialect: ReasoningDialect,
     family: ModelFamily,
     effort: ReasoningEffort,
 ) -> Option<&'static str> {
     if dialect == ReasoningDialect::Zhipu {
-        // Zhipu officially documents only low/high/max: `xhigh` is rejected;
-        // Off omits the parameter and lets the server default take over
-        // (glm-5.3+ does not support thinking.type: disabled).
+        // Zhipu 官方仅文档化 low/high/max：`xhigh` 会被拒绝；Off 不发参数，
+        // 由服务端默认接管（glm-5.3+ 不支持 thinking.type: disabled）。
         return match effort {
             ReasoningEffort::Off => None,
             ReasoningEffort::High => Some("high"),
@@ -672,13 +614,11 @@ fn reasoning_effort_for_model(
         };
     }
     match (effort, family) {
-        // GPT-5.6 needs an explicit `none` to turn reasoning off; other
-        // models omit the parameter.
+        // GPT-5.6 须显式发 `none` 关闭，其余模型不发参数。
         (ReasoningEffort::Off, ModelFamily::Gpt56) => Some("none"),
         (ReasoningEffort::Off, _) => None,
         (ReasoningEffort::High, _) => Some("high"),
-        // The newer families only accept `max`; generic endpoints use
-        // `xhigh`.
+        // 新模型家族只认 `max`；通用端点用 `xhigh`。
         (ReasoningEffort::Max, ModelFamily::Standard) => Some("xhigh"),
         (ReasoningEffort::Max, _) => Some("max"),
     }
@@ -687,8 +627,10 @@ fn reasoning_effort_for_model(
 #[async_trait]
 impl LlmProvider for OpenAiFamilyProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-        self.run_with_url_fallback(request, EndpointCall::Complete)
-            .await
+        crate::error::ErrorRedactor::new(&self.api_base, &self.api_key).error_result(
+            self.run_with_url_fallback(request, EndpointCall::Complete)
+                .await,
+        )
     }
 
     async fn complete_stream(
@@ -696,8 +638,10 @@ impl LlmProvider for OpenAiFamilyProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        self.run_with_url_fallback(request, EndpointCall::Stream(on_chunk))
-            .await
+        crate::error::ErrorRedactor::new(&self.api_base, &self.api_key).error_result(
+            self.run_with_url_fallback(request, EndpointCall::Stream(on_chunk))
+                .await,
+        )
     }
 
     fn capabilities(&self) -> &ProviderCapabilities {

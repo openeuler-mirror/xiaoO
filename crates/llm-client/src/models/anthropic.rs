@@ -34,11 +34,13 @@ impl ModelCatalog for AnthropicModelCatalog {
             .map_err(map_reqwest_error)?;
         let status = response.status();
         if !status.is_success() {
+            let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
+            redactor.headers(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
+            return Err(redactor.error(LlmError::ApiError(format!(
                 "Failed to list models: HTTP {}: {}",
                 status, body
-            )));
+            ))));
         }
         let body: serde_json::Value = response.json().await.map_err(map_reqwest_error)?;
         let models = body["data"]

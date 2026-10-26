@@ -80,49 +80,61 @@ impl OllamaProvider {
 impl LlmProvider for OllamaProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/api/chat", self.base_url);
-        let body = self.build_ollama_body(request, false);
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let started = std::time::Instant::now();
+        let mut redactor = crate::error::ErrorRedactor::new(&url, "");
+        let result = async {
+            let body = self.build_ollama_body(request, false);
+            let body_str = serde_json::to_string(&body).unwrap_or_default();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            let request = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .build()
+                .map_err(map_reqwest_error)?;
+            redactor.headers(request.headers());
+            let response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(map_reqwest_error)?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let headers = response.headers().clone();
-            let resp_body = response.text().await.unwrap_or_default();
-            return Err(map_api_status_error(
-                status,
-                &resp_body,
-                &body_str,
-                Some(&headers),
-            ));
+            let status = response.status();
+            if !status.is_success() {
+                let headers = response.headers().clone();
+                redactor.headers(&headers);
+                let resp_body = response.text().await.unwrap_or_default();
+                return Err(map_api_status_error(
+                    status,
+                    &resp_body,
+                    &body_str,
+                    Some(&headers),
+                ));
+            }
+
+            let ollama_response: serde_json::Value =
+                response.json().await.map_err(map_reqwest_error)?;
+            let content = ollama_response["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let usage = usage_from_ollama_json(&ollama_response);
+            let stop_reason = stop_reason_from_ollama_json(&ollama_response);
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: Some(content),
+                    reasoning_content: None,
+                    tool_calls: vec![],
+                    usage,
+                    stop_reason,
+                },
+                kv_cache_chunk_hashes: vec![],
+            })
         }
-
-        let ollama_response: serde_json::Value =
-            response.json().await.map_err(map_reqwest_error)?;
-        let content = ollama_response["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let usage = usage_from_ollama_json(&ollama_response);
-        let stop_reason = stop_reason_from_ollama_json(&ollama_response);
-
-        Ok(LlmResponse {
-            message: AssistantMessage {
-                text: Some(content),
-                reasoning_content: None,
-                tool_calls: vec![],
-                usage,
-                stop_reason,
-            },
-            kv_cache_chunk_hashes: vec![],
-        })
+        .await;
+        redactor.error_result(result)
     }
 
     async fn complete_stream(
@@ -130,105 +142,110 @@ impl LlmProvider for OllamaProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        let started = std::time::Instant::now();
         let url = format!("{}/api/chat", self.base_url);
-        let body = self.build_ollama_body(request, true);
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let started = std::time::Instant::now();
+        let mut redactor = crate::error::ErrorRedactor::new(&url, "");
+        let result = async {
+            let body = self.build_ollama_body(request, true);
+            let body_str = serde_json::to_string(&body).unwrap_or_default();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            let request = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .build()
+                .map_err(map_reqwest_error)?;
+            redactor.headers(request.headers());
+            let response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(map_reqwest_error)?;
 
-        let status = response.status();
-        let headers = response.headers().clone();
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(map_api_status_error(
-                status,
-                &error_body,
-                &body_str,
-                Some(&headers),
-            ));
-        }
+            let status = response.status();
+            let headers = response.headers().clone();
+            redactor.headers(&headers);
+            if !status.is_success() {
+                let error_body = response.text().await.unwrap_or_default();
+                return Err(map_api_status_error(
+                    status,
+                    &error_body,
+                    &body_str,
+                    Some(&headers),
+                ));
+            }
 
-        let mut full_text = String::new();
-        let mut final_usage = None;
-        let mut final_stop_reason = StopReason::EndTurn;
+            let mut full_text = String::new();
+            let mut final_usage = None;
+            let mut final_stop_reason = StopReason::EndTurn;
 
-        // No content-type gate here on purpose: ollama's wire protocol is
-        // NDJSON, not SSE, so the `text/event-stream` gate used by the
-        // other providers does not apply, and ollama releases/proxies vary
-        // the header (`application/x-ndjson`, `application/json`, or
-        // absent) — any strict expectation would cut working streams.
-        // Malformed payloads are instead absorbed by the line-oriented
-        // JSON parser below.
-        let mut decoder = StreamUtf8Decoder::default();
-        let mut buffer = String::new();
-        let mut byte_stream = response.bytes_stream();
-        let mut bytes_received: usize = 0;
+            let mut decoder = StreamUtf8Decoder::default();
+            let mut buffer = String::new();
+            let mut byte_stream = response.bytes_stream();
+            let mut bytes_received: usize = 0;
 
-        while let Some(chunk_result) = byte_stream.next().await {
-            let bytes = chunk_result.map_err(|e| {
-                crate::error::map_stream_read_error(
-                    &url,
-                    status.as_u16(),
-                    &headers,
-                    &e,
-                    started,
-                    bytes_received,
-                    &buffer,
-                )
-            })?;
-            bytes_received += bytes.len();
-            decoder.push(&bytes, &mut buffer);
+            while let Some(chunk_result) = byte_stream.next().await {
+                let bytes = chunk_result.map_err(|e| {
+                    crate::error::map_stream_read_error(
+                        &url,
+                        &redactor,
+                        status.as_u16(),
+                        &headers,
+                        &e,
+                        started,
+                        bytes_received,
+                        &buffer,
+                    )
+                })?;
+                bytes_received += bytes.len();
+                decoder.push(&bytes, &mut buffer);
 
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].to_string();
-                buffer = buffer[pos + 1..].to_string();
-                if line.is_empty() {
-                    continue;
-                }
-
-                if let Some(parsed) = parse_ollama_stream_line(&line)? {
-                    if let Some(ref content) = parsed.content {
-                        full_text.push_str(content);
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].to_string();
+                    buffer = buffer[pos + 1..].to_string();
+                    if line.is_empty() {
+                        continue;
                     }
-                    if let Some(ref usage) = parsed.usage {
-                        final_usage = Some(wire_usage_to_usage(usage));
+
+                    if let Some(parsed) = parse_ollama_stream_line(&line)? {
+                        if let Some(ref content) = parsed.content {
+                            full_text.push_str(content);
+                        }
+                        if let Some(ref usage) = parsed.usage {
+                            final_usage = Some(wire_usage_to_usage(usage));
+                        }
+                        if let Some(ref reason) = parsed.finish_reason {
+                            final_stop_reason = match reason.as_str() {
+                                "stop" | "end_turn" => StopReason::EndTurn,
+                                "length" | "max_tokens" => StopReason::MaxTokens,
+                                _ => StopReason::EndTurn,
+                            };
+                        }
+                        on_chunk(parsed_chunk_to_stream_chunk(&parsed));
                     }
-                    if let Some(ref reason) = parsed.finish_reason {
-                        final_stop_reason = match reason.as_str() {
-                            "stop" | "end_turn" => StopReason::EndTurn,
-                            "length" | "max_tokens" => StopReason::MaxTokens,
-                            _ => StopReason::EndTurn,
-                        };
-                    }
-                    on_chunk(parsed_chunk_to_stream_chunk(&parsed));
                 }
             }
-        }
 
-        decoder.finish(&mut buffer);
+            decoder.finish(&mut buffer);
 
-        Ok(LlmResponse {
-            message: AssistantMessage {
-                text: if full_text.is_empty() {
-                    None
-                } else {
-                    Some(full_text)
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: if full_text.is_empty() {
+                        None
+                    } else {
+                        Some(full_text)
+                    },
+                    reasoning_content: None,
+                    tool_calls: vec![],
+                    usage: final_usage.unwrap_or_default(),
+                    stop_reason: final_stop_reason,
                 },
-                reasoning_content: None,
-                tool_calls: vec![],
-                usage: final_usage.unwrap_or_default(),
-                stop_reason: final_stop_reason,
-            },
-            kv_cache_chunk_hashes: vec![],
-        })
+                kv_cache_chunk_hashes: vec![],
+            })
+        }
+        .await;
+        redactor.error_result(result)
     }
 
     fn capabilities(&self) -> &ProviderCapabilities {

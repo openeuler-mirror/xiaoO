@@ -89,3 +89,6 @@ fn parse_stream_error_keeps_other_stream_errors_as_api_errors() {
 
     assert!(matches!(error, Some(LlmError::ApiError(_))));
 }
+
+#[path = "error_redaction_test.rs"]
+mod redaction;
