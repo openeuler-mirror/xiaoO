@@ -17,7 +17,7 @@ Everything user-facing lives under `apps/`. There are four members
 | `apps/endside` | `xiaoo-endside` | Front end: terminal UI, one-shot CLI, and skill management | `apps/endside/Cargo.toml:2` |
 | `apps/serverside` | `xiaoo-serverside` | Daemon: HTTP/REST API, channels, cron, and runtime control plane | `apps/serverside/Cargo.toml:2` |
 | `apps/shared` | `xiaoo-shared` | Application assembly facade shared by front end and daemon | `apps/shared/Cargo.toml:2` |
-| `apps/vault` | `vault` | Secrets/key custody: key providers, AES-GCM whitebox, and optional SDF/HSM backends | `apps/vault/src/lib.rs` |
+| `apps/vault` | `vault` | Secrets/key custody: key providers (per-instance key, legacy v1 decrypt, optional SDF/HSM backends) | `apps/vault/src/lib.rs` |
 
 `apps/shared` is the composition layer: it owns the gateway (`apps/shared/src/lib.rs:6`),
 the runtime checkpoint store (`apps/shared/src/lib.rs:12`), channels, cron, MCP and LSP

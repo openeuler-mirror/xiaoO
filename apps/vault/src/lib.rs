@@ -1,12 +1,14 @@
 //! Vault Plugin
 //!
-//! 统一的密钥和加密管理插件，包含:
-//! - KeyProvider: 密钥提供者抽象接口
-//! - WhiteBox: 白盒密钥实现
-//! - SDF: 国密接口 (包含 TEE 密钥提供者)
-//! - HSM: 硬件安全模块密钥接口
+//! Key and encryption management:
+//! - KeyProvider: key provider abstraction
+//! - InstanceKey: per-instance random master key (software default)
+//! - WhiteBox: legacy v1 derivation, decrypt-only for migration
+//! - SDF: national crypto interface (incl. TEE key providers)
+//! - HSM: hardware security module interface
 
 pub mod hsm;
+pub mod instance_key;
 pub mod key_provider;
 pub mod key_provider_error;
 pub mod sdf;
@@ -14,13 +16,14 @@ pub mod types;
 pub mod whitebox;
 
 // Re-export key provider types
-pub use key_provider::{KeyMaterial, KeyProvider, KeyProviderConfig};
+pub use key_provider::{KeyMaterial, KeyProvider};
 pub use key_provider_error::KeyProviderError;
 
 // Re-export providers
 pub use hsm::HsmKeyProvider;
+pub use instance_key::{store_key_tag, InstanceKeyProvider};
 pub use sdf::{
     decrypt_secret, encrypt_secret, init_sdf_provider, SdfKeyProvider, TeeKeyProvider, TeeType,
     DEFAULT_SDF_LIBRARY_PATH,
 };
-pub use whitebox::WhiteBoxKeyProvider;
+pub use whitebox::legacy_v1_master_key;

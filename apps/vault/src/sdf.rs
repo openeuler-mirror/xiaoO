@@ -182,7 +182,7 @@ impl KeyProvider for SdfKeyProvider {
             key
         });
 
-        Ok(KeyMaterial::new(*key, format!("sdf_{}", self.name())))
+        Ok(KeyMaterial::new(*key))
     }
 
     fn provider_type(&self) -> &'static str {

@@ -1,12 +1,11 @@
-//! Key Provider - 密钥派生抽象层
+//! Key Provider - key derivation abstraction
 //!
-//! 提供三种密钥派生方式:
-//! - WhiteBox: 适合无硬件安全环境
-//! - Tee: 适合 TEE (Trust Execution Environment) 环境
-//! - Hsm: 适合 HSM (Hardware Security Module) 环境
+//! - InstanceKey: per-instance random master key for software environments
+//! - Tee: TEE (Trusted Execution Environment)
+//! - Hsm: HSM (Hardware Security Module)
 
 pub use crate::key_provider_error::KeyProviderError;
-pub use crate::types::{KeyMaterial, KeyProviderConfig};
+pub use crate::types::KeyMaterial;
 
 use async_trait::async_trait;
 

@@ -1,41 +1,32 @@
-//! White-box Key Provider 实现
+//! Legacy v1 white-box key derivation.
 //!
-//! ⚠️ 警告: 本实现仅适用于测试环境，请勿用于生产环境
-//!
-//! 安全警告:
-//! - 当前密钥为 NULL（全零），仅适用于测试环境
-//! - 生产环境请使用 SDF 国密 (`use_sdf=true`) 或 HSM 方案
-//! - 白盒密钥存在安全风险，不推荐在生产环境中使用
+//! The v1 key is derived entirely from source constants and is public
+//! knowledge. Kept only to decrypt legacy v1 stores so they can be migrated
+//! to the per-instance master key; never use it to encrypt new data.
 
-use crate::key_provider::{KeyMaterial, KeyProvider, KeyProviderError};
-use async_trait::async_trait;
+use crate::key_provider_error::KeyProviderError;
 
-// 密钥碎片常量
-//
-// 警告: 当前设为全零，仅适用于测试环境。
-// 生产环境请使用 SDF 国密或 HSM 方案。
-
-/// 碎片 A: 位置 0-7
+/// Fragment A: bytes 0-7
 const FRAG_A: [u8; 8] = [0u8; 8];
 
-/// 碎片 B: 位置 8-15
+/// Fragment B: bytes 8-15
 const FRAG_B: [u8; 8] = [0u8; 8];
 
-/// 碎片 C: 位置 16-23
+/// Fragment C: bytes 16-23
 const FRAG_C: [u8; 8] = [0u8; 8];
 
-/// 碎片 D: 位置 24-31
+/// Fragment D: bytes 24-31
 const FRAG_D: [u8; 8] = [0u8; 8];
 
-/// 变换矩阵 (用于非线性变换)
+/// Transform matrix for the non-linear mixing step.
 const TRANSFORM_MATRIX: [[u8; 4]; 4] = [[2, 5, 8, 3], [7, 9, 1, 4], [6, 2, 5, 8], [3, 7, 9, 1]];
 
-/// 迷惑数据 (用于混淆分析)
+/// Decoy data mixed into both key halves.
 const DECOY_DATA: [u8; 16] = [
     0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
 ];
 
-/// S-Box 表 (用于非线性替换)
+/// S-Box for the non-linear substitution step.
 const SBOX: [u8; 256] = generate_sbox();
 
 const fn generate_sbox() -> [u8; 256] {
@@ -55,122 +46,86 @@ const XOR_KEY_2: u8 = 0xA5;
 const XOR_KEY_3: u8 = 0x3C;
 const XOR_KEY_4: u8 = 0x7E;
 
-/// WhiteBox 密钥提供者
-///
-/// ⚠️ 警告: 仅适用于测试环境，生产环境请使用 SDF 国密或 HSM
-pub struct WhiteBoxKeyProvider {
-    name: String,
+/// Derive the legacy v1 master key. The derivation is frozen: it must keep
+/// producing the historically published key, otherwise legacy stores can no
+/// longer be migrated.
+pub fn legacy_v1_master_key() -> Result<[u8; 32], KeyProviderError> {
+    let mut raw = [0u8; 32];
+    for i in 0..8 {
+        raw[i] = FRAG_A[i] ^ XOR_KEY_1;
+        raw[i + 8] = FRAG_B[i] ^ XOR_KEY_2;
+        raw[i + 16] = FRAG_C[i] ^ XOR_KEY_3;
+        raw[i + 24] = FRAG_D[i] ^ XOR_KEY_4;
+    }
+
+    for chunk in raw.chunks_mut(4) {
+        let block: [u8; 4] = chunk.try_into().unwrap();
+        let transformed = transform_block(&block);
+        chunk.copy_from_slice(&transformed);
+    }
+
+    final_diffusion(&mut raw);
+    verify_key(&raw)?;
+
+    Ok(raw)
 }
 
-impl WhiteBoxKeyProvider {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+fn transform_block(block: &[u8; 4]) -> [u8; 4] {
+    let mut result = [0u8; 4];
+    for i in 0..4 {
+        for (j, &value) in block.iter().enumerate() {
+            result[i] ^= galois_mul(value, TRANSFORM_MATRIX[i][j]);
+        }
+    }
+    result
+}
+
+#[inline(always)]
+fn galois_mul(a: u8, b: u8) -> u8 {
+    let mut p: u8 = 0;
+    let mut a = a;
+    let mut b = b;
+    for _ in 0..8 {
+        if b & 1 != 0 {
+            p ^= a;
+        }
+        let hi_bit = a & 0x80;
+        a <<= 1;
+        if hi_bit != 0 {
+            a ^= 0x1B;
+        }
+        b >>= 1;
+    }
+    p
+}
+
+#[inline(always)]
+fn rotate_left(value: u8, n: u8) -> u8 {
+    value.rotate_left(n.into())
+}
+
+fn final_diffusion(key: &mut [u8; 32]) {
+    for i in 0..32 {
+        key[i] = SBOX[key[i] as usize];
+        key[i] = rotate_left(key[i], 3);
+        if i > 0 {
+            key[i] ^= key[i - 1];
+        }
     }
 
-    pub fn with_default_name() -> Self {
-        Self::new("whitebox")
-    }
-
-    pub fn get_key(&self) -> Result<[u8; 32], KeyProviderError> {
-        self.reconstruct_key()
+    for i in 0..16 {
+        key[i] ^= DECOY_DATA[i];
+        key[i + 16] ^= DECOY_DATA[i];
     }
 }
 
-#[async_trait]
-impl KeyProvider for WhiteBoxKeyProvider {
-    async fn provide(&self) -> Result<KeyMaterial, KeyProviderError> {
-        let key = self.reconstruct_key()?;
-        Ok(KeyMaterial::new(key, "whitebox_derived".to_string()))
+fn verify_key(key: &[u8; 32]) -> Result<(), KeyProviderError> {
+    if key.iter().all(|&byte| byte == 0) {
+        return Err(KeyProviderError::InvalidInput(
+            "whitebox: reconstructed key is NULL (all-zero)".to_string(),
+        ));
     }
-
-    fn provider_type(&self) -> &'static str {
-        "whitebox"
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-impl WhiteBoxKeyProvider {
-    fn reconstruct_key(&self) -> Result<[u8; 32], KeyProviderError> {
-        let mut raw = [0u8; 32];
-        for i in 0..8 {
-            raw[i] = FRAG_A[i] ^ XOR_KEY_1;
-            raw[i + 8] = FRAG_B[i] ^ XOR_KEY_2;
-            raw[i + 16] = FRAG_C[i] ^ XOR_KEY_3;
-            raw[i + 24] = FRAG_D[i] ^ XOR_KEY_4;
-        }
-
-        for chunk in raw.chunks_mut(4) {
-            let block: [u8; 4] = chunk.try_into().unwrap();
-            let transformed = Self::transform_block(&block);
-            chunk.copy_from_slice(&transformed);
-        }
-
-        Self::final_diffusion(&mut raw);
-        Self::verify_key(&raw)?;
-
-        Ok(raw)
-    }
-
-    fn transform_block(block: &[u8; 4]) -> [u8; 4] {
-        let mut result = [0u8; 4];
-        for i in 0..4 {
-            for (j, &value) in block.iter().enumerate() {
-                result[i] ^= Self::galois_mul(value, TRANSFORM_MATRIX[i][j]);
-            }
-        }
-        result
-    }
-
-    #[inline(always)]
-    fn galois_mul(a: u8, b: u8) -> u8 {
-        let mut p: u8 = 0;
-        let mut a = a;
-        let mut b = b;
-        for _ in 0..8 {
-            if b & 1 != 0 {
-                p ^= a;
-            }
-            let hi_bit = a & 0x80;
-            a <<= 1;
-            if hi_bit != 0 {
-                a ^= 0x1B;
-            }
-            b >>= 1;
-        }
-        p
-    }
-
-    #[inline(always)]
-    fn rotate_left(value: u8, n: u8) -> u8 {
-        value.rotate_left(n.into())
-    }
-
-    fn final_diffusion(key: &mut [u8; 32]) {
-        for i in 0..32 {
-            key[i] = SBOX[key[i] as usize];
-            key[i] = Self::rotate_left(key[i], 3);
-            if i > 0 {
-                key[i] ^= key[i - 1];
-            }
-        }
-
-        for i in 0..16 {
-            key[i] ^= DECOY_DATA[i];
-            key[i + 16] ^= DECOY_DATA[i];
-        }
-    }
-
-    fn verify_key(key: &[u8; 32]) -> Result<(), KeyProviderError> {
-        if key.iter().all(|&byte| byte == 0) {
-            return Err(KeyProviderError::InvalidInput(
-                "whitebox: reconstructed key is NULL (all-zero)".to_string(),
-            ));
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 #[cfg(test)]

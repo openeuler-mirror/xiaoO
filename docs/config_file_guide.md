@@ -589,13 +589,13 @@ The `[vault]` section controls local encrypted storage of API keys and tokens in
 ```toml
 [vault]
 enabled = false  # Informational only — does NOT gate secret persistence (see note)
-use_sdf = false  # false = WhiteBox + AES-256-GCM (TEST ONLY); true = SDF 国密 (Kunpeng servers only)
+use_sdf = false  # false = per-instance key + AES-256-GCM; true = SDF 国密 (Kunpeng servers only)
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | **Informational only.** Reported by the daemon's vault status; not consulted when writing or reading secrets |
-| `use_sdf` | `false` | Functional. Selects WhiteBox (`false`, test only) or SDF 国密 (`true`, Kunpeng only) |
+| `use_sdf` | `false` | Functional. Selects the per-instance random master key (`false`) or SDF 国密 (`true`, Kunpeng only) |
 
 > ⚠️ **`enabled` is not a gate.** `llm_secrets.rs` never reads it — the only key
 > it parses from `[vault]` is `use_sdf`
@@ -606,10 +606,14 @@ use_sdf = false  # false = WhiteBox + AES-256-GCM (TEST ONLY); true = SDF 国密
 > (`apps/endside/src/services/provider.rs:132`). Setting `enabled = false`
 > therefore does **not** prevent `llm_secrets.json` from being created.
 
-> ⚠️ WhiteBox master key is currently all-zeros (test only). For production use
-> SDF (`use_sdf = true`) on a Kunpeng server, or avoid persisting secrets and
-> supply credentials through environment variables. Full design, file layout,
-> and API reference: [vault_secrets_design.md](./vault_secrets_design.md).
+> ⚠️ **Back up the master key file.** With `use_sdf = false`, secrets are encrypted
+> under a random per-instance master key stored next to the store as
+> `.llm_secrets.json.key` (mode 0600). If that file is lost, the encrypted store
+> cannot be recovered — include it when backing up the config directory. This
+> protects against offline decryption from a copy of the source code or the
+> ciphertext alone; against a full user-directory compromise use SDF
+> (`use_sdf = true`). Full design, file layout, and API reference:
+> [vault_secrets_design.md](./vault_secrets_design.md).
 
 ---
 
