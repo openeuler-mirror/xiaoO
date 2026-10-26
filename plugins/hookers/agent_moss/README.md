@@ -2,11 +2,7 @@
 
 AgentMoss 是一个**可被任意 AI Agent 调用的独立通用安全分析服务**。基于 OS Profile 机制，自动适配 Linux/Windows 的 syscall 检测模式，提供三层防御安全分析（特征匹配 → 逻辑规则 → LLM 语义分析）。
 
-> v2 更新：新增 OS Profile 系统（Linux/Windows 自适应）、两级快速放行白名单、rm 命令分级检测、脚本内容预扫描、LLM 结果缓存、Provider 自动识别与 Header 注入、fail-closed 安全原则。
->
-> v0.4.0 新增：非交互式密码修改检测（passwd/chpasswd/newusers/lnewusers 等）、密码修改授权检测（ask_user_question 前置检查）、内置安全 Skill 白名单（xiaoo-guardian 直接放行）、系统信息命令快速放行（whoami/id/hostname 等 12 个命令）、shell 重定向写入检测、AcTrail 执法事件上报。
->
-> v0.5.0 新增：L1/L2 规则收窄减少误杀（sudo 只拦截危险命令、rm -rf /tmp 不拦截、dd/mkfs/format 收窄、/etc/passwd 仅从 L1 移除、git push --force 降级为 medium）、nmap/masscan/zmap 网络扫描检测、lnewusers 批量用户添加检测、L2 通配符删除排除临时目录、用户/组删除授权检测、chgpasswd/lpasswd/gpasswd 检测。
+> 本文件是上游 AgentMoss 项目 README 的参考副本，描述 AgentMoss 服务本身；权威规则与源码在 AgentMoss 仓库。xiaoO 仓库内的本目录（`plugins/hookers/agent_moss/`）只包含 xiaoO 桥接插件，见文末[「本目录内容」](#本目录内容xiaoO-桥接插件)一节。
 
 ## 目录
 
@@ -19,8 +15,7 @@ AgentMoss 是一个**可被任意 AI Agent 调用的独立通用安全分析服�
 - [Policy Console（策略管控台）](#policy-console策略管控台)
 - [runtime_config（运行时持久化配置）](#runtime_config运行时持久化配置)
 - [配置](#配置)
-- [项目结构](#项目结构)
-- [测试](#测试)
+- [本目录内容（xiaoO 桥接插件）](#本目录内容xiaoO-桥接插件)
 - [环境变量参考](docs/ENV_VARS.md)
 
 ## 架构
@@ -52,30 +47,32 @@ AgentMoss 是一个**可被任意 AI Agent 调用的独立通用安全分析服�
 │                                                              │
 │  层1: 特征匹配静态检测 (<1ms)                                   │
 │    ├── 用户自定义规则匹配                                     │
-│    ├── 危险命令正则 (38+ 模式，rm 分级检测，sudo 只拦截危险命令) │
+│    ├── 危险命令正则 (以 AgentMoss 仓库 profiles/linux.py 为准，│
+│    │   rm 分级检测，sudo 只拦截危险命令)                      │
 │    ├── 非交互式密码修改检测 (| passwd/chpasswd/newusers/lnewusers 等) │
+│    ├── 敏感路径访问 (凭据文件 \b 边界匹配，读写按 deny_mode 区分) │
+│    ├── 危险操作模式 (通配符删除/重定向覆盖, 临时目录排除)      │
+│    ├── 横向移动检测 (ssh/scp/rsync)                           │
 │    ├── → high/critical → 直接 Deny                            │
 │    ├── → 内联脚本 file_access 转层3                            │
 │    │     （避免 'python -c "cat /etc/shadow"' 假阳性）         │
-│    └── Prompt 注入检测 (62 个中英关键词，9 类)                 │
+│    └── Prompt 注入检测 (中英关键词，以 AgentMoss 仓库           │
+│        profiles/linux.py 为准)                                │
 │                                                              │
 │  层2: 逻辑规则检测 (<1ms)                                     │
 │    ├── Rule 1: read-before-write 原则 (含 shell 重定向检测)    │
 │    ├── Rule 2: 意图偏离检测                                   │
-│    ├── Rule 3: 敏感路径访问 (含凭据文件 5 条目,               │
-│    │          \b 边界匹配避免部分匹配误报)                     │
-│    ├── Rule 4: 危险操作模式 (通配符删除/重定向覆盖, 临时目录排除) │
-│    ├── Rule 5: 密码修改授权检测 (非交互式需 ask_user_question) │
-│    ├── Rule 6: 用户/组删除授权检测 (需 ask_user_question)     │
-│    ├── Rule 7: 提权检测 (sudo+危险命令/su/chmod u+s)          │
-│    └── Rule 8: 横向移动检测 (ssh/scp/rsync)                   │
+│    ├── Rule 3: 间接文件访问检测 (目录遍历, 依赖 cwd)           │
+│    ├── Rule 4: 密码修改授权检测 (非交互式需 ask_user_question) │
+│    ├── Rule 5: 用户/组删除授权检测 (需 ask_user_question)     │
+│    └── Rule 6: 提权检测 (sudo+危险命令/su/chmod u+s)          │
 │                                                              │
 │  层3: LLM + Skill 深度分析 (2-5s)                            │
 │    ├── 脚本内容预扫描 (18 个可疑模式，4 组合风险)              │
-│    ├── Skill 规则匹配 (12 个 Skill，关键词加权评分)            │
+│    ├── Skill 规则匹配 (13 个 Skill，关键词加权评分)            │
 │    ├── LLM 结果缓存 (200 条 FIFO)                            │
 │    ├── Provider 自动识别 (15+ Provider)                       │
-│    └── LLM 语义安全判断 (fail-closed)                         │
+│    └── LLM 语义安全判断 (默认 fail_open，可配 fail_closed)    │
 ├─────────────────────────────────────────────────────────────┤
 │          AcTrail 事件上报 (fire-and-forget)                    │
 │  Allow/Deny 决策 → AcTrail SQLite Enforcement 事件            │
@@ -86,7 +83,7 @@ AgentMoss 是一个**可被任意 AI Agent 调用的独立通用安全分析服�
 
 - **适配在 OS 层，不在 Agent 层** — 不同 Agent 最终都会调用操作系统的 syscall，这是确定性的
 - **标准化 I/O 契约** — 任何 Agent 遵循 API 格式即可接入，无需关心内部实现
-- **fail-closed 安全原则** — LLM 调用失败时默认拒绝，不确定时拒绝
+- **失败策略分两层** — 消费方桥接（如 xiaoO 的 bridge.py）活性检查失败时 fail-closed Deny；服务端 L3 LLM 失败默认 fail_open（Allow + 警告），可用 `AGENT_MOSS_LLM_FAIL_MODE=fail_closed` 切换为安全优先
 - **两级快速放行** — 完全安全命令跳过 L2+L3，只读敏感命令跳过 L3，降低性能开销
 - **安全兜底** — 白名单放行前扫描完整命令管道尾部，防止 `echo ... | passwd` 等绕过
 - **内置 Skill 信任** — 系统安全 Skill（如 xiaoo-guardian）加载时直接放行，不走 LLM 审计
@@ -527,7 +524,7 @@ curl http://127.0.0.1:9090/api/v1/health
 # {"status":"healthy","version":"<当前版本，见 pyproject.toml / ts/package.json>","instance":"xiaoo"}
 #
 # instance 是归属标识，由 AGENT_MOSS_INSTANCE 注入（install.sh 设为 xiaoo）。
-# bridge.py 探测服务时会过滤 instance 不匹配的进程（bridge.py:171），
+# bridge.py 探测服务时会过滤 instance 不匹配的进程（bridge.py），
 # 避免同机上别的 agent（如 OpenDesk）起的 agentmoss 被误连。
 
 # Socket 模式验证
@@ -621,11 +618,10 @@ xiaoo-hookers-install --non-interactive agent_moss
 }
 ```
 
-> **`cwd` 是 AgentMoss 服务接口的字段，不是 xiaoO 传给 bridge.py 的 payload 字段。**
-> xiaoO 的 tool pre payload 里工作区字段名是 `workspace`（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`），
-> 而 `bridge.py` 读的是 `data.get("cwd", "")`（`bridge.py:358`），所以 xiaoO 转发过来的 `cwd` 恒为空串——
-> 依赖 `cwd` 的层2「间接文件访问检测」在 xiaoO 接入场景下不生效。其他直接调用 analyze 接口的调用方
-> （自带 `cwd`）不受影响。修复方向：bridge 改读 `data.get("workspace")`。
+> **`cwd` 是 AgentMoss 服务接口的字段；xiaoO 宿主 payload 的工作区字段是 `workspace`**
+> （`crates/hook/src/hookers/plugin/tool/adaptor.rs`）。bridge 以
+> `data.get("cwd") or data.get("workspace", "")` 取值（`bridge.py`），
+> xiaoO 场景下间接文件访问检测可正常拿到工作区。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -636,7 +632,7 @@ xiaoo-hookers-install --non-interactive agent_moss
 | `a_next.action_detail` | string | 是 | 命令/动作详情 |
 | `reason` | string | 否 | 执行理由 |
 | `os_type` | string | 否 | `"linux"` / `"windows"`，留空自动检测 |
-| `cwd` | string | 否 | 当前工作目录（AgentMoss 接口字段；xiaoO bridge 转发时为空串，见上文说明） |
+| `cwd` | string | 否 | 当前工作目录（AgentMoss 接口字段；xiaoO bridge 从 payload 的 `workspace` 字段取值转发，见上文说明） |
 | `agent_id` | string | 否 | 调用方 agent 标识（如 `xiaoo` / `opendesk`）。留空走通用模式。详见[三方 agent 定制规则](#三方-agent-定制规则) |
 | `metadata` | object | 否 | 扩展元数据（`llm_config`/`llm_log_path` per-request LLM 配置） |
 
@@ -660,7 +656,7 @@ xiaoo-hookers-install --non-interactive agent_moss
 
 ### 环境变量
 
-> 完整清单（含 audit_agent 迁移对照、bridge.py 端口变量、配置优先级）见 [`docs/ENV_VARS.md`](docs/ENV_VARS.md)。
+> 完整清单（bridge.py 端口变量、配置优先级等）见 [`docs/ENV_VARS.md`](docs/ENV_VARS.md)。
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
@@ -676,7 +672,7 @@ xiaoo-hookers-install --non-interactive agent_moss
 | `AGENT_MOSS_DISABLE_LLM` | 设为 `1` 禁用层3 LLM | 未设置 |
 | `AGENT_MOSS_DISABLE_HEURISTIC` | 设为 `1` 禁用层1 特征匹配 | 未设置 |
 | `AGENT_MOSS_DISABLE_LOGIC_RULES` | 设为 `1` 禁用层2 逻辑规则 | 未设置 |
-| `AGENT_MOSS_LOG_PATH` | 全量 hook 日志 + LLM prompt 日志（bridge 记 HOOK_INPUT/OUTPUT，L3 记 prompt，写同文件；对应 audit_agent `AUDIT_LOG_PATH`）| 未设置（不记录）|
+| `AGENT_MOSS_LOG_PATH` | 全量 hook 日志 + LLM prompt 日志（bridge 记 HOOK_INPUT/OUTPUT，L3 记 prompt，写同文件）| 未设置（不记录）|
 | `AGENT_MOSS_CUSTOM_RULES` | 自定义规则 JSON 数组 | `[]` |
 | `AGENT_MOSS_ENABLE_POLICY_GEN` | 设为 `1` 启用 Policy 生成 | 未设置 |
 | `AGENT_MOSS_CONFIG_PATH` | 主配置 YAML 路径 | `~/.config/agentmoss/agent_moss.yaml` |
@@ -717,93 +713,33 @@ server:
   socket_path: "/var/run/agent_moss/agent_moss.sock"
 ```
 
-## 项目结构
+## 本目录内容（xiaoO 桥接插件）
+
+上文描述的 AgentMoss 服务（Python/TS 源码、`config/`、上游 `tests/` 等）都在上游 AgentMoss 仓库，不在本目录。xiaoO 仓库内的 `plugins/hookers/agent_moss/` 只包含 xiaoO 桥接插件：
 
 ```
-AgentMoss/
-├── agent_moss/               # Python 实现 (PyPI: agent-moss)
-│   ├── __init__.py
-│   ├── cli.py                # 命令行工具 (init/analyze/server)
-│   ├── __version__.py
-│   ├── profiles/             # OS Profile 系统
-│   │   ├── base.py           # OSProfile 抽象基类
-│   │   ├── linux.py          # LinuxProfile
-│   │   └── windows.py        # WindowsProfile
-│   ├── engine/               # 安全分析引擎
-│   │   ├── analyzer.py       # 分析入口
-│   │   ├── coordinator.py    # 三层协调器 + L1.5/L2.5 递归脚本链 + fail-open
-│   │   ├── heuristic.py      # 层1: 特征匹配检测 (危险命令 + 注入关键词，热重载 runtime_config)
-│   │   ├── logic_rules.py    # 层2: 逻辑规则 (敏感路径/意图/密码/用户删除，credential 区分)
-│   │   ├── llm_analyzer.py   # 层3: LLM + Skill 深度分析 (skip_l3_hints + token 记录)
-│   │   ├── script_analyzer.py        # 脚本预扫描
-│   │   ├── script_content_analyzer.py # L1.5/L2.5 递归脚本链内容分析 (移植自 audit_agent)
-│   │   ├── inline_analyzer.py        # 内联脚本/文本区分
-│   │   ├── skill_engine.py   # Skill 匹配引擎 (热重载 runtime_config 禁用 skill)
-│   │   └── types.py
-│   ├── infra/                # 基础设施
-│   │   ├── config.py         # 配置管理 (YAML + 环境变量 + 继承 xiaoo config.toml)
-│   │   ├── runtime_config.py # runtime JSON：seed/merge/CRUD/层级开关持久化 (51 函数)
-│   │   ├── token_stats.py   # token 用量统计 (JSON 持久化)
-│   │   ├── llm_client.py     # LLM 客户端 (流式回退 + Provider header 适配)
-│   │   ├── actrail.py        # AcTrail 事件上报
-│   │   ├── logging.py / parsers.py / policy_cache.py / prompt_templates.py
-│   ├── server/               # HTTP API 服务层 (FastAPI)
-│   │   ├── app.py            # 应用 + run_server + _find_free_port (端口动态分配)
-│   │   ├── routes.py         # /api/v1/* 路由 (health/analyze/brain)
-│   │   ├── models.py / middleware.py / socket_server.py
-│   ├── console/              # Policy Console (FastAPI sub-router, 23 路由)
-│   │   ├── router.py         # /console/api/* (layers/rules/skills/config/env/reset/token-stats)
-│   │   └── static/index.html # 自包含 SPA (--ag- 风格 + 暗色模式)
-│   ├── adapters/  # 适配器层 (observable)
-│   ├── skills/    # 安全 Skill 规则 (Markdown)
-│   ├── templates/ # Prompt 模板 + policy_mapping
-│   ├── agents/    # 三方 agent 定制化扩展 (xiaoO / opendesk) — rules.json 单一事实源，py+ts 共享
-│   └── brain/     # 规则自学习/存储
-│
-├── ts/                       # TypeScript 实现 (npm: @kenhkl/agent-moss) — 功能与 Python 对等
-│   ├── src/
-│   │   ├── cli.ts            # CLI 入口 (init/analyze/server)
-│   │   ├── config.ts         # 配置 (环境变量 + fail-open)
-│   │   ├── models.ts         # Zod 数据模型
-│   │   ├── routes.ts         # Hono API 路由 (health/analyze)
-│   │   ├── server.ts         # Hono HTTP + findFreePort + 挂载 Console
-│   │   ├── actrail.ts / package-json.ts
-│   │   ├── engine/           # 三层防御引擎 (与 py 对等)
-│   │   │   ├── coordinator.ts / heuristic.ts / logic-rules.ts
-│   │   │   ├── llm-analyzer.ts / script-analyzer.ts / script-content-analyzer.ts
-│   │   │   ├── inline-analyzer.ts / skill-loader.ts / template-loader.ts
-│   │   │   ├── token-stats.ts / types.ts
-│   │   ├── infra/runtime-config.ts  # runtime JSON 全功能 (seed/merge/CRUD/query，对齐 py)
-│   │   └── console/          # Policy Console (Hono sub-app, 23 路由 1:1 对齐 py)
-│   │       ├── router.ts / index.ts
-│   │       └── static/index.html  # 复用 py 的同一份 SPA
-│   └── package.json
-│
-├── hooks/xiaoO/             # xiaoO hook 桥接 (bridge.py + plugin.json)
-│   └── bridge.py             # stdin JSON → POST /api/v1/analyze → stdout {result,reason}；探测兜底
-├── config/agent_moss.yaml   # YAML 配置模板
-├── docs/
-│   ├── design.md             # 架构需求设计
-│   ├── ENV_VARS.md           # 环境变量参考 + audit_agent 迁移对照
-│   └── ...
-└── tests/
-    ├── conftest.py / test_all_cases.py / test_agents_xiaoo.py / test_brain.py
-    ├── test_find_free_port.py  # 端口动态分配单测
-    └── cases/                  # 测试用例 JSON
+plugins/hookers/agent_moss/
+├── bridge.py           # 桥接脚本：stdin JSON → 活性检查/探测 9090-9095 →
+│                       # POST /api/v1/analyze → stdout {result,reason}；仅依赖 stdlib
+├── install.sh          # AgentMoss 服务安装（venv + PyPI agent-moss + systemd）
+├── plugin.json         # xiaoO 插件注册（*.Tool.*.pre → python3 bridge.py）
+├── rules/              # 用户敏感规则参考副本（user_rules.json）
+├── skills/             # 13 个安全 Skill 参考副本（*_guard.md）
+├── templates/          # Prompt 模板参考副本（含 policy_mapping.md）
+├── docs/               # ENV_VARS.md（环境变量参考）、agent-moss-integration-design.md（集成设计）
+├── SECURITY_RULES.md   # 安全拦截规则说明书（xiaoO 客户参考）
+├── TECH_WIKI.md        # 技术 Wiki（服务架构 + 桥接原理）
+└── README.md           # 本文件（上游项目 README 的参考副本）
 ```
 
-## 测试
+权威规则与源码以 AgentMoss 仓库为准；本目录的 `rules/`、`skills/`、`templates/` 是随插件发布的参考副本。
 
-双栈（Python + TypeScript）行为一致性测试，每个功能单测 py/ts 各一份：
+在 xiaoO 侧注册本插件（安装 AgentMoss 服务用 `bash plugins/hookers/agent_moss/install.sh`）：
 
 ```bash
-# Python 版
-python3 -m pytest tests/ -v                # 全量（含 find_free_port、all_cases、agents_xiaoo 等）
-
-# 包含 LLM 层（需 API Key，会触发 L3 真调用）
-AGENT_MOSS_LLM_API_KEY="sk-xxx" python3 -m pytest tests/ -v
-
-# TypeScript 版
-cd ts && npx vitest run                     # 全量（含 find-free-port、runtime-config-seed、console-routes 等）
-cd ts && npx tsc --noEmit                   # 类型检查
+bash plugins/hookers/install.sh --non-interactive agent_moss
 ```
+
+（交互模式下传插件名无效，`--non-interactive` 才接受插件名参数。）
+
+xiaoO 侧的插件测试见 `plugins/tests/hookers/agent_moss/TEST_GUIDE.md`。

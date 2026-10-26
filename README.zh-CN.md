@@ -10,7 +10,6 @@ AgentOS 的开源智能中枢。
 
 [![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-v0.1.0-red.svg)](https://atomgit.com/openeuler/xiaoO)
 
 ## 社区交流
 
@@ -97,27 +96,24 @@ sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
 
 ### Docker
 
-> **⚠️ 当前 Docker 镜像构建不可用。** 在本版本上 `docker build` 会失败，下面的命令**并未**修复该问题。三个已知缺陷：
->
-> - `Dockerfile:56` 拷贝了已被 `a507b74` 删除的 crate `crates/llm-client-cli/Cargo.toml`；
-> - 分层 `COPY`（`Dockerfile:45-66`）遗漏了 workspace 成员 `crates/protocol` 和 `crates/xiaoo-api`（`Cargo.toml:25`、`Cargo.toml:24`），导致元数据获取失败；
-> - `Dockerfile:118-126` 指向已不存在的目录 `plugins/hookers/audit_agent`。
->
-> 请改用源码构建（见上文）。下面的命令仅说明该镜像的**预期形态**，待 Dockerfile 修复后才可用，**目前不是可用的快速开始**。完整记录见 [docs/docker_deploy.md](./docs/docker_deploy.md)。
-
-构建完成的镜像计划同时包含 `xiaoo` 和 `xiaoo-daemon`。镜像**不内置**
-`config.toml`，运行时通过 `XIAOO_CONFIG` 指向你挂载的配置文件：
+构建完成的镜像包含 `xiaoo`、`xiaoo-daemon` 和 `moirai`。镜像**不内置**
+`config.toml`，运行时挂载你自己的配置文件：
 
 ```bash
-docker build -t xiaoo:latest .   # 当前会失败，见上方警告
-docker run --rm -d -p 18080:18080 -p 28081:28081 \
-  -v $PWD/my.toml:/cfg.toml:ro \
-  -e XIAOO_CONFIG=/cfg.toml \
+docker build -t xiaoo:latest .
+docker run --rm -d -p 18080:18080 \
+  -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
   -e OPENROUTER_API_KEY=sk-or-... \
+  -e XIAOO_HTTP_BEARER_TOKEN=change-me \
   xiaoo:latest
 ```
 
-容器默认启动 `xiaoo-daemon`。传入 `xiaoo` 进入 TUI（`docker run -it xiaoo:latest xiaoo`），或 `xiaoo --cli run -p "..."` 进行一次性 CLI 调用。完整说明见 [docs/docker_deploy.md](./docs/docker_deploy.md)。
+容器默认以 `--host 0.0.0.0` 启动 `xiaoo-daemon`，因此挂载的配置**必须**设置
+bearer token（`[http].bearer_token` 或 `bearer_token_env`），且需提供配置引用的
+API key 环境变量，否则 daemon 拒绝启动。传入 `xiaoo` 进入 TUI
+（`docker run -it xiaoo:latest xiaoo`），或 `xiaoo --cli run -p "..."` 进行一次性
+CLI 调用；只读 dashboard 需 `--dashboard-host 0.0.0.0 -p 28081:28081` 暴露。
+完整说明见 [docs/docker_deploy.md](./docs/docker_deploy.md)。
 
 ## 快速开始
 
@@ -146,8 +142,8 @@ grep = true
 ```
 
 > **已知缺口：** `[subagent.<role>.tools]` 目前会被解析并接受，但对 subagent 角色**不生效**——
-> 角色级工具允许清单在 spawn 时被忽略（`crates/tool/src/impl/builtin/spawn_subagent/executor.rs:76-91`
-> 只读取 `prompt` 和 `description`；`apps/shared/src/gateway/session_supervisor.rs:345-356` 只应用
+> 角色级工具允许清单在 spawn 时被忽略（`crates/tool/src/impl/builtin/spawn_subagent/executor.rs`
+> 只读取 `prompt` 和 `description`；`apps/shared/src/gateway/session_supervisor.rs` 只应用
 > `prompt`、`max_turns` 和 `description`）。请使用真实的内置工具名，例如 `file_read`、
 > `file_write`、`bash`、`glob`、`grep`；未知名称会被静默丢弃，且不会给出校验警告。
 
@@ -288,7 +284,7 @@ bash tests/run.sh                 # 全量测试（cargo test --workspace）
 bash tests/run.sh -p xiaoo-core   # 额外参数原样透传给 cargo test
 ```
 
-`scripts/ci.sh` 为统一 CI 入口（仅静态门禁、不编译）：门面纪律门禁、测试卫生门禁（防止测试代码回流 `src/`）、文档链接门禁与代码格式门禁（`cargo fmt --check`）。目录约定与命名规则见 [tests/README.md](./tests/README.md)。
+`scripts/ci.sh` 为统一 CI 入口（仅静态门禁、不编译）：门面纪律门禁、测试卫生门禁（防止测试代码回流 `src/`）、文档链接门禁、代码格式门禁（`cargo fmt --check`）与 Dockerfile COPY 覆盖门禁。目录约定与命名规则见 [tests/README.md](./tests/README.md)。
 
 ## 更多文档
 

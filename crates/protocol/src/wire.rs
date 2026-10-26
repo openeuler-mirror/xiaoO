@@ -181,7 +181,10 @@ pub struct AppTurnRequest {
     /// Runtime-scoped LLM config override.
     #[serde(default)]
     pub llm: Option<LlmRuntimeConfig>,
-    /// Absolute path on the daemon host to snapshot into a newly-created E2B runtime.
+    /// Workspace override honored when this turn implicitly creates the
+    /// runtime (new session): same semantics as `SessionOpenRequest.workspace`.
+    /// For existing sessions the binding established at open is reused —
+    /// the supervisor clears the field before re-resolving.
     #[serde(default)]
     pub workspace: Option<PathBuf>,
     /// Ordered daemon-host skill search roots. Each root contains skill directories.
@@ -236,8 +239,12 @@ pub struct SessionOpenRequest {
     /// Runtime-scoped LLM config override.
     #[serde(default)]
     pub llm: Option<LlmRuntimeConfig>,
-    /// Absolute path on the daemon host to snapshot into an E2B runtime.
-    /// Other backends ignore this field and retain their configured workspace.
+    /// Absolute workspace path on the daemon host. For the local operation
+    /// backend this is the highest-priority workspace override: the path must
+    /// exist on the daemon host, and once a session is bound, requests naming
+    /// a different workspace are rejected as `BootstrapConflict`. For the E2B
+    /// backend it is the bootstrap snapshot source packed into the newly
+    /// created sandbox. Other backends ignore it.
     #[serde(default)]
     pub workspace: Option<PathBuf>,
     /// Ordered daemon-host search roots whose immediate child directories are skills.

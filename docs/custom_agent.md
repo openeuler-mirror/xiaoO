@@ -50,7 +50,7 @@ file_write = false
 file_edit = false
 ```
 
-`[tui].agent_order` is optional. It controls the full Agent tab order. Include `Core` to place the default agent anywhere in the tab bar; if `Core` is omitted, it stays first for backward compatibility. Roles omitted from the list are appended in the default alphabetical order. The builtin `plan` role is always appended last if not explicitly ordered (`apps/endside/src/state/app_state.rs:1325-1375`; role names in the list are matched case-insensitively).
+`[tui].agent_order` is optional. It controls the full Agent tab order. Include `Core` to place the default agent anywhere in the tab bar; if `Core` is omitted, it stays first for backward compatibility. Roles omitted from the list are appended in the default alphabetical order. The builtin `plan` role is always appended last if not explicitly ordered (`apps/endside/src/state/app_state.rs`; role names in the list are matched case-insensitively).
 
 Applying the example above with the mask rules from §2.3 means `code-reviewer` sees every tool except
 `file_write` and `file_edit`; `bash` stays visible because it is not listed at all.
@@ -66,20 +66,20 @@ Applying the example above with the mask rules from §2.3 means `code-reviewer` 
 | `max_turns` | No | Optional cap on agent loop turns for this role |
 
 Both `description` and `prompt` are optional: `description` is `String` with `#[serde(default)]` and
-`prompt` is an `Option<String>` (`apps/serverside/src/daemon_config.rs:292-301`,
-`apps/endside/src/support/config.rs:158-167`). Omitting `prompt` is not the same as setting it to
+`prompt` is an `Option<String>` (`apps/serverside/src/daemon_config.rs`,
+`apps/endside/src/support/config.rs`). Omitting `prompt` is not the same as setting it to
 the empty string — an empty or whitespace-only prompt is filtered out and the role falls back to the
-global `agent.system_prompt` (`apps/serverside/src/daemon_runtime.rs:766-770`; the TUI path uses
+global `agent.system_prompt` (`apps/serverside/src/daemon_runtime.rs`; the TUI path uses
 `state.active_agent_role_config()` and falls back to the default system prompt at
-`apps/endside/src/gateway_api/runtime_request.rs:227-233`). Note also that the daemon-side
-`description` field is currently marked `#[allow(dead_code)]`, so it is accepted but not consumed by
-the daemon runtime (`apps/serverside/src/daemon_config.rs:293-295`).
+`apps/endside/src/gateway_api/runtime_request.rs`). Note also that the daemon-side
+`description` field is marked `#[allow(dead_code)]`, so it is accepted but not consumed by
+the daemon runtime (`apps/serverside/src/daemon_config.rs`).
 
 > The `plan` role is builtin (see `apps/shared/src/builtin_agent_roles.rs`).
 > Declaring `[agent.plan]` in config is rejected at startup
-> (`apps/serverside/src/daemon_config.rs:1041-1043`).
+> (`apps/serverside/src/daemon_config.rs`).
 > Its own tool mask is defined in code and hides `bash`, `file_edit`, `file_write`, `send_file` and
-> `spawn_subagent` (`apps/serverside/src/daemon_config.rs:1046-1062`) — it is a read-only planning
+> `spawn_subagent` (`apps/serverside/src/daemon_config.rs`) — it is a read-only planning
 > role, and the same visibility-mask rules apply to it.
 
 #### Tool Visibility (`[agent.<name>.tools]`)
@@ -96,20 +96,20 @@ any global permission policy.
 | No `[agent.<name>.tools]` table, or an empty table | **All** tools are visible |
 
 Resolution is a mask over the discovered tool set
-(`apps/serverside/src/daemon_runtime.rs:969-999`;
-`apps/endside/src/gateway_api/runtime_request.rs:429-458`):
+(`apps/serverside/src/daemon_runtime.rs`;
+`apps/endside/src/gateway_api/runtime_request.rs`):
 
 1. Start from all discovered tool names.
 2. If there is no agent role, or its `tools` map is empty, return every tool unchanged
-   (`daemon_runtime.rs:973-978`; `runtime_request.rs:430-433`).
+   (`daemon_runtime.rs`; `runtime_request.rs`).
 3. Otherwise start from the full set and apply each entry: `true` inserts the name, `false` removes
-   it (`daemon_runtime.rs:980-992`; `runtime_request.rs:435-456`).
+   it (`daemon_runtime.rs`; `runtime_request.rs`).
 4. Only the *visible* tools are registered for the agent; filtering happens at registry build time
-   (`crates/tool/src/framework/registry/registry_impl.rs:42-63`).
+   (`crates/tool/src/framework/registry/registry_impl.rs`).
 
 **Name mismatches are silently skipped.** If a configured key is not in the discovered set, that
-entry is ignored with no warning and no error (`daemon_runtime.rs:984-986`;
-`runtime_request.rs:447-449`). A typo such as `read = false` therefore disables nothing at all,
+entry is ignored with no warning and no error (`daemon_runtime.rs`;
+`runtime_request.rs`). A typo such as `read = false` therefore disables nothing at all,
 because no tool is named `read` — the real name is `file_read`. Use the real tool names listed
 below, and verify with `xiaoo-daemon config tools`.
 
@@ -123,13 +123,13 @@ Real built-in tool names (from `crates/tool/src/impl/builtin/*/spec.rs`):
 `todo_write`, `webfetch`, `web_search`.
 
 > **Known gap**: `[subagent.<role>.tools]` is parsed and carried into the session as a
-> `SubagentRoleRecord` (`apps/serverside/src/daemon_runtime.rs:771-790`;
-> `apps/endside/src/gateway_api/runtime_request.rs:265-281`), but the delegation path only reads the
+> `SubagentRoleRecord` (`apps/serverside/src/daemon_runtime.rs`;
+> `apps/endside/src/gateway_api/runtime_request.rs`), but the delegation path only reads the
 > role's `prompt`, `max_turns` and `description` — the role's `tools` map is never applied to the
-> child's tool list (`apps/shared/src/gateway/session_supervisor.rs:345-356`). A custom-role
-> subagent therefore currently receives the full toolset, unlike the *default* exploration subagent,
+> child's tool list (`apps/shared/src/gateway/session_supervisor.rs`). A custom-role
+> subagent therefore receives the full toolset, unlike the *default* exploration subagent,
 > which is narrowed by a separate hardcoded allowlist to `file_read`, `glob` and `grep`
-> (`apps/shared/src/gateway/hosted_runtime_resolver.rs:40-47,141-150,170-175`). Do not rely on
+> (`apps/shared/src/gateway/hosted_runtime_resolver.rs`). Do not rely on
 > `[subagent.<role>.tools]` to restrict a subagent.
 >
 > The `[subagent]` section is otherwise out of scope for this document; see the `[subagent]` section
@@ -186,7 +186,7 @@ Invoke the bugfix-automation skill with the provided natural language arguments,
 | `description` | No | Short summary shown in slash autocompletion; empty string if omitted |
 
 > The command loader only parses `description` from the frontmatter — it reads that one key and
-> ignores the rest (`apps/endside/src/services/command_loader.rs:56-63`).
+> ignores the rest (`apps/endside/src/services/command_loader.rs`).
 > `disable-model-invocation` is a **skill** frontmatter field (see
 > [skill_usage.md](./skill_usage.md)), not a command-file field — setting it in
 > a command file has no effect on agent behavior.

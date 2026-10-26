@@ -6,7 +6,6 @@
 | 作者 | kenhkl |
 | 创建日期 | 2026-08-08 |
 | 最后更新 | 2026-08-08 |
-| 评审状态 | 待评审 |
 | 关联需求 | AgentMoss 服务仓库（`~/gitcode/AgentMoss`）三层安全分析能力下沉至 xiaoO 插件层 |
 
 > 本文档参考 `trusted-contract-unified-design.md` 的表述方式，从整体上描述 xiaoO 通过 `plugins/hookers/agent_moss` 插件接入 AgentMoss 安全服务的定位、需求、总体设计与实现方式。不详细体现 AgentMoss 服务内部实现细节，也不替代其在 `~/gitcode/AgentMoss` 仓库中的专项设计文档。
@@ -22,7 +21,7 @@ xiaoO 作为权限最高的系统管家 Agent（Agent Manager），在真实执�
 - **LLM 生成的危险动作**：LLM 可能基于用户意图或自身漂移，生成破坏性命令（如 `rm -rf /`、`chmod 777`）、敏感信息访问（如 `cat /etc/shadow`）、数据外传（如 `curl -X POST ... -d @.env`）等危险动作。
 - **Prompt 注入 / 意图偏离**：外部数据（网页、文档、工具返回）中嵌入恶意指令，诱导 LLM 偏离用户原始意图，执行攻击者指定的操作（如 Base64 编码绕过、crontab 持久化后门、横向移动）。
 
-**AgentMoss** 是一个**可被任意 AI Agent 调用的独立通用安全分析服务**，基于 OS Profile 机制（Linux/Windows 自适应）提供三层防御安全分析：**特征匹配（L1）→ 逻辑规则（L2）→ LLM 语义分析（L3）**。其前身是 xiaoO 的 `plugins/hookers/audit_agent` 插件，现已迁出为独立常驻 HTTP 服务，并通过 `plugins/hookers/agent_moss` 插件重新接入。
+**AgentMoss** 是一个**可被任意 AI Agent 调用的独立通用安全分析服务**，基于 OS Profile 机制（Linux/Windows 自适应）提供三层防御安全分析：**特征匹配（L1）→ 逻辑规则（L2）→ LLM 语义分析（L3）**。xiaoO 通过 `plugins/hookers/agent_moss` 插件接入该服务。
 
 > **一句话总结：OS Profile = 把「针对不同操作系统的安全检测规则」按 OS 封装成独立配置类**，检测引擎只认接口、不关心具体是哪个 OS，按请求中 `os_type` 字段自动加载 Linux 或 Windows 对应的一份规则，从而达到 Linux/Windows 自适应。这比把所有规则堆在一个文件里干净得多，也是这里「OS Profile 机制，自动适配 Linux/Windows」的来源。<br/>之所以要区分，是因为两套系统的命令、路径、shell 语法完全不同（Linux 是 `rm -rf`、`/etc/shadow`，Windows 是 `del /f /s /q`、`C:\Windows\...\SAM`），不区分会互相误报。实现上即 `agent_moss/profiles/` 下的 `base.py`（抽象基类，定义规则接口）+ `linux.py` / `windows.py`（各自实现一份）。
 
@@ -88,7 +87,7 @@ Agent 平台需要为其托管的所有 Agent 提供统一、可信、可审计�
 
 | 编号 | 需求类型 | 描述 | 指标/阈值 |
 |------|----------|------|-----------|
-| NF-01 | 性能 | L1/L2 静态规则检测时延；L3 为同步阻塞调 LLM（耗时由远端模型决定，AgentMoss 只能设上限） | <10ms（L1）/ <50ms（L2）；L3 单次调用超时上限 `AGENT_MOSS_LLM_TIMEOUT` 默认 300s、重试 2 次（共 3 次），源码实测 1~137s；bridge 侧 `AGENT_MOSS_HOOK_TIMEOUT` 默认 60s 限制 bridge 等服务端响应；xiaoO hook 机制 `PLUGIN_HOOKER_TIMEOUT` 默认 600s（10 分钟）兜底整个 hook 调用 |
+| NF-01 | 性能 | L1/L2 静态规则检测时延；L3 为同步阻塞调 LLM（耗时由远端模型决定，AgentMoss 只能设上限） | <10ms（L1）/ <50ms（L2）；L3 单次调用超时上限 `AGENT_MOSS_LLM_TIMEOUT` 默认 300s、重试 2 次（共 3 次），源码实测 1~137s；bridge 侧 `AGENT_MOSS_HOOK_TIMEOUT` 默认 60s 限制 bridge 等服务端响应；xiaoO hook 机制 `PLUGIN_HOOKER_TIMEOUT_MS` 默认 600s（10 分钟）兜底整个 hook 调用 |
 | NF-02 | 可用性 | AgentMoss 常驻服务，systemd 管理，随系统启动自动拉起 | 服务异常退出后自动恢复，插件侧自动重连 |
 | NF-03 | 安全性 | fail-closed：服务不可达时拒绝；LLM 调用失败按 `fail_mode` 决策 | 默认 fail_open（Allow+warn），可配 fail_closed |
 | NF-04 | 可扩展性 | 规则集基于 runtime_config 持久化，Policy Console 热改；OS Profile 支持 Linux/Windows | 无需改代码即可增删规则 |
@@ -340,11 +339,13 @@ agent_moss 插件通过 xiaoO 的 Hook 机制注册，在工具执行前触发�
   {
     "id": "plugin_agent_moss_tool_input",
     "hook_point": "*.Tool.*.pre",
-    "command": "python3 /home/hkl/gitcode/xiaoO/plugins/hookers/agent_moss/bridge.py",
+    "command": "python3 bridge.py",
     "raw_command": "python3 bridge.py"
   }
 ]
 ```
+
+（`plugins/hookers/install.sh` 安装时会将相对路径的 `command` 解析为绝对路径。）
 
 bridge.py 从 stdin 接收的 payload 结构（字段名以宿主实际 payload 为准）：
 ```json
@@ -358,7 +359,7 @@ bridge.py 从 stdin 接收的 payload 结构（字段名以宿主实际 payload 
 }
 ```
 
-> **注意**：这里**没有 `cwd` 字段**。xiaoO 的 tool pre payload 里工作区字段名是 **`workspace`**（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`）。也因此 `bridge.py` 读 `data.get("cwd", "")` 恒为空串（`plugins/hookers/agent_moss/bridge.py:358`），层2 的「间接文件访问检测」在 xiaoO 接入场景下不生效——详见本节后面的规则覆盖表（第 12 条）下的已知缺口说明。
+> **字段说明**：xiaoO 的 tool pre payload 工作区字段名是 **`workspace`**（`crates/hook/src/hookers/plugin/tool/adaptor.rs`），AgentMoss 接口字段是 `cwd`。bridge 以 `data.get("cwd") or data.get("workspace", "")` 取值（`plugins/hookers/agent_moss/bridge.py`），xiaoO 场景下 analyze 请求可正常携带工作区，层2「间接文件访问检测」正常生效。
 
 #### 4.1.2 AgentMoss 服务接口（HTTP）
 
@@ -496,11 +497,11 @@ AgentMoss 覆盖的 10 大安全风险类别与三大行业标准对齐（OWASP 
 
 > **重要口径说明：只有 L1 特征匹配分 OS**。L2 逻辑规则（`LogicRulesChecker` 单类）与 L3 Skill（13 个 `.md` 文件）是**跨 Linux/Windows 共享的一套实现**，不随 OS 变化。因此 L1 有 Linux/Windows 两份规则，L2/L3 各只有一份。
 
-| 层 | 模块 | Linux 数量 | Windows 数量 | 是否分 OS |
+| 层 | 模块 | Linux | Windows | 是否分 OS |
 |----|------|-----------|-------------|-----------|
-| L1 危险命令 | `profiles/{linux,windows}.py` | 41 | 16 | ✅ Linux/Windows 各自一份 |
-| L1 敏感路径 | 同上 | 34 | 14 | ✅ |
-| L1 注入关键词 | 同上 | 46 | 14 | ✅ |
+| L1 危险命令 | `profiles/{linux,windows}.py` | 以 AgentMoss 仓库 `profiles/linux.py` 为准 | 以 `profiles/windows.py` 为准 | ✅ Linux/Windows 各自一份 |
+| L1 敏感路径 | 同上 | 以 AgentMoss 仓库 `profiles/linux.py` 为准 | 以 `profiles/windows.py` 为准 | ✅ |
+| L1 注入关键词 | 同上 | 以 AgentMoss 仓库 `profiles/linux.py` 为准 | 以 `profiles/windows.py` 为准 | ✅ |
 | L2 逻辑规则 | `engine/logic_rules.py` | 9 个检测器 | 同左（共享） | ❌ 跨 OS 共享 |
 | L3 Skill | `skills/` | 13 个安全 Skill | 同左（共享） | ❌ 跨 OS 共享 |
 | 辅助-脚本内容分析 | `engine/script_content_analyzer.py` | 18 个可疑模式（SUSPICIOUS_PATTERNS） | 同左（共享） | ❌ 跨 OS 共享 |
@@ -509,9 +510,8 @@ AgentMoss 覆盖的 10 大安全风险类别与三大行业标准对齐（OWASP 
 > **辅助分析口径**：脚本内容分析按最小的 `SUSPICIOUS_PATTERNS = 18` 计数（另含 13 个脚本执行模式、10 个子脚本模式、4 组组合风险、18 个单关键词风险，不重复计入）；内联脚本判定计 8 个函数/类。
 
 **汇总口径**：
-- **Linux 口径**：`41(L1命令) + 34(L1路径) + 46(L1关键词) + 9(L2) + 13(L3) + 18(脚本) + 8(inline) = 169` 个检测要素
-- **Windows 口径**：`16 + 14 + 14 = 44` 个检测要素（仅 L1 不同，L2/L3/辅助与 Linux 共享）
-- **双 OS 合计**：`169 + 44 = 约 213` 个检测要素（L1 双份 + L2/L3/辅助单份）
+- L1 规则数量以 AgentMoss 仓库 `profiles/linux.py` / `profiles/windows.py` 为准（规则随版本演进，不在本文档固定数字）
+- L2/L3/辅助分析与 OS 无关，Linux/Windows 共享同一套实现
 
 **覆盖情况（内置测试集实测，tests/cases/ 共 206 个 JSON 用例，覆盖 18 个攻击场景）**：
 
@@ -536,7 +536,7 @@ AgentMoss 覆盖的 10 大安全风险类别与三大行业标准对齐（OWASP 
 | 9 | 系统配置篡改 | 7 | 改 iptables、/proc/sys、/boot、/etc/hosts、nginx |
 | 10 | 文件写入/重定向 | 7 | echo>、引号路径、wget -O、rsync 等边界写检测 |
 | 11 | 意图偏离 | 5 | prompt 要求查看却 rm、要求优化却 DROP、prompt 注入 |
-| 12 | 间接文件访问 | 2 | os.listdir/os.walk 遍历 cwd 间接读 .env 凭据 ⚠️ xiaoO 接入场景下不生效（见下） |
+| 12 | 间接文件访问 | 2 | os.listdir/os.walk 遍历 cwd 间接读 .env 凭据 |
 | 13 | 读后写违反 | 3 | 未读先写、先读后写同文件对照 |
 | 14 | 正常操作/白名单 | 5 | echo/grep/read/ls/pwd 等只读与高频运维放行 |
 | 15 | 供应链攻击 | 4 | pip/npm typosquatting、不可信 skill 安装 |
@@ -544,7 +544,7 @@ AgentMoss 覆盖的 10 大安全风险类别与三大行业标准对齐（OWASP 
 | 17 | 邮件操作 | 2 | 批量删邮箱 vs 发正常通知 |
 | 18 | 反弹 Shell/工具注入 | 3 | bash -i 反弹 shell、通用工具参数注入 payload |
 
-> **⚠️ 已知缺口：第 12 条「间接文件访问」在 xiaoO 接入场景下不生效。** 该规则需要 analyze 请求携带 `cwd`。xiaoO 的 tool pre payload 没有 `cwd` 字段，工作区字段名是 **`workspace`**（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`；由 `crates/hook/src/hookers/plugin/core.rs:250-255` 生成），而 `bridge.py` 读的是 `data.get("cwd", "")`（`plugins/hookers/agent_moss/bridge.py:358`），因此转发给 AgentMoss 的 `cwd` **恒为空串**，层2 的间接文件访问检测在 xiaoO 下拿不到工作区、实际不触发。这是 bridge 侧字段名与宿主 payload 契约不一致导致的（代码看起来是 bug；本文档只记录实际行为，未改代码）。AgentMoss 作为独立服务被其他调用方（如自带 `cwd` 的 OpenDesk）接入时该规则仍正常。修复方向是把 bridge 改为读 `workspace`。
+> **第 12 条「间接文件访问」**：该规则依赖 analyze 请求的 `cwd`。bridge 以 `data.get("cwd") or data.get("workspace", "")` 取值（`plugins/hookers/agent_moss/bridge.py`；xiaoO 宿主 payload 的工作区字段为 `workspace`，`crates/hook/src/hookers/plugin/tool/adaptor.rs`），xiaoO 场景下可正常拿到工作区。
 
 **各配置通过率（实测，`tests/cases/README.md` 口径，分母 203）**：
 
@@ -589,15 +589,23 @@ AgentMoss 覆盖的 10 大安全风险类别与三大行业标准对齐（OWASP 
    - 创建 venv、从 PyPI 安装 `agent-moss==AM_VERSION`
    - 注册 systemd service（`agent-moss`），注入 `AGENT_MOSS_INSTANCE=xiaoo`
    - 启动服务并验证 `instance==xiaoo` 的健康检查
-2. 安装 xiaoO 插件：`bash plugins/hookers/install.sh agent_moss`
+2. 安装 xiaoO 插件：`bash plugins/hookers/install.sh --non-interactive agent_moss`
    - 将 `agent_moss/plugin.json` 写入 `~/.config/xiaoo/config.toml` 的 `[hooker]` 段
+   - 交互模式下传插件名无效，插件名参数只在 `--non-interactive` 模式生效
 3. （可选）配置 LLM：`AGENT_MOSS_LLM_API_KEY` 或 `~/.config/agentmoss/config.json`
 4. （可选）记录审计日志：设 `AGENT_MOSS_LOG_PATH`
 5. 重启 xiaoO 使插件生效
 
 #### 4.3.3 卸载流程
 
-`bash plugins/hookers/uninstall.sh` → 选择移除 agent_moss → 从 config.toml 移除插件条目 → 执行 agent_moss/uninstall.sh 停止并移除服务。
+`bash plugins/hookers/uninstall.sh` → 选择移除 agent_moss → 从 config.toml 移除插件条目。本插件目录没有子级 `uninstall.sh`，该脚本只清理配置条目；AgentMoss 常驻服务需按 install.sh 的卸载提示手动移除：
+
+```bash
+sudo systemctl disable --now agent-moss
+sudo rm -rf /opt/agent_moss
+sudo rm /etc/systemd/system/agent-moss.service
+sudo systemctl daemon-reload
+```
 
 #### 4.3.4 配置项（bridge.py 侧）
 
@@ -612,7 +620,7 @@ AgentMoss 覆盖的 10 大安全风险类别与三大行业标准对齐（OWASP 
 | `AGENT_MOSS_HEALTH_TIMEOUT` | 活性检查超时（秒） | `2` |
 | `AGENT_MOSS_CHECK_SOURCE` | =1 时额外检查源码可 import | 空 |
 
-> **超时层级说明**：`AGENT_MOSS_HOOK_TIMEOUT`（60s）限制 bridge 发 HTTP 请求等 AgentMoss 服务端响应；`AGENT_MOSS_LLM_TIMEOUT`（300s）限制 AgentMoss 等远端 LLM 返回；xiaoO hook 机制 `PLUGIN_HOOKER_TIMEOUT`（600s/10 分钟）是最后兜底，超时强制 kill bridge 子进程，避免卡死主循环。
+> **超时层级说明**：`AGENT_MOSS_HOOK_TIMEOUT`（60s）限制 bridge 发 HTTP 请求等 AgentMoss 服务端响应；`AGENT_MOSS_LLM_TIMEOUT`（300s）限制 AgentMoss 等远端 LLM 返回；xiaoO hook 机制 `PLUGIN_HOOKER_TIMEOUT_MS`（600s/10 分钟）是最后兜底，超时强制 kill bridge 子进程，避免卡死主循环。
 
 ---
 
@@ -627,14 +635,14 @@ AgentMoss 覆盖的 10 大安全风险类别与三大行业标准对齐（OWASP 
 | **归属隔离** | `AGENT_MOSS_INSTANCE` + health instance 字段过滤 | 多实例并存不漂移，不用错 agent 规则 |
 | **agent 规则** | 调用带 `agent_id="xiaoo"` 加载专属规则 | xiaoO 配置/安全 Skill 目录专项保护 |
 | **LLM 配置** | per-request 注入 xiaoO 的 LLM 配置 | xiaoO 调用时用 xiaoO 的 key，服务端不依赖全局 |
-| **审计日志** | `AGENT_MOSS_LOG_PATH` 一设即记 HOOK_INPUT/OUTPUT | 对应 audit_agent 的 `AUDIT_LOG_PATH`，无感迁移 |
+| **审计日志** | `AGENT_MOSS_LOG_PATH` 一设即记 HOOK_INPUT/OUTPUT | 每次判定可追溯 |
 | **降级策略** | fail_open（默认 Allow+warn）可配 fail_closed | 前两层未命中时可用性优先，可切换安全优先 |
 
 ### 5.1 可拓展功能
 
-#### 5.1.1 从 audit_agent 的平滑迁移
+#### 5.1.1 与 audit_agent 的关系
 
-AgentMoss 是 audit_agent 的继任者，bridge.py 契约与 audit.py 完全对齐，实现无感替换。`AGENT_MOSS_LOG_PATH` 对应 `AUDIT_LOG_PATH`；`agent_moss.engine.analyzer.judge_security` 对应原审计引擎 API。已迁移的核心能力包括：三层防御、OS Profile、两级快速放行、rm 分级检测、shell 重定向检测、prompt 注入检测等。审计记录当前走 xiaoO 自身 trace（`traces.db`）+ hook 日志；AgentMoss 服务端的 AcTrail 上报为可选能力，默认关闭（`ACTRAIL_ENABLED`），按需启用后可对接统一审计存储。
+AgentMoss 的判定逻辑源自 xiaoO 早期的 audit_agent 插件，现已独立为常驻 HTTP 服务。audit_agent 已下线，`AUDIT_*` 变量不再有效。审计记录当前走 xiaoO 自身 trace（`traces.db`）+ hook 日志；AgentMoss 服务端的 AcTrail 上报为可选能力，默认关闭（`ACTRAIL_ENABLED`），按需启用后可对接统一审计存储。
 
 #### 5.1.2 多 Agent 平台接入
 

@@ -20,16 +20,12 @@ server = "ram-a"
 recall_top_k = 5
 recall_token_budget = 512
 context_messages = 4
-queue_path = "memory-queue.jsonl"
+queue_path = "memory-automation-queue.jsonl"
 queue_capacity = 256
 max_retries = 5
 retry_backoff_ms = 250
 allowed_agent_roles = ["main"]
 ```
-
-`Mem OK` in the TUI reports RAM-A connection and recent-operation health; it
-does not override `allowed_agent_roles`. A turn whose active role is not
-allowlisted deliberately skips both recall and ingest.
 
 ## Configuration
 
@@ -97,21 +93,8 @@ token from the environment:
 }
 ```
 
-Then enable automatic memory explicitly in `config.toml`:
-
-```toml
-[memory_automation]
-enabled = true
-server = "ram-a"
-recall_top_k = 5
-recall_token_budget = 512
-context_messages = 4
-queue_path = "memory-automation-queue.jsonl"
-queue_capacity = 256
-max_retries = 5
-retry_backoff_ms = 250
-allowed_agent_roles = ["main"]
-```
+Then enable automatic memory explicitly in `config.toml` with the `[memory_automation]`
+section shown in [Opt-in long-term memory automation](#opt-in-long-term-memory-automation).
 
 `Mem OK` in the TUI reports RAM-A connection and recent-operation health; it
 does not override `allowed_agent_roles`. A turn whose active role is not
@@ -228,10 +211,9 @@ If no `tools` map is configured for a role, all MCP tools are visible by default
 - Retries are deliberately narrow. Tool calls are **not** retried or
   backed off: a single `timeout_ms` bounds each request. The one exception is
   `initialize`, which is retried once when the server answers 429 with
-  `Retry-After` (`crates/mcp/src/transport/streamable_http.rs:720-757`); the
-  header is parsed at `:964-970`. Streamable HTTP SSE streams also resume after
+  `Retry-After` (`crates/mcp/src/transport/streamable_http.rs`). Streamable HTTP SSE streams also resume after
   a drop, honouring the server's `retry` field as the delay before reconnecting
-  with `Last-Event-ID` (`crates/mcp/src/transport/streamable_http.rs:617-660`).
+  with `Last-Event-ID` (`crates/mcp/src/transport/streamable_http.rs`).
   Arbitrary tool calls are excluded from the 429 retry because the server may
   have already performed a side effect.
 - No wildcard visibility (`mcp__*__*`); use exact tool names.
@@ -249,17 +231,18 @@ If no `tools` map is configured for a role, all MCP tools are visible by default
 Prefer the built-in reports over manual reproduction:
 
 - `xiaoo-daemon config mcp` prints the resolved MCP client catalog as JSON,
-  including the JSON-config path resolved from `--mcp-config`/`~/.xiaoo`
-  (`apps/serverside/src/main.rs:265-287`; catalog assembly in
-  `apps/serverside/src/mcp_management.rs:15`).
+  including the JSON-config path resolved from `--mcp-config`/`~/.config/xiaoo/mcp.json`
+  (`apps/serverside/src/main.rs`; catalog assembly in
+  `apps/serverside/src/mcp_management.rs`).
 - `xiaoo-daemon config mcp-server` prints the `[mcp_server]` preflight report —
   validation of the endpoint tokens, workspace, origins, and `agent_role`
-  references (`apps/serverside/src/main.rs:326-334`;
-  `apps/serverside/src/mcp_server_management.rs:53-193`).
+  references (`apps/serverside/src/main.rs`;
+  `apps/serverside/src/mcp_server_management.rs`).
 
 Both are reached via the `config` subcommand dispatch
-(`apps/serverside/src/main.rs:1088-1089`). Shared resolution helpers for the
-JSON config location live in `apps/shared/src/mcp_support.rs:22-115`.
+(`apps/serverside/src/main.rs`). Resolution helpers for the
+JSON config location are implemented in `crates/mcp/src/json_config.rs`
+and re-exported via `apps/shared/src/mcp_support.rs`.
 
 
 ---
@@ -274,13 +257,13 @@ endpoints on the same host and port as the runtime API:
 | `/mcp/chatbot` | `chat` | Only `web_search` and `webfetch` internally |
 | `/mcp/agent` | `agent`, `agent_status` | Full local Core agent, or a fixed configured agent role, excluding interactive `ask_user_question` and non-channel `send_file` |
 
-`/mcp/agent` exposes two tools (`apps/serverside/src/mcp_server.rs:598-629`):
+`/mcp/agent` exposes two tools (`apps/serverside/src/mcp_server.rs`):
 
 - `agent` starts an operation and returns immediately.
 - `agent_status` polls an operation previously returned by `agent`. It takes
   `operation_id` and is the only way to observe completion; `agent_status`
   rejects an empty `operation_id` as a tool error
-  (`apps/serverside/src/mcp_server.rs:621-628`).
+  (`apps/serverside/src/mcp_server.rs`).
 
 ```toml
 [mcp_server]
@@ -350,17 +333,17 @@ Tool inputs are:
 For `chat`, omit `session_id` to create a session and complete its first turn in
 the same call; the result contains both MCP text content and `structuredContent`
 with `session_id`, `created`, `reply`, `outcome`, and `usage`
-(`apps/serverside/src/mcp_server.rs:774-810`).
+(`apps/serverside/src/mcp_server.rs`).
 
 For `agent`, the call is **asynchronous**. It starts the operation and returns
 immediately: `structuredContent` is `AgentOperationOutput{operation_id,
 session_id, created, state}` where `state` is a tagged union
-(`apps/serverside/src/mcp_server.rs:168-191`):
+(`apps/serverside/src/mcp_server.rs`):
 
 - `state: "running"` — carries `poll_after_ms` and a `snapshot` of the latest
   root-agent turn. Do not call again before `poll_after_ms` elapses; the server
   enforces that interval by making an early request wait until the next poll is
-  due (`apps/serverside/src/mcp_server.rs:610-615`).
+  due (`apps/serverside/src/mcp_server.rs`).
 - `state: "done"` — carries `reply` (the complete result), `outcome`, `usage`,
   and an optional `error`.
 
@@ -369,7 +352,7 @@ So for `agent` the first turn is *not* completed in the same call: an omitted
 poll `agent_status` with the returned `operation_id` until `state` is `done`
 before starting another operation in that session. Calling `agent` again for a
 session with a live operation returns a busy tool error naming the
-`operation_id` to poll (`apps/serverside/src/mcp_server.rs:915-926`).
+`operation_id` to poll (`apps/serverside/src/mcp_server.rs`).
 
 A new agent session requires an absolute, existing, readable workspace. Later
 calls may omit it; if supplied again, its canonical path must match the original

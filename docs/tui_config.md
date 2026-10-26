@@ -41,13 +41,12 @@ redact_secrets_display = false                      # Optional, default false
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `agent_order` | string array | `[]` | Order in which agent roles appear when cycling roles with `Tab`. Entries are matched case-insensitively against `[agent.<name>]` keys; the literal entry `core` names the built-in core agent (the role-less default). Ordering is a hint only — roles not listed here are appended after the listed ones, and `core` is appended at the end when it is not mentioned. Unknown names are ignored. |
+| `agent_order` | string array | `[]` | Order in which agent roles appear when cycling roles with `Tab`. Entries are matched case-insensitively against `[agent.<name>]` keys; the literal entry `core` names the built-in core agent (the role-less default). When `core` is not mentioned in the list it is placed **first**, ahead of all listed roles; roles not listed here are appended after the listed ones (`app_state.rs`). Unknown names are ignored. |
 | `redact_secrets_display` | boolean | `false` | Redact secrets echoed by the assistant in the TUI display. Only affects the display sink — raw secrets remain in history/snapshots regardless. Set `true` for shoulder-surf protection. |
 
-Sources: `apps/endside/src/support/config.rs:80-91` (`TuiConfig`), `:89-90`
-(`redact_secrets_display` defaults to `false`), tab ordering and the `core`
-sentinel in `apps/endside/src/state/app_state.rs:1353-1416`, display wiring in
-`apps/endside/src/gateway_api/runtime_request.rs:252`.
+Sources: `apps/endside/src/support/config.rs` (`TuiConfig`), tab ordering and
+the `core` sentinel in `apps/endside/src/state/app_state.rs`, display
+wiring in `apps/endside/src/gateway_api/runtime_request.rs`.
 
 ### [tui.remote] - Remote TUI Configuration
 
@@ -110,7 +109,7 @@ auto_connect = false
 The complete slash-command set (canonical names, `Tab`-completable):
 `/connect`, `/cron`, `/delete`, `/dir`, `/load`, `/mcp`, `/new`, `/save`,
 `/remote`, `/sandbox`, `/sessions`, `/skills`
-(`apps/endside/src/input/slash_complete.rs:14-63`).
+(`apps/endside/src/input/slash_complete.rs`).
 
 | Command | Description |
 |------|------|
@@ -126,21 +125,21 @@ The complete slash-command set (canonical names, `Tab`-completable):
 | `/skills` | List available skills |
 | `/sandbox` | Switch the local sandbox backend |
 | `/cron` | Manage cron jobs (view, configure, delete, enable/disable) |
-| `/dir <path>` | Switch the current workspace directory |
+| `/dir <path>` | Switch the current workspace directory (alias: `/cd`) |
 | `/save [name]` | Save a manual checkpoint (auto-names when omitted) |
 | `/load [name]` | Open the manual/auto snapshot list, or load a named manual snapshot |
 | `/delete` | Delete the selected conversation from the current session |
 
-Sources: `/remote` argument handling `apps/endside/src/input/event_key.rs:945-1015`
-(`status`/`off`/`close`/URL), `/sessions` `:1044-1105`, `/new` `:609`,
-`/connect` `:815`, `/mcp` `:849`, `/skills` `:837`, `/sandbox` `:831`,
-`/cron` `:861`, `/save` `:702`, `/load` `:754`, `/delete` `:585`, `/dir`
-`:874`.
+Sources: all slash-command dispatch (`/remote` including its `status`/`off`/
+`close`/URL argument handling, `/sessions`, `/new`, `/connect`, `/mcp`,
+`/skills`, `/sandbox`, `/cron`, `/save`, `/load`, `/delete`) lives in
+`apps/endside/src/input/event_key.rs`; `/dir` (and its `/cd` alias) is resolved in
+`apps/endside/src/services/workspace.rs`.
 
 #### Provider / model list refresh (`/connect`)
 
-The dialog shows two panes (providers | models) and **no longer relies on a
-hard-coded model table**: when it opens, and whenever the highlighted provider
+The dialog shows two panes (providers | models) and fetches the provider's
+official model list live: when it opens, and whenever the highlighted provider
 changes, the TUI asks that provider for its own official model list
 (`GET {api_base}/models` for OpenAI-compatible providers, and the provider's
 native shape for Anthropic / Gemini / Ollama) and replaces the provider's list
@@ -209,7 +208,7 @@ with the result.
 
 Sources: fetch pipeline `apps/endside/src/services/provider.rs` (request/outcome
 types + `fetch_provider_models`, which calls the `xiaoo-shared` facade
-`apps/shared/src/gateway/llm_assembly.rs:207`); state
+`apps/shared/src/gateway/llm_assembly.rs`); state
 `apps/endside/src/state/chat.rs` (`ModelListState`, TTL/back-off constants);
 orchestration `apps/endside/src/app/core.rs` (`start_model_fetch`,
 `apply_model_fetch_outcome`); triggers `apps/endside/src/input/event_key.rs`
@@ -229,7 +228,7 @@ LSP (Language Server Protocol) provides real-time code diagnostics, error messag
 > **Important**: LSP is **disabled by default**. Set `enabled = true` to turn it
 > on; a bare `[lsp]` section (or omitting the section) leaves diagnostics off.
 > `LspConfig.enabled` is a `#[serde(default)] bool`, i.e. `false`
-> (`apps/endside/src/support/config.rs:22-24`; the daemon schema agrees,
+> (`apps/endside/src/support/config.rs`; the daemon schema agrees,
 > `apps/serverside/src/config_schema.rs` → `lsp.enabled` default `false`).
 
 #### Configuration Structure
@@ -252,9 +251,9 @@ language_id = "custom-lang"          # Language ID
 > for exact equality against `Path::extension()` — the part after the final dot,
 > with no dot and no wildcard. Write `"lua"`, not `"*.lua"`; a glob entry such
 > as `"*.lua"` or `"*.ext"` **never matches any file** and the server is silently
-> never started (`crates/lsp/src/manager.rs:112-120`, where the match is
+> never started (`crates/lsp/src/manager.rs`, where the match is
 > `c.extensions.contains(&ext.as_str())`; built-ins use bare `&["rs"]` at
-> `crates/lsp/src/servers.rs:221`).
+> `crates/lsp/src/servers.rs`).
 
 #### Built-in LSP Servers
 
@@ -264,12 +263,14 @@ XiaoO TUI has the following LSP servers built-in (no configuration required once
 |--------|------|--------------|
 | rust-analyzer | Rust | `Cargo.toml`, `*.rs` |
 | gopls | Go | `go.mod`, `*.go` |
-| clangd | C/C++ | `compile_commands.json`, `*.c`, `*.cpp` |
-| pyright | Python | `pyproject.toml`, `*.py` |
+| clangd | C/C++ | `compile_commands.json`, `CMakeLists.txt`, `.clangd`, `*.c`, `*.cc`, `*.cpp`, `*.cxx`, `*.h`, `*.hh`, `*.hpp` |
+| pyright | Python | `pyproject.toml`, `setup.py`, `requirements.txt`, `*.py` |
 | typescript-language-server | TypeScript/JavaScript | `tsconfig.json`, `package.json` |
+| zls | Zig | `build.zig`, `*.zig` |
+| lua-language-server | Lua | `.luarc.json`, `.luarc.jsonc`, `*.lua` |
 
 The companion columns above are `root_markers` and the server's extension list
-(`crates/lsp/src/servers.rs:217-270`).
+(`crates/lsp/src/servers.rs`).
 
 #### Configuration Example
 
@@ -327,7 +328,7 @@ file_write = false                   # Remove this tool from the visible set
 
 The reserved role id `plan` is built in and **cannot** be overridden in the
 config file: `install_builtin_agent_roles` bails when `[agent.plan]` is present
-(`apps/endside/src/support/config.rs:433-436`).
+(`apps/endside/src/support/config.rs`).
 
 #### `[agent.<name>.tools]` semantics — a visibility MASK
 
@@ -346,10 +347,10 @@ So `[agent.x.tools] bash = false` means "everything except `bash`", not
 "only bash". There is no `deny_unknown_fields`, so an unknown tool name is
 silently ignored rather than rejected.
 
-Sources: `apps/serverside/src/daemon_runtime.rs:971-999`
+Sources: `apps/serverside/src/daemon_runtime.rs`
 (`resolve_allowed_tool_names`: empty map → all names; unknown names `continue`;
 `false` removes, `true` inserts), mirrored TUI-side in
-`apps/endside/src/gateway_api/runtime_request.rs:430-455`
+`apps/endside/src/gateway_api/runtime_request.rs`
 (`resolve_visible_tool_names`).
 
 **Valid builtin tool names** (the ones that actually exist; `read`, `write` and
@@ -389,7 +390,7 @@ bash = false                         # Planning phase does not execute commands
 
 In TUI:
 - `Tab` key - Switch agent role (also completes a slash command when the line starts with `/`)
-- `Ctrl+T` - Switch reasoning effort (off/high/max), `apps/endside/src/input/event_key.rs:403`
+- `Ctrl+T` - Switch reasoning effort (off/high/max), `apps/endside/src/input/event_key.rs`
 - Status bar shows current agent role name
 
 ---
@@ -399,10 +400,10 @@ In TUI:
 All TUI keybindings are **hard-coded**. There is no keymap configuration table,
 no config-file section for keys, and no validation layer: the readline/emacs
 editing chords live in `handle_input_key`
-(`apps/endside/src/input/core.rs:690-733`) and the app-level chords in
+(`apps/endside/src/input/core.rs`) and the app-level chords in
 `apps/endside/src/input/event_key.rs`. The source itself states "These bindings
 are hard-coded — there is no keymap configuration"
-(`apps/endside/src/input/core.rs:682`).
+(`apps/endside/src/input/core.rs`).
 
 ### Input-line editing (readline / emacs)
 
@@ -415,11 +416,11 @@ are hard-coded — there is no keymap configuration"
 | `Ctrl+W` / `Alt+D` | Delete one word backward / forward |
 | `Ctrl+U` / `Ctrl+K` | Kill to line start / line end |
 
-> **Behavior change**: `Ctrl+A` is **line start**, *not* select-all. Keyboard
-> selection uses `Shift+Left`/`Shift+Right`/`Shift+Home`/`Shift+End` instead
-> (`apps/endside/src/input/core.rs:495-527`).
+`Ctrl+A` is **line start**, not select-all. Keyboard selection uses
+`Shift+Left`/`Shift+Right`/`Shift+Home`/`Shift+End` instead
+(`apps/endside/src/input/core.rs`).
 
-Source: `apps/endside/src/input/core.rs:690-733`.
+Source: `apps/endside/src/input/core.rs`.
 
 ### App-level chords
 
@@ -438,12 +439,11 @@ Source: `apps/endside/src/input/core.rs:690-733`.
 | `PageUp` / `PageDown` | Scroll the transcript a page |
 | `Esc` | Clear an active transcript selection |
 
-Sources: submit `apps/endside/src/input/event_key.rs:1833-1836`; soft newline
-`:1844-1848`; history `:1851-1858`; copy `:1863-1870`; cut `:1873-1875`;
-`Ctrl+C` / `Ctrl+Insert` copy-vs-quit split `:55-98`; `Ctrl+T` `:403`; `Tab`
-`:378-399`; `Up`/`Down` `:480-520`; `Home`/`End` caret movement in the input
-`apps/endside/src/input/core.rs:609-627`; `PageUp`/`PageDown` `:525-530`; `Esc`
-`:498-501`.
+Sources: submit, soft newline, input history, copy/cut, the `Ctrl+C` /
+`Ctrl+Insert` copy-vs-quit split, `Ctrl+T`, `Tab`, `Up`/`Down`,
+`PageUp`/`PageDown` and `Esc` handling all live in
+`apps/endside/src/input/event_key.rs`; `Home`/`End` caret movement lives in
+`apps/endside/src/input/core.rs`.
 
 #### Provider / model dialog keys (`/connect`)
 
@@ -477,7 +477,7 @@ the paging arms at `:1364-1379`, `Ctrl+R` at `:1389`).
 > (kitty keyboard / CSI u); mainstream unix terminals fold it onto the same
 > `0x0D` byte as plain `Enter`. `Ctrl+Shift+C` is normally intercepted by the
 > terminal emulator, which is why `Ctrl+Insert` is the reliable copy key
-> (`apps/endside/src/input/event_key.rs:55-73`).
+> (`apps/endside/src/input/event_key.rs`).
 
 ---
 
@@ -596,7 +596,7 @@ The TUI argument parser accepts **only** `--config` / `-c`, `--mcp-config`,
 `--help` / `-h`. **Any other argument is rejected** with
 `unsupported argument "..."` and a non-zero exit — in particular
 `xiaoo --debug` does **not** exist and fails
-(`apps/endside/src/main.rs:143-167`; the fall-through `bail!` is at `:163-165`).
+(`apps/endside/src/main.rs`).
 
 ---
 
@@ -610,7 +610,7 @@ The TUI argument parser accepts **only** `--config` / `-c`, `--mcp-config`,
 - ✅ TUI-specific configurations (`tui`, `tui.remote`, `lsp`, `agent`)
 
 The TUI `Config` struct has no `compact` field
-(`apps/endside/src/support/config.rs:42-77`), so a `[compact]` section in a
+(`apps/endside/src/support/config.rs`), so a `[compact]` section in a
 TUI-parsed file has no effect in local TUI mode.
 
 ### Q: What's the difference between Agent and Subagent?
@@ -642,8 +642,8 @@ Detailed instructions: [remote_tui.md](./remote_tui.md)
 
 **A**: No. The editing chords (`Ctrl+A/E/B/F`, `Alt+B/F`, `Ctrl+D/W/U/K`), the
 submit/newline keys, history keys, and copy/cut chords are hard-coded with no
-configuration surface (`apps/endside/src/input/core.rs:690-733`,
-`apps/endside/src/input/event_key.rs:1820-1875`). Adding a keymap is a known gap,
+configuration surface (`apps/endside/src/input/core.rs`,
+`apps/endside/src/input/event_key.rs`). Adding a keymap is a known gap,
 not a configuration option.
 
 ---
@@ -652,13 +652,13 @@ not a configuration option.
 
 - **No configurable keymap.** Keybindings cannot be changed via configuration;
   there is no keymap table and no validation layer
-  (`apps/endside/src/input/core.rs:682`).
+  (`apps/endside/src/input/core.rs`).
 - **`lsp.extra_servers.extensions` silently ignores globs.** A wildcard entry
-  never matches and produces no warning (`crates/lsp/src/manager.rs:112-120`).
+  never matches and produces no warning (`crates/lsp/src/manager.rs`).
 - **Unknown tool names in `[agent.<name>.tools]` are silently skipped.** The
   config structs do not use `deny_unknown_fields`, so a typo such as
   `read = true` (instead of `file_read = true`) is accepted and ignored
-  (`apps/serverside/src/daemon_runtime.rs:984-990`).
+  (`apps/serverside/src/daemon_runtime.rs`).
 
 ---
 

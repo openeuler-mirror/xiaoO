@@ -47,7 +47,7 @@ L1 由 `HeuristicDetector`（`agent_moss/engine/heuristic.py`）协调，按优�
 | 7 | 危险操作模式 | 通配符+删除、重定向覆盖 `/etc`/`/boot`/`/proc` 等关键目录 | high/critical |
 | 8 | 横向移动 | ssh/scp/rsync 到非本机主机 | medium（传 L3） |
 
-> 注：敏感路径/危险模式/横向移动三类已从 L2 重分类到 L1（只看 a_next 本身，不需历史上下文）。
+> 注：敏感路径、危险模式、横向移动三类属于 L1（只看 a_next 本身，不需历史上下文）；L2 为需要历史上下文的逻辑规则。
 
 ### L1：用户敏感规则（`rules/user_rules.json`）
 
@@ -95,8 +95,6 @@ L1 由 `HeuristicDetector`（`agent_moss/engine/heuristic.py`）协调，按优�
 | 密码修改授权 | 非交互式密码修改（passwd/chpasswd 等需确认） |
 | 用户/组删除授权 | userdel/groupdel 等需确认 |
 | privilege_escalation | sudo/su 提权检测（sudo 后跟包管理/服务管理命令直接放行，非运维命令查历史上下文） |
-
-> 注：敏感路径/危险模式/横向移动三类已从 L2 重分类到 L1（只看 a_next 本身，不需历史上下文）。
 
 ---
 

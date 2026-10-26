@@ -10,7 +10,6 @@ Open-source intelligence hub for AgentOS.
 
 [![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-v0.1.0-red.svg)](https://atomgit.com/openeuler/xiaoO)
 
 ## Community
 
@@ -97,32 +96,24 @@ The build wrapper can install the `agent_moss` hooker, a thin bridge that audits
 
 ### Docker
 
-> **⚠️ The Docker image build is currently unavailable.** `docker build` fails on this
-> revision and is **not** fixed by the commands below. The three known defects are:
->
-> - `Dockerfile:56` copies `crates/llm-client-cli/Cargo.toml`, a crate deleted by `a507b74`;
-> - the layered `COPY` (`Dockerfile:45-66`) omits the workspace members `crates/protocol` and
->   `crates/xiaoo-api` (`Cargo.toml:25`, `Cargo.toml:24`), so metadata fetching fails;
-> - `Dockerfile:118-126` targets `plugins/hookers/audit_agent`, a directory that no longer exists.
->
-> Build xiaoO from source instead (see above). The commands below document the image's
-> intended shape and will work once the Dockerfile is repaired; they are **not** a working
-> quickstart today. See [docs/docker_deploy.md](./docs/docker_deploy.md) for the full record.
-
-The finished image is intended to contain both `xiaoo` and `xiaoo-daemon`. The image
-ships **no** `config.toml` — pass your own at run time via `XIAOO_CONFIG`:
+The image contains `xiaoo`, `xiaoo-daemon`, and `moirai`, and ships **no**
+`config.toml` — mount your own at run time:
 
 ```bash
-docker build -t xiaoo:latest .   # currently fails; see the warning above
-docker run --rm -d -p 18080:18080 -p 28081:28081 \
-  -v $PWD/my.toml:/cfg.toml:ro \
-  -e XIAOO_CONFIG=/cfg.toml \
+docker build -t xiaoo:latest .
+docker run --rm -d -p 18080:18080 \
+  -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
   -e OPENROUTER_API_KEY=sk-or-... \
+  -e XIAOO_HTTP_BEARER_TOKEN=change-me \
   xiaoo:latest
 ```
 
-The container starts `xiaoo-daemon` by default. Pass `xiaoo` for the TUI
-(`docker run -it xiaoo:latest xiaoo`) or `xiaoo --cli run -p "..."` for one-shot CLI.
+The container starts `xiaoo-daemon` bound to `0.0.0.0`, so the mounted config
+must set a bearer token (`[http].bearer_token` or `bearer_token_env`) and
+provide the configured API key environment variable — otherwise the daemon
+refuses to start. Pass `xiaoo` for the TUI (`docker run -it xiaoo:latest
+xiaoo`) or `xiaoo --cli run -p "..."` for one-shot CLI; expose the read-only
+dashboard with `--dashboard-host 0.0.0.0 -p 28081:28081`.
 See [docs/docker_deploy.md](./docs/docker_deploy.md) for full instructions.
 
 ## Quick Start
@@ -153,8 +144,8 @@ grep = true
 
 > **Known gap:** `[subagent.<role>.tools]` is currently parsed and accepted, but **not enforced**
 > for subagent roles — the role's tool allowlist is ignored at spawn time
-> (`crates/tool/src/impl/builtin/spawn_subagent/executor.rs:76-91` reads only `prompt` and
-> `description`; `apps/shared/src/gateway/session_supervisor.rs:345-356` applies only `prompt`,
+> (`crates/tool/src/impl/builtin/spawn_subagent/executor.rs` reads only `prompt` and
+> `description`; `apps/shared/src/gateway/session_supervisor.rs` applies only `prompt`,
 > `max_turns`, and `description`). Use real builtin tool names such as `file_read`, `file_write`,
 > `bash`, `glob`, or `grep`; unknown names are silently dropped without a validation warning.
 
@@ -300,14 +291,14 @@ bash tests/run.sh                 # run the full suite (cargo test --workspace)
 bash tests/run.sh -p xiaoo-core   # extra args are passed through to cargo test
 ```
 
-`scripts/ci.sh` is the unified CI entry for static gates: facade discipline, test hygiene (keeps test code out of `src/`), doc link checks, and code formatting (`cargo fmt --check`); it does not compile. Layout and naming conventions are documented in [tests/README.md](./tests/README.md).
+`scripts/ci.sh` is the unified CI entry for static gates: facade discipline, test hygiene (keeps test code out of `src/`), doc link checks, code formatting (`cargo fmt --check`), and Dockerfile COPY coverage; it does not compile. Layout and naming conventions are documented in [tests/README.md](./tests/README.md).
 
 ## More Documentation
 
 - [Architecture Overview](./docs/architecture_overview.md) — apps, workspace crates, binaries, and runtime layering
 - [Memory & Context Compression](./docs/memory_context_system.md)
 - [Runtime Checkpoint Control](./docs/runtime_checkpoint.md)
-- [Runtime SDK Refactor (as built)](./docs/xiaoo_api_pure_runtime_refactor.md)
+- [Runtime SDK Architecture](./docs/xiaoo_api_pure_runtime_refactor.md)
 - [Plugin System](./docs/plugins.md)
 - [Skill Usage](./docs/skill_usage.md)
 - [MCP Integration](./docs/mcp.md)

@@ -20,8 +20,8 @@ CLI is the simplest running mode, supporting all common configuration items, but
 | `[hooker]` | ✅ | Hooker configuration |
 | `[operation_backend]` | ✅ | Operation backend configuration |
 | `[vault]` | ✅ | Encrypted secrets storage (see vault_secrets_design.md; `enabled` is informational) |
-| `[mcp]` and `.mcp.json` | ✅ | MCP client servers (`apps/endside/src/cli/config.rs:27`) |
-| `[memory_automation]` | ✅ | RAM-A long-term memory recall/ingest (`apps/endside/src/cli/config.rs:29`) |
+| `[mcp]` and `.mcp.json` | ✅ | MCP client servers (`apps/endside/src/cli/config.rs`) |
+| `[memory_automation]` | ✅ | RAM-A long-term memory recall/ingest (`apps/endside/src/cli/config.rs`) |
 | `[agent]` | ❌ | Agent roles (TUI/Daemon only) |
 | `[lsp]` | ❌ | LSP configuration (CLI ignores it; TUI and Daemon both use it) |
 | `[tui]`, `[tui.remote]` | ❌ | TUI-only keys and Remote TUI (TUI only) |
@@ -73,7 +73,7 @@ default = "all"
 ```
 
 > **Note**: `[hooker] default` accepts only `all` or `none`
-> (`crates/agent-types/src/hook/config/boot_configs.rs:24-30`); any other value
+> (`crates/agent-types/src/hook/config/boot_configs.rs`); any other value
 > is rejected by `config validate`.
 
 > **Note**: The CLI's `[llm]` section only reads `provider`, `model`, `api_key_env`, `api_base`, `kvcache_enabled`, and `kvcache_debug_enabled`. Fields like `max_tokens` and `reasoning_effort` are not read from the config file in CLI mode — use `--reasoning-effort` as a CLI argument instead. The context window is resolved dynamically (no `context_window` config field). `llm.profiles`, `llm.active_profile`, and `llm.context_window` are **daemon-only** and are silently ignored by the CLI.
@@ -124,8 +124,8 @@ xiaoo --cli run --no-tools -p "Just answer this question"
 
 > `--config`, `--debug`, `--mcp-config`, and `-v/--version` are `global = true`
 > clap args, so they can appear before or after the `run` subcommand
-> (`apps/endside/src/cli/entry.rs:35-48`). The remaining flags are
-> `run`-subcommand options (`entry.rs:59-120`). `XIAOO_CONFIG` env var falls
+> (`apps/endside/src/cli/entry.rs`). The remaining flags are
+> `run`-subcommand options (`entry.rs`). `XIAOO_CONFIG` env var falls
 > back to the default `~/.config/xiaoo/config.toml` when neither `--config` nor
 > the env var is set.
 
@@ -142,12 +142,12 @@ xiaoo --cli run --no-tools -p "Just answer this question"
 | Subcommand | Description |
 |------|------|
 | `run` | Run a single prompt through the AgentLoop |
-| `serve` | Start a local daemon server (`--port`, `--hostname`) |
-| `export <session_id>` | Export a session transcript from a running daemon (`--port`, `--client-id`) |
+| `serve` | Start a local daemon server (`--port`, `--hostname`). Forwards to an externally installed `xiaoo-daemon` binary (fails if it is not installed); defaults to port `4096`, not the daemon's own default `18080` (`entry.rs`). |
+| `export <session_id>` | Export a session transcript from a running daemon (`--port`, `--client-id`). Known inconsistency: the CLI sends `GET /api/v1/runtimes/export/{session_id}` (`entry.rs`) while the daemon only registers `POST /api/v1/runtimes/export` with the runtime id in the JSON body (`apps/serverside/src/httpserver/router.rs`), so this subcommand currently fails against the daemon. |
 | `debug` | Inspect resolved configuration and internal state |
 | `skill` | Manage skills |
 
-Source: `apps/endside/src/cli/entry.rs:63-142`.
+Source: the `Command` enum in `apps/endside/src/cli/entry.rs`.
 
 ---
 
@@ -212,16 +212,18 @@ When CLI has subagent configured:
 
 Notes:
 - **LSP**: the daemon parses `[lsp]`
-  (`apps/serverside/src/daemon_config.rs:54`) and builds an LSP registry when
-  `enabled = true` (`daemon_config.rs:938`), wired into the runtime at
-  `apps/serverside/src/daemon_runtime.rs:254`. The CLI does not read `[lsp]`.
+  (`apps/serverside/src/daemon_config.rs`) and builds an LSP registry when
+  `enabled = true` (`daemon_config.rs`), wired into the runtime at
+  `apps/serverside/src/daemon_runtime.rs`. The CLI does not read `[lsp]`.
 - **Remote connection**: `xiaoo --cli run --attach <url>` talks to a running
-  daemon instead of running locally (`apps/endside/src/cli/entry.rs:119-120`,
-  used at `:349-351`; implementation in `apps/endside/src/cli/attach.rs:11-38`).
+  daemon instead of running locally (flag parsing in
+  `apps/endside/src/cli/entry.rs`; implementation in `apps/endside/src/cli/attach.rs`).
 - **Session persistence**: `-s/--session <id>` resumes/continues a session
-  (`entry.rs:111-112`, consumed at `entry.rs:526`) and
-  `xiaoo --cli export <session_id>` exports a transcript from a running daemon
-  (`entry.rs:133-142`).
+  (`entry.rs`), and
+  `xiaoo --cli export <session_id>` is intended to export a transcript from a
+  running daemon, but the CLI's `GET /api/v1/runtimes/export/{session_id}`
+  request does not match the daemon's `POST /api/v1/runtimes/export` route
+  (`entry.rs` vs `router.rs`), so the export currently fails.
 
 ---
 
@@ -269,11 +271,13 @@ Not suitable for:
 **A**: By default each CLI run creates a new session (a fresh random UUID). Sessions **are** supported:
 
 - **Resume**: pass `-s/--session <id>` to reuse an existing session ID
-  (`apps/endside/src/cli/entry.rs:111-112`, consumed at `entry.rs:526`).
-- **Export**: `xiaoo --cli export <session_id>` exports a transcript from a
-  running daemon (`entry.rs:133-142`).
+  (`apps/endside/src/cli/entry.rs`, consumed at `entry.rs`).
+- **Export**: `xiaoo --cli export <session_id>` is intended to export a
+  transcript from a running daemon, but its `GET /api/v1/runtimes/export/{session_id}`
+  request does not match the daemon's `POST /api/v1/runtimes/export` route
+  (`entry.rs` vs `router.rs`), so the export currently fails.
 - **Remote**: `--attach <url>` runs the turn against a daemon that owns the
-  session state (`entry.rs:119-120`).
+  session state (`entry.rs`).
 
 For fully interactive long conversations, prefer:
 - **TUI**: Supports session save and restore

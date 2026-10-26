@@ -1,32 +1,14 @@
 # AgentMoss 环境变量参考
 
-本文档汇总 AgentMoss 全部环境变量，并给出 **audit_agent → AgentMoss 的迁移对照表**（xiaoO 老插件 `AUDIT_*` 变量在 AgentMoss 中的对应）。
+本文档汇总 AgentMoss 全部环境变量。
 
-> audit_agent 是 AgentMoss 的前身（原 xiaoO 插件 `plugins/hookers/audit_agent/`），判定逻辑已迁出为独立常驻服务 AgentMoss。环境变量前缀从 `AUDIT_` 统一改为 `AGENT_MOSS_`，语义对齐，个别变量有行为变化（见下表"变化"列）。
+> audit_agent 已被 AgentMoss 取代：判定逻辑迁出为独立常驻服务，`AUDIT_*` 变量不再有效，按 §三 的 `AGENT_MOSS_*` 清单配置即可。
 
 ---
 
-## 一、audit_agent → AgentMoss 迁移对照
+## 一、audit_agent 迁移说明
 
-老用户从 audit_agent 切到 AgentMoss 时，环境变量按此表替换：
-
-| audit_agent 变量 | AgentMoss 变量 | 默认值 | 变化 |
-|---|---|---|---|
-| `AUDIT_DISABLE_LLM_LAYER3` | `AGENT_MOSS_DISABLE_LLM` | 未设（启用 L3） | 仅改名，语义不变（设 `1` 禁用层3 LLM）|
-| `AUDIT_LLM_TIMEOUT` | `AGENT_MOSS_LLM_TIMEOUT` | `300` | 仅改名 |
-| `AUDIT_LOG_PATH` | `AGENT_MOSS_LOG_PATH` | 未设（不记录）| 仅改名，语义不变：bridge.py 记 HOOK_INPUT/HOOK_OUTPUT 全量 hook 日志，llm_analyzer 记 LLM prompt，两处写同一个文件（每次调用都记，不依赖 L3 是否命中）|
-| `AUDIT_ENABLE_POLICY_GEN` | `AGENT_MOSS_ENABLE_POLICY_GEN` | 未设（禁用生成）| 仅改名 |
-| `AUDIT_CONFIG_PATH` | `AGENT_MOSS_CONFIG_PATH` | 未设（用内置默认）| 语义微变：现在优先级为 `AGENT_MOSS_CONFIG_PATH` > `~/.config/agentmoss/agent_moss.yaml` > 继承 `~/.config/xiaoo/config.toml` 的 LLM 配置 |
-| `OPENROUTER_API_KEY` | `AGENT_MOSS_LLM_API_KEY` | 未设 | 改名；同时仍兼容 fallback 到 `OPENROUTER_API_KEY` / `OPENAI_API_KEY` |
-| `AUDIT_ENABLE_LLM`（install.sh）| （已移除）| — | AgentMoss L3 开关改用 `AGENT_MOSS_DISABLE_LLM`，安装时不再用这个 env |
-
-**audit_agent 没有但 AgentMoss 新增的**（迁移时按需补）：
-- `AGENT_MOSS_DISABLE_HEURISTIC` / `AGENT_MOSS_DISABLE_LOGIC_RULES`：单独禁用层1/层2（audit_agent 只能整体禁 L3）
-- `AGENT_MOSS_LLM_FAIL_MODE`：LLM 失败策略（fail_open 默认 / fail_closed），audit_agent 无此开关
-- `AGENT_MOSS_LLM_RETRIES` / `TEMPERATURE` / `MAX_TOKENS`：LLM 调参
-- `AGENT_MOSS_RUNTIME_CONFIG_PATH` / `TOKEN_STATS_PATH` / `SETTINGS_PATH` / `CONSOLE_TOKEN`：常驻服务新增
-- `AGENT_MOSS_URL` / `HOST` / `PORT`：bridge.py 消费方连服务用
-- `AGENT_MOSS_INSTANCE`：归属实例标识（install.sh 注入 `xiaoo`），bridge 探测时按它过滤实例，避免连到同机其他 agent 的 agentmoss
+audit_agent 已被 AgentMoss 取代，`AUDIT_*` 变量不再有效。
 
 ---
 
@@ -73,7 +55,7 @@ AGENT_MOSS_DISABLE_*  env  >  runtime JSON（~/.config/agentmoss/agent_moss_runt
 | `AGENT_MOSS_LLM_RETRIES` | 失败重试次数（默认 2 = 共 3 次尝试）| `2` |
 | `AGENT_MOSS_ENABLE_POLICY_GEN` | 设 `1` 启用策略生成（Step 2），否则用默认只读策略 | 未设（禁用）|
 
-> **LLM 配置 fallback**：若用户只配了 xiaoo 的 `~/.config/xiaoo/config.toml`，AgentMoss 会自动继承其 `[llm]` 配置（字段名转译 `api_base` ↔ `base_url`），对齐 audit_agent 时代"配一份 xiaoo 就够"的体验。
+> **LLM 配置 fallback**：若用户只配了 xiaoo 的 `~/.config/xiaoo/config.toml`，AgentMoss 会自动继承其 `[llm]` 配置（字段名转译 `api_base` ↔ `base_url`），配一份 xiaoo 配置即可。
 
 ### 3.3 配置文件路径
 
@@ -90,8 +72,6 @@ AGENT_MOSS_DISABLE_*  env  >  runtime JSON（~/.config/agentmoss/agent_moss_runt
 |---|---|---|
 | `AGENT_MOSS_CUSTOM_RULES` | 自定义规则 JSON 数组，注入到 L1 检测。格式：`[{"pattern": "kubectl delete namespace", "action": "Deny", "severity": "critical"}]` | `[]` |
 
-> OpenDesk 安全网关设置页里的 customRules 也将统一收敛到这里（后续 OpenDesk 集成时撤下设置页 customRules，归 Console 管）。
-
 ### 3.5 Console（策略管控台）
 
 | 变量 | 说明 | 默认值 |
@@ -100,7 +80,7 @@ AGENT_MOSS_DISABLE_*  env  >  runtime JSON（~/.config/agentmoss/agent_moss_runt
 
 ### 3.6 bridge.py（xiaoO 消费方连服务）
 
-这些变量由 `hooks/xiaoO/bridge.py` 读取，用于 xiaoO hook 子进程定位并连接 AgentMoss 服务：
+这些变量由 `plugins/hookers/agent_moss/bridge.py` 读取，用于 xiaoO hook 子进程定位并连接 AgentMoss 服务：
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
@@ -109,21 +89,19 @@ AGENT_MOSS_DISABLE_*  env  >  runtime JSON（~/.config/agentmoss/agent_moss_runt
 | `AGENT_MOSS_PORT` | 服务端口（被占时服务自动 findFreePort 往上找，bridge 探测 9090-9095 兜底）| `9090` |
 | `AGENT_MOSS_HOOK_TIMEOUT` | analyze 请求超时（秒）| `60` |
 | `AGENT_MOSS_HEALTH_TIMEOUT` | 活性检查超时（秒）| `2` |
-| `AGENT_MOSS_INSTANCE` | **本机归属实例标识**。bridge 探测 `/api/v1/health` 时要求返回的 `instance` 字段等于该值，不等则跳过该端口（宁可 fail-closed 也不连到别的 agent 的 agentmoss），见 `plugins/hookers/agent_moss/bridge.py:78,169-171`。`install.sh` 安装时注入为 `xiaoo`（systemd 模式写 `/etc/agent_moss/agent_moss.env`，nohup 模式 export），见 `plugins/hookers/agent_moss/install.sh:209-221`。**用户显式设了 `AGENT_MOSS_URL` / `AGENT_MOSS_PORT` 时跳过探测，此值不生效**（尊重显式配置，`bridge.py:200`）。| `xiaoo` |
-| `AGENT_MOSS_LOG_PATH` | **全量 hook 日志 + LLM prompt 日志路径**。bridge.py 记 HOOK_HEALTH_OK/HOOK_INPUT/HOOK_OUTPUT（每次 hook 调用都记，含 tool_input 和判定结果）；llm_analyzer.py 记 LLM 判定 prompt。两处写同一个文件，对应 audit_agent 的 `AUDIT_LOG_PATH`，行为完全一致 | 未设（不记）|
+| `AGENT_MOSS_INSTANCE` | **本机归属实例标识**。bridge 探测 `/api/v1/health` 时要求返回的 `instance` 字段等于该值，不等则跳过该端口（宁可 fail-closed 也不连到别的 agent 的 agentmoss），见 `plugins/hookers/agent_moss/bridge.py`。`install.sh` 安装时注入为 `xiaoo`（systemd 模式写 `/etc/agent_moss/agent_moss.env`，nohup 模式 export），见 `plugins/hookers/agent_moss/install.sh`。**用户显式设了 `AGENT_MOSS_URL` / `AGENT_MOSS_PORT` 时跳过探测，此值不生效**（尊重显式配置，`bridge.py`）。| `xiaoo` |
+| `AGENT_MOSS_LOG_PATH` | **全量 hook 日志 + LLM prompt 日志路径**。bridge.py 记 HOOK_HEALTH_OK/HOOK_INPUT/HOOK_OUTPUT（每次 hook 调用都记，含 tool_input 和判定结果）；llm_analyzer.py 记 LLM 判定 prompt。两处写同一个文件 | 未设（不记）|
 | `AGENT_MOSS_CHECK_SOURCE` | 设 `1` 时额外检查 agent_moss 包是否可 import | 未设 |
 
-> 上表是 bridge.py 实际读取的**全部** env（`plugins/hookers/agent_moss/bridge.py:64-78`）。bridge 之外，还有一类由 bridge 从 xiaoo 配置读取后 **per-request 转发**给服务的变量：LLM 相关配置（如 API key）不在 bridge 进程 env 里读取，而是 bridge 解析 `~/.config/xiaoo/config.toml` + 相关 env 后随请求注入 `metadata.llm_config`（`bridge.py:114-125`）。
+> 上表是 bridge.py 实际读取的**全部** env（`plugins/hookers/agent_moss/bridge.py`）。bridge 之外，还有一类由 bridge 从 xiaoo 配置读取后 **per-request 转发**给服务的变量：LLM 相关配置（如 API key）不在 bridge 进程 env 里读取，而是 bridge 解析 `~/.config/xiaoo/config.toml` + 相关 env 后随请求注入 `metadata.llm_config`（`bridge.py`）。
 
 > 端口解析优先级（学 OpenDesk hook.ts resolveGateUrl）：`AGENT_MOSS_URL` > `AGENT_MOSS_PORT` 显式指定 > 探测 9090-9095 找 `/api/v1/health` 返回 healthy **且 `instance` 匹配 `AGENT_MOSS_INSTANCE`** > 默认 9090。
 
 > 注：`AGENT_MOSS_LOG_PATH` 不依赖 L3 是否命中——即使命令在层1/层2 就被拦（或服务返回 422 fail-closed），hook 全量日志照常记录，便于排查。
 
-### 3.7 AgentMoss 源码仓位置（build.sh 用）
+### 3.7 安装源（install.sh）
 
-| 变量 | 说明 | 默认值 |
-|---|---|---|
-| `AGENT_MOSS_HOME` | AgentMoss 源码仓路径（build.sh 的 `pip install -e` 用）| xiaoO 同级的 `../AgentMoss` |
+AgentMoss 服务由 `plugins/hookers/agent_moss/install.sh` 安装：创建 venv（`/opt/agent_moss/venv`）并**从 PyPI 安装固定版本 `agent-moss==0.15.1`**（install.sh）。不存在 `AGENT_MOSS_HOME` / `pip install -e` 本地源码安装路径。
 
 ### 3.8 AcTrail（事件上报，可选）
 
@@ -166,15 +144,4 @@ export AGENT_MOSS_INSTANCE=xiaoo
 
 ---
 
-## 五、从 audit_agent 迁移的快速检查清单
-
-切到 AgentMoss 前，把原 `AUDIT_*` 环境变量按 §一 改名，重点确认：
-
-1. `AUDIT_DISABLE_LLM_LAYER3=1` → `AGENT_MOSS_DISABLE_LLM=1`
-2. `AUDIT_CONFIG_PATH` 若指向自定义 config.json → `AGENT_MOSS_CONFIG_PATH`（注意现在主配置是 YAML，见 §3.3）
-3. `OPENROUTER_API_KEY` → `AGENT_MOSS_LLM_API_KEY`（或保持原样，有 fallback 兼容）
-4. `AUDIT_LLM_TIMEOUT` / `AUDIT_LOG_PATH` / `AUDIT_ENABLE_POLICY_GEN` → 对应 `AGENT_MOSS_` 前缀
-5. audit_agent 时代的 `audit_settings.json` 已被 runtime JSON + `agent_moss_settings.json` 取代，不再使用
-6. LLM 配置若已在 `~/.config/xiaoo/config.toml` 配好，AgentMoss 自动继承，无需重复配
-
-迁移后用 Policy Console（`http://127.0.0.1:9090/console`）可视化改层级开关/规则，比改 env/settings 更直观；env 仍作最高优先级覆盖手段保留。
+> 补充：Policy Console（`http://127.0.0.1:9090/console`）可视化改层级开关/规则，比改 env/settings 更直观；env 仍作最高优先级覆盖手段保留。

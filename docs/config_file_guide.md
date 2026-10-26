@@ -8,7 +8,7 @@ This document focuses on shared configuration items plus local client runtime se
 > `deny_unknown_fields`, so a misspelled or stale key — and a valid key written
 > in a section that does not support it — parses successfully and is then
 > dropped without warning. Only the `.mcp.json` reader rejects unknown fields
-> (`crates/mcp/src/json_config.rs:62,73`). `xiaoo-daemon config validate`
+> (`crates/mcp/src/json_config.rs`). `xiaoo-daemon config validate`
 > reports `"valid": true` even for ignored keys, so a passing validate is **not**
 > proof that a key is honored.
 
@@ -62,7 +62,7 @@ environment variable:
 ```
 
 MCP servers can also be declared directly in `config.toml` with the
-`[[mcp.servers]]` array-of-tables form (`crates/mcp/src/config.rs:6-10`):
+`[[mcp.servers]]` array-of-tables form (`crates/mcp/src/config.rs`):
 
 ```toml
 [[mcp.servers]]
@@ -82,7 +82,7 @@ side_effects = false
 ```
 
 The `effect` profile declares which effects the server's tools have
-(`crates/mcp/src/config.rs:56-58,115-124`). It defaults to the **most
+(`crates/mcp/src/config.rs`). It defaults to the **most
 conservative** assumption — all four flags `true` — so batches containing those
 tools are serialised. Relax it for known read-only servers to allow parallel
 execution. A `.mcp.json` entry has no `effect` key.
@@ -123,6 +123,13 @@ retry_backoff_ms = 250
 allowed_agent_roles = ["main"]
 ```
 
+The values above are examples, not defaults. Field defaults
+(`apps/shared/src/gateway/memory_automation.rs`): `enabled = false`,
+`server = ""`, `recall_top_k = 5`, `recall_token_budget = 512`,
+`context_messages = 0` (the example's `4` opts into recalled-memory context),
+`queue_path = "memory-automation-queue.jsonl"`, `queue_capacity = 256`,
+`max_retries = 5`, `retry_backoff_ms = 250`, `allowed_agent_roles = []`.
+
 Before a turn, xiaoO appends bounded recalled memory as
 `<untrusted_long_term_memory>` system context and does not rewrite the user's
 original message. After a successful turn, xiaoO writes ingest work to a
@@ -150,10 +157,10 @@ is absent from `allowed_agent_roles` deliberately skips recall and ingest.
 
 > ⚠️ **Daemon-only**: `[llm.profiles.*]`, `llm.active_profile`, and
 > `llm.context_window` are read **only by the daemon**
-> (`apps/serverside/src/daemon_config.rs:76-119`). The CLI `[llm]` struct has
-> exactly six fields (`apps/endside/src/cli/config.rs:44-51`) and the TUI
+> (`apps/serverside/src/daemon_config.rs`). The CLI `[llm]` struct has
+> exactly six fields (`apps/endside/src/cli/config.rs`) and the TUI
 > `LlmConfig` has no profile or `context_window` field
-> (`apps/endside/src/support/config.rs:104-121`). In CLI and TUI these keys are
+> (`apps/endside/src/support/config.rs`). In CLI and TUI these keys are
 > **silently ignored** — no error, no warning (see the unknown-keys warning
 > above). A CLI/TUI user who sets `active_profile` gets the `provider`/`model`
 > values instead, with no diagnostic.
@@ -222,7 +229,7 @@ kvcache_debug_enabled = false        # KV cache debug (optional)
 
 The effective context window is resolved dynamically:
 1. Dynamic model query, for **any** provider whose profile sets
-   `supports_model_catalog` (`crates/llm-client/src/models/mod.rs:79-99`) —
+   `supports_model_catalog` (`crates/llm-client/src/models/mod.rs`) —
    this covers `openai`, `anthropic`, `gemini`, `ollama`, `zai`/`zhipu`,
    `deepseek`, `openrouter`, and others; not just gemini/anthropic/ollama
 2. Local fallback defaults
@@ -315,14 +322,14 @@ file_read = true
 > `file_edit`, `glob`, `grep`, `lsp`, `skill`, `todo_write`, `web_search`,
 > `webfetch`, `spawn_subagent`, `join_subagent`, `ask_user_question`,
 > `count_text_length`, `print_hello_world`, `send_file`. `file_read` is the real
-> name (`crates/tool/src/impl/builtin/file_read/spec.rs:31`); `read`/`write`/`edit`
+> name (`crates/tool/src/impl/builtin/file_read/spec.rs`); `read`/`write`/`edit`
 > are **not** tool names and are silently skipped (see the known gap below).
 
 > ⚠️ **Known gap — subagent role `tools` is not enforced.** For agent roles
 > (`[agent.<name>.tools]`) the map acts as a visibility mask. For **subagent**
 > roles it is parsed and carried into `SubagentRoleRecord` but never applied:
 > the session supervisor reads only `prompt`, `max_turns`, and `description`
-> from the role (`apps/shared/src/gateway/session_supervisor.rs:345-356`). Only
+> from the role (`apps/shared/src/gateway/session_supervisor.rs`). Only
 > the built-in exploration subagent is narrowed, via a hardcoded allowlist.
 > Do not rely on `[subagent.<role>.tools]` to restrict a subagent's tools.
 
@@ -413,18 +420,18 @@ disabled = ["legacy-review"]                           # Installed Skill IDs not
 ```
 
 The file-configurable surface of `[skills]` is exactly these three keys —
-`dirs`, `allow_scripts`, `disabled` (`apps/serverside/src/daemon_config.rs:261-268`;
-TUI `apps/endside/src/support/config.rs:182-189`).
+`dirs`, `allow_scripts`, `disabled` (`apps/serverside/src/daemon_config.rs`;
+TUI `apps/endside/src/support/config.rs`).
 
 > ⚠️ **Known gap — security knobs are not file-configurable and are silently
 > dropped.** `SkillsConfig` in the code also has `audit_enabled`,
 > `prompt_injection_mode`, `prompt_budget_ratio`, and
-> `max_listing_description_chars` (`crates/skill/src/types/config.rs:8-12`), but
+> `max_listing_description_chars` (`crates/skill/src/types/config.rs`), but
 > **no** file-config section maps to them: every construction site fills them
 > from `SkillsConfig::default()` via `..SkillsConfig::default()`
-> (`apps/serverside/src/daemon_config.rs:884-898`,
-> `apps/endside/src/support/config.rs:350-362`,
-> `apps/endside/src/cli/skills.rs:55-67`). Writing `audit_enabled = true` in
+> (`apps/serverside/src/daemon_config.rs`,
+> `apps/endside/src/support/config.rs`,
+> `apps/endside/src/cli/skills.rs`). Writing `audit_enabled = true` in
 > `config.toml` therefore **passes `config validate` with `"valid": true` and is
 > then silently discarded** — skill security auditing stays off, and
 > `prompt_injection_mode` stays `Compact` with `prompt_budget_ratio = 0.01`. Do
@@ -477,7 +484,7 @@ db_path = "~/.xiaoo/traces.db"       # SQLite database path (for moirai-sqlite)
 - `noop` - No storage
 - `stdout` - Output to standard output
 
-The default backend is `moirai-sqlite` (`crates/trace/src/framework/config.rs:22,35`);
+The default backend is `moirai-sqlite` (`crates/trace/src/framework/config.rs`);
 `noop` is **not** the default.
 
 ---
@@ -497,12 +504,12 @@ max_prompt_chain_depth = 128         # Cross-turn send_prompt chain depth cap (o
 ```
 
 `default` accepts **only `all` or `none`** (`all` is the default)
-(`crates/agent-types/src/hook/config/boot_configs.rs:24-30`; the config schema
-enum is `["all","none"]`, `apps/serverside/src/config_schema.rs:94`). Values
+(`crates/agent-types/src/hook/config/boot_configs.rs`; the config schema
+enum is `["all","none"]`, `apps/serverside/src/config_schema.rs`). Values
 such as `agent_moss` are **rejected** by `config validate` with
 ``unknown variant `agent_moss` ``. The remaining keys come from the same struct
-(`boot_configs.rs:33-52`); `max_prompt_chain_depth` defaults to 128
-(`DEFAULT_MAX_PROMPT_CHAIN_DEPTH`, `boot_configs.rs:18`) and semantically
+(`boot_configs.rs`); `max_prompt_chain_depth` defaults to 128
+(`DEFAULT_MAX_PROMPT_CHAIN_DEPTH`, `boot_configs.rs`) and semantically
 permits a chain of N turns total.
 
 For detailed hooker configuration and plugin instructions, please refer to [plugins.md](./plugins.md).
@@ -519,9 +526,11 @@ agent_order = ["main", "plan"]       # Order in which agents are cycled (optiona
 redact_secrets_display = false       # Redact secrets echoed by the assistant in the TUI display (default false)
 ```
 
-`agent_order` and `redact_secrets_display` are parsed only by the TUI
-(`apps/endside/src/support/config.rs:80-91`; declared in the config schema at
-`apps/serverside/src/config_schema.rs:189-191`). `redact_secrets_display`
+Both keys are parsed only by the TUI
+(`apps/endside/src/support/config.rs`). Of the two, only `agent_order`
+is declared in the daemon's config schema
+(`apps/serverside/src/config_schema.rs`); `redact_secrets_display` is
+TUI-parse-only and does not appear in the schema. `redact_secrets_display`
 defaults to `false`, meaning the local TUI renders the transcript as-is; set it
 to `true` for shoulder-surf protection. It affects the display sink only — raw
 secrets remain in history and snapshots regardless.
@@ -580,11 +589,11 @@ grant automatically, then retry the failed command after approval.
 The `[vault]` section controls local encrypted storage of API keys and tokens in
 `llm_secrets.json` (sibling of `config.toml`), and all three modes read the
 `use_sdf` key from it. The real API is
-`xiaoo_shared::llm_secrets`: `save_llm_secret`, `delete_llm_secret`,
-`auto_save_from_env`, `get_llm_secret`, `inject_llm_secrets_into_env`,
-`inspect_secret_store`, and `llm_secrets_path`
-(`apps/shared/src/llm_secrets.rs:40,58,79,228,245,257,219`). There is **no**
-`llm_secrets::init_on_demand_secret_provider` symbol.
+`xiaoo_shared::llm_secrets`: `save_llm_secret`
+(`apps/shared/src/llm_secrets.rs`), `delete_llm_secret`, `auto_save_from_env`,
+`init_llm_secrets`, `llm_secrets_path`, `get_llm_secret`,
+`inject_llm_secrets_into_env`, and `inspect_secret_store`.
+There is **no** `llm_secrets::init_on_demand_secret_provider` symbol.
 
 ```toml
 [vault]
@@ -599,11 +608,12 @@ use_sdf = false  # false = per-instance key + AES-256-GCM; true = SDF 国密 (Ku
 
 > ⚠️ **`enabled` is not a gate.** `llm_secrets.rs` never reads it — the only key
 > it parses from `[vault]` is `use_sdf`
-> (`apps/shared/src/llm_secrets.rs:22-38`, used on every path at :40,58,228,245,257).
+> (`apps/shared/src/llm_secrets.rs` value lookup and file read),
+> consulted on every read/write path.
 > The sole reader of `enabled` is daemon status reporting
-> (`apps/serverside/src/vault_management.rs:74`). Secrets are written regardless:
+> (`apps/serverside/src/vault_management.rs`). Secrets are written regardless:
 > the TUI persists an API key unconditionally when one is entered
-> (`apps/endside/src/services/provider.rs:132`). Setting `enabled = false`
+> (`apps/endside/src/services/provider.rs`). Setting `enabled = false`
 > therefore does **not** prevent `llm_secrets.json` from being created.
 
 > ⚠️ **Back up the master key file.** With `use_sdf = false`, secrets are encrypted

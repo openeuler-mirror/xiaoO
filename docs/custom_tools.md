@@ -12,15 +12,15 @@ xiaoO can discover language-agnostic custom tools from TOML manifests.
 - Global tools: `~/.xiaoo/tools/*.toml`
 
 Only these two directories are scanned, and only `*.toml` files in them
-(`crates/tool/src/impl/plugin/tool_source.rs:31-50,53-60`). The workspace directory is searched
+(`crates/tool/src/impl/plugin/tool_source.rs`). The workspace directory is searched
 before the global one, and the first manifest to claim a name is the one reported as `active`; a
 later duplicate is marked `shadowed` and records the winning path in `shadowed_by`
-(`crates/tool/src/impl/plugin/catalog.rs:295-320,375-386`). A tool whose `exec.command` cannot be
-found is reported as `command_missing` rather than `active` (`catalog.rs:380-386`).
+(`crates/tool/src/impl/plugin/catalog.rs`). A tool whose `exec.command` cannot be
+found is reported as `command_missing` rather than `active` (`catalog.rs`).
 
 Each manifest defines one tool. Tool names must be unique across built-in and custom tools — a
 duplicate name fails registry construction with `duplicate tool name in registry: <name>`
-(`crates/tool/src/framework/registry/builder.rs:43-59`).
+(`crates/tool/src/framework/registry/builder.rs`).
 
 ## Manifest
 
@@ -65,10 +65,10 @@ stdout = "json"
 | `input_schema` | Yes | — | JSON-schema-style table describing the arguments |
 | `exec` | Yes | — | How to launch the process (see below) |
 
-Struct definition at `crates/tool/src/impl/plugin/manifest.rs:6-15`; validation rules
+Struct definition at `crates/tool/src/impl/plugin/manifest.rs`; validation rules
 (name format, non-empty `description`, non-empty `exec.command`, `timeout_ms != 0`,
 `input_schema` must be a table, `exec.env` entries must be plain variable names) at
-`crates/tool/src/impl/plugin/manifest.rs:96-129`.
+`crates/tool/src/impl/plugin/manifest.rs`.
 
 ### `[output]`
 
@@ -76,15 +76,15 @@ Struct definition at `crates/tool/src/impl/plugin/manifest.rs:6-15`; validation 
 |-------|----------|---------|-------------|
 | `description` | No | `"Tool output"` | Describes the tool's return shape |
 
-`crates/tool/src/impl/plugin/manifest.rs:18-21`; the default value comes from
+`crates/tool/src/impl/plugin/manifest.rs`; the default value comes from
 `default_output_description()`. The rendered schema surfaces it as `output_description`, so
 `xiaoo-daemon config custom-tools` shows it for each tool
-(`crates/tool/src/impl/plugin/catalog.rs:88-100`).
+(`crates/tool/src/impl/plugin/catalog.rs`).
 
 ### `[effect]`
 
 Declares what the tool touches, so the runtime can reason about it. All four keys default to
-`false` (`crates/tool/src/impl/plugin/manifest.rs:23-36`):
+`false` (`crates/tool/src/impl/plugin/manifest.rs`):
 
 | Field | Description |
 |-------|-------------|
@@ -94,17 +94,17 @@ Declares what the tool touches, so the runtime can reason about it. All four key
 | `side_effects` | The tool has effects beyond its return value |
 
 The section is converted into an `EffectProfile` on the tool spec
-(`crates/tool/src/impl/plugin/manifest.rs:132-140`;
-`crates/tool/src/impl/plugin/spec.rs:33-34,60-62`) and is consumed in two places:
+(`crates/tool/src/impl/plugin/manifest.rs`;
+`crates/tool/src/impl/plugin/spec.rs`) and is consumed in two places:
 
 - **Batch scheduling**: a tool is treated as safe to run in parallel only when it does **not** write
   the filesystem and has no side effects, but does read the filesystem or use the network
-  (`crates/core/src/tool_exec.rs:57-63,275-279`). Declaring honestly matters — a tool that writes
+  (`crates/core/src/tool_exec.rs`). Declaring honestly matters — a tool that writes
   files but reports `writes_filesystem = false` may be run concurrently with other tools, and one
   that neither reads nor writes nor uses the network and has no side effects is always serialized.
 - **Manual test harness**: `xiaoo-daemon config test-custom-tool` refuses to run a tool when any
   `[effect]` flag is `true`, unless `--allow-effects` is passed
-  (`crates/tool/src/impl/plugin/catalog.rs:256-264`).
+  (`crates/tool/src/impl/plugin/catalog.rs`).
 
 `[effect]` is **not** a permission or sandbox boundary: it does not grant, deny, or restrict a tool
 call at runtime.
@@ -119,24 +119,24 @@ call at runtime.
 | `stdout` | No | `"text"` | `"text"` returns output as text; `"json"` parses it as JSON |
 | `env` | No | `[]` | Declared but **not** forwarded; see [Environment](#environment) |
 
-`crates/tool/src/impl/plugin/manifest.rs:38-47`; the mode enums are `StdinMode` (`json` | `none`) and
-`StdoutMode` (`text` | `json`) at `crates/tool/src/impl/plugin/manifest.rs:50-63`. Any other value is
+`crates/tool/src/impl/plugin/manifest.rs`; the mode enums are `StdinMode` (`json` | `none`) and
+`StdoutMode` (`text` | `json`) at `crates/tool/src/impl/plugin/manifest.rs`. Any other value is
 rejected as an unsupported mode by the config surface
-(`crates/tool/src/impl/plugin/catalog.rs:74-83`).
+(`crates/tool/src/impl/plugin/catalog.rs`).
 
 ### Command And Argument Path Rules
 
 `command` and each entry of `args` are expanded with the same rules before the process is spawned
-(`crates/tool/src/impl/plugin/executor.rs:67-101`):
+(`crates/tool/src/impl/plugin/executor.rs`):
 
 | Form | Resolution |
 |------|------------|
-| `~` or `~/...` | Expanded against `$HOME` (`executor.rs:67-75`) |
-| `./...` or `../...` | Resolved **relative to the tool directory**, not the workspace or the CWD (`executor.rs:77-99`) |
+| `~` or `~/...` | Expanded against `$HOME` (`executor.rs`) |
+| `./...` or `../...` | Resolved **relative to the tool directory**, not the workspace or the CWD (`executor.rs`) |
 | Anything else | Passed through unchanged, so it is looked up on `PATH` |
 
 Note the asymmetry with the process working directory: the process runs with the **workspace root**
-as its CWD (`crates/tool/src/impl/plugin/executor.rs:159`), while `./`-prefixed arguments resolve
+as its CWD (`crates/tool/src/impl/plugin/executor.rs`), while `./`-prefixed arguments resolve
 against the tool dir. A bare `./run.sh` in `args` therefore points at
 `<tool_dir>/run.sh` (for a project tool, `<workspace>/.xiaoo/tools/run.sh`). If `$HOME` is unset, a
 `~`-prefixed value is left unexpanded rather than failing.
@@ -160,12 +160,12 @@ When `stdin = "json"`, xiaoO writes:
 ```
 
 The process runs with the workspace root as its current directory
-(`crates/tool/src/impl/plugin/executor.rs:157-159`). The payload is built in
-`crates/tool/src/impl/plugin/executor.rs:44-63`; when `stdin = "none"` no payload is written.
+(`crates/tool/src/impl/plugin/executor.rs`). The payload is built in
+`crates/tool/src/impl/plugin/executor.rs`; when `stdin = "none"` no payload is written.
 
 ## Environment
 
-xiaoO always sets (`crates/tool/src/impl/plugin/executor.rs:160-169`):
+xiaoO always sets (`crates/tool/src/impl/plugin/executor.rs`):
 
 - `XIAOO_WORKSPACE_ROOT`
 - `XIAOO_TOOL_DIR`
@@ -176,9 +176,10 @@ xiaoO always sets (`crates/tool/src/impl/plugin/executor.rs:160-169`):
 Nothing else is inherited: the child is spawned with a cleared environment, and only
 `PATH`, `HOME`, `LANG`, `LC_ALL` and `TMPDIR` are put back so the program can start and run.
 
-`[exec] env` is **no longer forwarded**. The field is still accepted for compatibility, but
-entries are ignored (a warning is logged) — a manifest must not be able to name a host variable and
-read it back. The manifest lives in the agent-writable workspace, while the daemon injects every
+Environment variables declared in `[exec] env` are **never forwarded**. The field is accepted
+for compatibility only, and entries are ignored (a warning is logged) — a manifest must not be
+able to name a host variable and read it back. The manifest lives in the agent-writable
+workspace, while the daemon injects every
 plaintext provider credential into its own environment
 (`apps/shared/src/llm_secrets.rs`, `inject_llm_secrets_into_env`), so forwarding names such as
 `ANTHROPIC_API_KEY` would hand those credentials to a process the workspace controls. Treat the

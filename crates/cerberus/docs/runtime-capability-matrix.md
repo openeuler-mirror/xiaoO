@@ -62,7 +62,7 @@ Cerberus 的环境差异主要发生在 **Linux sandbox 层**，不是整个执�
 
 ## 二、运行维度：在什么环境上会怎样
 
-## 1. 非 Linux
+### 1. 非 Linux
 
 ### 能否运行
 
@@ -96,7 +96,7 @@ Cerberus 的环境差异主要发生在 **Linux sandbox 层**，不是整个执�
 
 ---
 
-## 2. Linux + Landlock 可用 + 请求的关键 namespace 可用
+### 2. Linux + Landlock 可用 + 请求的关键 namespace 可用
 
 这是 Cerberus 的主目标环境。
 
@@ -129,7 +129,7 @@ Cerberus 的环境差异主要发生在 **Linux sandbox 层**，不是整个执�
 
 ---
 
-## 3. Linux + Landlock 不可用 + `landlock_optional = false` + `mount_isolation_fallback = false`
+### 3. Linux + Landlock 不可用 + `landlock_optional = false` + `mount_isolation_fallback = false`
 
 ### 能否运行
 
@@ -159,7 +159,7 @@ Cerberus 的环境差异主要发生在 **Linux sandbox 层**，不是整个执�
 
 ---
 
-## 4. Linux + Landlock 不可用 + `landlock_optional = true` + `mount_isolation_fallback = true`
+### 4. Linux + Landlock 不可用 + `landlock_optional = true` + `mount_isolation_fallback = true`
 
 ### 能否运行
 
@@ -193,7 +193,7 @@ mount fallback 是 **可见性/只读性级别的降级保护**，不是 Landloc
 
 ---
 
-## 5. Linux + Landlock 不可用 + `landlock_optional = true` + `mount_isolation_fallback = false`
+### 5. Linux + Landlock 不可用 + `landlock_optional = true` + `mount_isolation_fallback = false`
 
 ### 能否运行
 
@@ -224,7 +224,7 @@ mount fallback 是 **可见性/只读性级别的降级保护**，不是 Landloc
 
 ---
 
-## 6. Linux + 缺失关键 namespace 能力
+### 6. Linux + 缺失关键 namespace 能力
 
 当前代码里，namespace 不是一刀切；有些缺失是 **critical**，有些只算 **degraded**。
 
@@ -262,7 +262,7 @@ mount fallback 是 **可见性/只读性级别的降级保护**，不是 Landloc
 
 ---
 
-## 7. Linux + 默认构建（无 `ebpf`）+ `network_policy.enabled = true`
+### 7. Linux + 默认构建（无 `ebpf`）+ `network_policy.enabled = true`
 
 ### 能否运行
 
@@ -296,7 +296,7 @@ mount fallback 是 **可见性/只读性级别的降级保护**，不是 Landloc
 
 ---
 
-## 8. Linux + `ebpf` 构建 + eBPF backend 初始化成功
+### 8. Linux + `ebpf` 构建 + eBPF backend 初始化成功
 
 ### 能否运行
 
@@ -329,7 +329,7 @@ mount fallback 是 **可见性/只读性级别的降级保护**，不是 Landloc
 
 ---
 
-## 9. Linux + `ebpf` 构建 + eBPF backend 初始化失败
+### 9. Linux + `ebpf` 构建 + eBPF backend 初始化失败
 
 ### 能否运行
 
@@ -354,28 +354,28 @@ mount fallback 是 **可见性/只读性级别的降级保护**，不是 Landloc
 
 ## 三、最重要的配置开关，到底影响什么
 
-## 1. `landlock_optional`
+### 1. `landlock_optional`
 
 - `false`：Landlock 缺失时更偏向 fail-closed
 - `true`：允许继续走降级路径
 
 它只影响 **Landlock 缺失时的处理**，不解决 namespace / eBPF 的硬缺失。
 
-## 2. `mount_isolation_fallback`
+### 2. `mount_isolation_fallback`
 
 - `true`：Landlock 缺失时，尝试 mount fallback
 - `false`：不尝试 mount fallback
 
 它只对 **Landlock -> mount** 的降级有意义。
 
-## 3. `namespaces.network`
+### 3. `namespaces.network`
 
 - `true`：允许联网
 - `false`：要求禁网隔离
 
 它和 `network_policy` 不同。前者是 namespace 级 allow/block，后者是 eBPF 级 monitor/enforce。
 
-## 4. `network_policy.enabled`
+### 4. `network_policy.enabled`
 
 - `false`：只存储 / 展示，不强制执行
 - `true`：必须满足 backend 条件，否则 fail-closed

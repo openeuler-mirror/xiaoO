@@ -35,7 +35,7 @@ Cerberus 的策略来源按以下优先级解析：
 - `cerberus exec` 在未显式指定 `--profile` 时，默认使用 `workspace-write-network-on-dev-env`
 - 对内置 profile（`workspace-write-network-on`、`workspace-write-network-off`、`workspace-write-network-on-dev-env`），CLI 会在 `exec` 和 `profile show` 时自动把当前工作目录追加为一条 `readwrite` 的 `custom_paths`
 - 这种自动注入只作用于内置 profile 的 CLI 体验，不会改写 `--policy-file` 指向的文件，也不会改写 `config/cerberus-policies/*.toml` 里的静态内容
-- 旧名字 `minimal`、`strict`、`llm-safe` 仍然可用，但文档与 `profile list` 默认展示新的显式名称
+- `minimal`、`strict`、`llm-safe` 是兼容别名，分别对应 `workspace-write-network-on`、`workspace-write-network-off`、`workspace-write-network-on-dev-env`；文档与 `profile list` 默认展示显式名称
 
 ---
 
@@ -87,7 +87,7 @@ permission = "readwrite"
 | `network_audit` | `bool` | `false` | 是否为本次执行采集网络连接事件。需启用 `ebpf` feature 且运行在 Linux 上；独立于 `network_policy`：配了策略则记录带裁决，否则为纯观测。事件随 `ExecResult.network_accesses` 返回 |
 | `path_groups` | table | 全部为 `false` | 预定义文件系统访问组 |
 | `custom_paths` | array<table> | 空数组 | 自定义文件系统路径规则 |
-| `namespaces` | table | 全部为 `true` | Linux namespace 隔离开关 |
+| `namespaces` | table | `mount`/`pid`/`user` 为 `true`，`network` 为 `false`（默认禁网） | Linux namespace 隔离开关 |
 | `resources` | table | `timeout_secs=30`、`max_memory_bytes=268435456`、`max_processes` 省略 | 资源限制 |
 | `environment` | table | 见下文 | 允许透传到子进程的环境变量白名单 |
 | `network_policy` | table | 不启用 | 细粒度网络规则对象。默认构建下会先做校验并在缺少 backend 时 fail-closed；启用 `ebpf` feature 时会接入真实监控/拦截路径 |
@@ -215,7 +215,7 @@ user = true
 
 ### `namespaces.network` 的公开语义
 
-这里的 `network` 现在就是字面意思，表示“是否允许网络访问”：
+这里的 `network` 表示“是否允许网络访问”：
 
 - `network = true`：允许联网
 - `network = false`：禁止联网
@@ -252,10 +252,8 @@ max_processes = 100
 
 ### 不限资源的写法
 
-当前实现已经修复 `0` 的歧义：
-
-- 最推荐的写法仍然是**省略字段**，例如省略 `max_processes`
-- 如果旧文件里写了 `0`，解析时会被规范化为“不限”，不会再把 `0` 直接当成运行时硬限制传给 `setrlimit`
+- 推荐写法是**省略字段**，例如省略 `max_processes`
+- 如果写了 `0`，解析时会被规范化为“不限”，不会把 `0` 当成运行时硬限制传给 `setrlimit`
 
 换句话说，`max_memory_bytes` 和 `max_processes` 要表达“不限”，优先用“省略字段”这个写法。
 
@@ -520,9 +518,9 @@ CERBERUS_FILE_ACCESS_AUDIT_PATH=/tmp/file_access.jsonl \
 
 ## 常见陷阱
 
-### 1. 继续按旧语义理解 `network`
+### 1. 误解 `network` 的语义
 
-错。当前公开语义已经改成“是否允许联网”。
+`namespaces.network` 的语义是“是否允许联网”：
 
 - `true` = 允许联网
 - `false` = 禁止联网
@@ -537,7 +535,7 @@ CERBERUS_FILE_ACCESS_AUDIT_PATH=/tmp/file_access.jsonl \
 
 ### 4. 把 `0` 写成资源“不限”
 
-当前实现下不安全。更稳妥的做法是直接省略该字段。
+解析时 `0` 会被规范化为“不限”，不会成为运行时硬限制，因此这样写是安全的。但为了避免歧义，推荐直接省略该字段来表达“不限”。
 
 ### 5. 把默认构建下的 fail-closed 门禁，误解成“`network_policy` 完全没实现”
 

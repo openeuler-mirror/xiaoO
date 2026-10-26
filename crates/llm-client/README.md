@@ -13,6 +13,7 @@ This crate provides a unified client interface for multiple LLM providers. It is
 - **Model Discovery**: `ModelCatalog` trait for listing available models
 - **Provider Abstraction**: OpenAI, DeepSeek, Anthropic, Gemini, Ollama, Zhipu, OpenRouter, and more
 - **Provider Capabilities**: Each provider declares its capabilities (streaming, tools, JSON mode, context window)
+- **Reasoning Support**: `ReasoningEffort` on requests, `StreamChunk.delta_reasoning` for streamed reasoning content, and per-provider `ReasoningDialect` translation
 
 ## Architecture
 
@@ -49,6 +50,7 @@ This crate provides a unified client interface for multiple LLM providers. It is
 ### Simple (LlmProviderConfig)
 
 ```rust
+use agent_llm::{ChatMessageExt, LlmRequestExt};
 use llm_client::{
     create_llm_provider, LlmProviderConfig, LlmRequest, ChatMessage,
 };
@@ -62,6 +64,12 @@ let request = LlmRequest::new(vec![ChatMessage::user("Hello!")]);
 let response = provider.complete(&request).await?;
 println!("{:?}", response.message.text);
 ```
+
+> **Note:** the constructors used across these examples — `LlmRequest::new`,
+> `ChatMessage::user` / `system` / `tool_result`, and the `with_tools` /
+> `with_tool_choice` / `with_response_format` builders — are extension-trait
+> methods (`LlmRequestExt`, `ChatMessageExt`) provided by the `agent-llm`
+> crate; `llm-client` does not re-export them.
 
 ### Advanced (Resolver)
 
@@ -99,6 +107,7 @@ let response = provider.complete_stream(&request, &|chunk| {
 ### Tool Calling
 
 ```rust
+use agent_llm::LlmRequestExt;
 use llm_client::{Tool, ToolChoice};
 
 let tools = vec![Tool {
@@ -120,10 +129,12 @@ let request = LlmRequest::new(messages)
 ### Structured Output
 
 ```rust
+use agent_llm::LlmRequestExt;
 use llm_client::ResponseFormat;
 
 let request = LlmRequest::new(messages)
     .with_response_format(ResponseFormat::JsonSchema {
+        name: "schema_name".into(),
         schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -138,19 +149,28 @@ let request = LlmRequest::new(messages)
 
 | Provider | Protocol | API Key Env | Models Endpoint |
 |----------|----------|-------------|-----------------|
-| OpenAI | OpenAI Compatible | `OPENAI_API_KEY` | `GET /v1/models` |
-| Anthropic | Anthropic | `ANTHROPIC_API_KEY` | `GET /v1/models` |
-| Gemini | Gemini | `GEMINI_API_KEY` | `GET /v1beta/models` |
-| Ollama | Ollama | (none) | `GET /api/tags` |
-| Zhipu | Zhipu | `ZHIPU_API_KEY` | `GET /models` |
-| OpenRouter | OpenAI Compatible | `OPENROUTER_API_KEY` | `GET /v1/models` |
-| DeepSeek | OpenAI Compatible | `DEEPSEEK_API_KEY` | `GET /models` |
-| Groq | OpenAI Compatible | `GROQ_API_KEY` | `GET /v1/models` |
-| Mistral | OpenAI Compatible | `MISTRAL_API_KEY` | `GET /v1/models` |
-| Together | OpenAI Compatible | `TOGETHER_API_KEY` | `GET /v1/models` |
-| xAI | OpenAI Compatible | `XAI_API_KEY` | `GET /v1/models` |
+| OpenAI | OpenAI Compatible | `OPENAI_API_KEY` | `/models` |
+| Anthropic | Anthropic | `ANTHROPIC_API_KEY` | `/models` |
+| Gemini | Gemini | `GEMINI_API_KEY` | `/v1beta/models` |
+| Ollama | Ollama | (none) | `/api/tags` |
+| Zhipu | Zhipu | `ZHIPU_API_KEY` | `/models` |
+| OpenRouter | OpenAI Compatible | `OPENROUTER_API_KEY` | `/models` |
+| DeepSeek | OpenAI Compatible | `DEEPSEEK_API_KEY` | `/models` |
+| Groq | OpenAI Compatible | `GROQ_API_KEY` | `/models` |
+| Mistral | OpenAI Compatible | `MISTRAL_API_KEY` | `/models` |
+| Together | OpenAI Compatible | `TOGETHER_API_KEY` | `/models` |
+| xAI | OpenAI Compatible | `XAI_API_KEY` | `/models` |
+| Kimi / Moonshot | OpenAI Compatible | `MOONSHOT_API_KEY` | `/models` |
+| Kimi Coding Plan | OpenAI Compatible | `KIMI_API_KEY` | `/models` |
 | MiniMax | OpenAI Compatible | `MINIMAX_API_KEY` | — |
+| MiniMax Coding Plan | OpenAI Compatible | `MINIMAX_API_KEY` | `/models` |
 | MiniMax (Anthropic) | Anthropic | `MINIMAX_API_KEY` | — |
+| GitCode | OpenAI Compatible | `GITCODE_API_KEY` | — |
+| Local | OpenAI Compatible | (none) | `/models` |
+| Z.AI Coding Plan | OpenAI Compatible | `ZHIPU_API_KEY` | `/models` |
+
+Models endpoints are relative to each provider's base URL; `—` means the
+provider declares no model catalog support.
 
 ## Core Types
 
@@ -164,6 +184,7 @@ pub struct LlmRequest {
     pub max_tokens: Option<usize>,
     pub temperature: Option<f64>,
     pub response_format: ResponseFormat,
+    pub reasoning_effort: ReasoningEffort,
 }
 ```
 
@@ -180,10 +201,12 @@ ChatMessage::tool_result("call_123", "get_weather", "72°F", false, 0);
 ```rust
 pub struct LlmResponse {
     pub message: AssistantMessage,
+    pub kv_cache_chunk_hashes: Vec<String>,
 }
 
 pub struct AssistantMessage {
     pub text: Option<String>,
+    pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolUseBlock>,
     pub usage: Usage,
     pub stop_reason: StopReason,

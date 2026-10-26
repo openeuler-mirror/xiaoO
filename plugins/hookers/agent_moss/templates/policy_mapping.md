@@ -12,7 +12,7 @@
 **推荐 policy 关键配置**：
 - network = false（禁止联网）
 - custom_paths 只开放 prompt 中提到的路径，permission = "readonly"
-- 不开放 device_files、proc_filesystem、network_config
+- 不开放 device_files、proc_filesystem
 - 资源限制适中（timeout_secs=60, max_memory_bytes=268435456, max_processes=20）
 - 环境变量最小集：["PATH", "LANG", "HOME", "TERM"]
 
@@ -40,7 +40,8 @@
 
 **推荐 policy 关键配置**：
 - network = true, user = false（network=true 时 user 必须为 false）
-- network_config = true（DNS 解析需要 /etc 只读访问）
+- DNS 解析等所需的 /etc 只读访问通过 [[custom_paths]] 显式开放（如 /etc/resolv.conf、/etc/hosts、/etc/ssl/certs，permission = "readonly"；[path_groups] 没有开放整个 /etc 的开关）
+- 出站网络管控可用 [network_policy] 细化（需 eBPF backend）
 - wsl_paths = true
 - custom_paths 开放工作目录，permission = "readwrite"
 - 资源限制与 llm-safe 对齐（timeout_secs=120, max_memory_bytes=536870912, max_processes=100）
@@ -57,7 +58,7 @@
 **推荐 policy 关键配置**：
 - pid = false（需要看到宿主进程信息）
 - proc_filesystem = true（ps 等命令依赖 /proc）
-- network_config = true（可能需要读取 /etc 配置）
+- 需要读取的 /etc 配置通过 [[custom_paths]] 显式开放，permission = "readonly"
 - custom_paths 对系统路径只给 readonly
 - network 视具体任务而定
 - 资源限制适中（timeout_secs=60, max_memory_bytes=268435456, max_processes=50）
@@ -74,13 +75,13 @@
 **推荐 policy 关键配置**：
 - network = false（禁止联网）
 - 最严格资源限制（timeout_secs=30, max_memory_bytes=134217728, max_processes=10）
-- 不开放 device_files、proc_filesystem、network_config
+- 不开放 device_files、proc_filesystem
 - 最小环境变量集：["PATH", "LANG", "TERM"]
 - landlock_optional = false, mount_isolation_fallback = false
 
 ## 关键注意事项
 
-1. network_config = true 会开放整个 /etc 只读（包含 /etc/passwd、/etc/shadow），仅在明确需要联网时开启
+1. 当前 Cerberus 没有「开放整个 /etc 只读」的 `path_groups` 开关（旧字段 `network_config` 已移除，含该字段的 TOML 会因 deny_unknown_fields 解析报错）。DNS 解析、/etc/hosts、TLS trust store 这类只读需求，应通过 `[[custom_paths]]` 显式列出真正需要的路径；网络访问管控用 `[network_policy]`
 2. network = true 时 user 必须设为 false
 3. custom_paths 路径要精确到具体目录，避免开放过大父目录
 4. permission 选择：只需读取→readonly，只需执行→readexecute，确需写入→readwrite

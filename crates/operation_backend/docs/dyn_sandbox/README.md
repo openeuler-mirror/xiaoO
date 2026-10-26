@@ -30,9 +30,15 @@ default_shell = "/bin/bash"
 
 [operation_backend.options.isolation]
 kind = "linux_dynsandbox"
+allow_network = true
+no_landlock = true
 readable_roots = ["/home/alice/project"]
 writable_roots = ["/home/alice/project/.xiaoo-tmp"]
 ```
+
+`allow_network` (default `true`) and `no_landlock` (default `true`) are parsed
+and recorded in logs, but are not yet translated into `dyn-sandbox` CLI
+arguments — the wire format for these options is pending.
 
 If `readable_roots` is omitted, the workspace root is readable. If
 `writable_roots` is omitted, the workspace root and `temp_root` are writable.
@@ -50,9 +56,18 @@ Read and write grants are added to the active mount list; a write grant also
 allows reads for the same root. A one-shot exec-runtime grant temporarily bypasses
 the `dyn-sandbox` wrapper for the retry, running the command directly on the host.
 
-For paths that only appear inside a Bash command and are not visible in the
-sandbox mount namespace, the command fails with the usual shell errors ("No such
-file or directory", "Read-only file system").
+Blocked operations surface through two channels:
+
+- Landlock-class denials use a streaming AUTH flow: the sandbox emits
+  `AUTH_REQ:filename:path` on stderr, the backend reads stderr line by line and
+  prompts the user via the attached interaction handle (Allow / Deny), then
+  writes `ALLOW\n` or `DENY\n` back to the sandbox's stdin control channel. When
+  no interaction handle is attached (e.g. the backend used standalone), the
+  request is denied automatically. The exec timeout pauses while the user
+  decides.
+- Mount-class denials are parsed from the failed command's stderr
+  (bubblewrap-style post-hoc parsing) and surfaced as a
+  `SandboxPolicyDenial`, so the host can request a permission grant and retry.
 
 ## Notes
 

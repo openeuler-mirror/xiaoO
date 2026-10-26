@@ -289,12 +289,11 @@ local backend 的 custom tools 行为保持不变。
 - E2B declarative custom tools 启用开关；
 - local backend 的 API 级 workspace/skills 覆盖。
 
-> <sup>†</sup> **验证状态：未在代码中核实。** 在 HEAD（`a58d79f`）上检索
-> `allowed_root` / `allowed_roots` 仅命中
-> `crates/tool/src/impl/plugin/catalog.rs:219`（插件目录白名单）与
-> `tests/unit/operation_backend/backends/local/policy_test.rs:140`
-> （local backend 沙箱策略），**均与 HTTP API 路径无关**。
-> 因此本条作为「未实现」的表述**尚无实现侧证据可直接引用**，标记为 unverified。
+> <sup>†</sup> **No path whitelist applies to HTTP API paths.** 代码库中
+> `allowed_roots` 仅出现在插件目录白名单
+> （`crates/tool/src/impl/plugin/catalog.rs`）与 local backend 沙箱策略测试
+> （`tests/unit/operation_backend/backends/local/policy_test.rs`），
+> 均与 HTTP API 的 workspace/skills 传入路径无关。
 
 ## 验证范围
 
@@ -333,7 +332,7 @@ workspace 测试中。
 | `crates/skill/src/loading/loader.rs` | 确定性 skill 扫描、解析、审计和去重 |
 | `crates/tool/src/impl/source_loader.rs` | E2B declarative custom tool source gating |
 
-以下模块承载 namespaced-`BackendPath` 相关工作（`97350f4`、`0d601e1`）：
+以下模块承载 namespaced-`BackendPath` 相关工作：
 
 | 模块 | 职责 |
 | --- | --- |
