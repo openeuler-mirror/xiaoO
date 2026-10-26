@@ -68,3 +68,19 @@ pub fn resolve_hook_point_category(
         }),
     }
 }
+
+/// Escape a free-form hook point segment (agent id, tool name) so embedding
+/// it in a dot-separated hook point id cannot break the 4-segment structure:
+/// `.` becomes `%2E` and `%` becomes `%25` (in that order, keeping the map
+/// injective). Inputs without dots or percent signs map to themselves, so
+/// already well-formed hook points keep their exact spelling and existing
+/// registrations stay valid. Without this, a tool name like `plugin.tool`
+/// yields a 5-segment point that no 4-segment pattern (e.g. `*.Tool.*.pre`)
+/// can ever match, silently excluding such tools from wildcard hookers.
+pub fn escape_hook_point_segment(segment: &str) -> String {
+    segment.replace('%', "%25").replace('.', "%2E")
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/hook/hookers/hook_point_category_test.rs"]
+mod tests;

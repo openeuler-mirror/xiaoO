@@ -104,6 +104,8 @@ The family is routed on the `action` segment, and the exact hook-point category 
 
 A hook point must have exactly **four** dot-separated segments. Anything else, or an empty `action`/`stage`, or an unlisted `(action, stage)` pair, is a hard config error at registry build time (`crates/hook/src/hookers/hook_point_category.rs`) — the daemon refuses to start rather than silently ignoring the hook.
 
+For Tool hooks the `detail` segment is the **tool name, percent-escaped**: `.` becomes `%2E` and `%` becomes `%25` (`hook::escape_hook_point_segment`, used by `crates/tool/src/framework/call/call_impl/hooks.rs`). Builtin and custom TOML tools have dot-free names, so their exact registrations read naturally (`*.Tool.file_read.pre`). A tool whose name contains dots — e.g. an MCP tool exposed as `mcp__srv__github.create_issue` — is addressed as `*.Tool.mcp__srv__github%2Ecreate_issue.pre`. Wildcards are unaffected: `*.Tool.*.pre` fires for every tool, dotted or not.
+
 Examples:
 
 - `tool_cli.Tool.file_read.pre`
