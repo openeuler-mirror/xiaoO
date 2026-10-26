@@ -8,17 +8,45 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # AgentMoss 版本（单一定义，多处使用）
-AM_VERSION="0.15.1"
+# 0.10.3 起 health 带 instance 字段，配合本脚本注入 AGENT_MOSS_INSTANCE=xiaoo
+# 实现多实例探测过滤（避免漂移到其他agent的agentmoss）。
+AM_VERSION="0.17.5"
 
 # 探测端口窗口与 instance 归属过滤的共享定义（含 AM_INSTANCE）。
 # 本脚本全部探测与 build.sh 的 console URL 探测共用 find_instance_port，
 # 归属过滤语义见 probe.sh，勿在此内联探测循环。
 source "${SCRIPT_DIR}/probe.sh"
 
-# venv 路径（systemd 与 nohup 两种模式统一用 /opt/agent_moss/venv）。
-# 如果 venv 已存在，优先使用已有的，避免重复创建
-VENV_DIR="/opt/agent_moss/venv"
-AM_BIN="$VENV_DIR/bin/agent-moss"
+# 鉴权 token 文件。AgentMoss 0.16.14 起默认开启鉴权（auto 生成 token）：
+# bridge.py 不带 Bearer 会 401，而 bridge 的失败分支是 fail-closed，
+# 等于所有工具调用都被拒。这里生成一份固定 token：
+#   - systemd 模式以 root 运行 AgentMoss，root 可读用户目录下的 0600 文件；
+#   - nohup 模式以当前用户运行，同属主自然可读。
+# bridge.py 的 _resolve_auth_token() 默认读同一路径。
+_AM_RUN_HOME="$HOME"
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    _AM_RUN_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    [ -n "$_AM_RUN_HOME" ] || _AM_RUN_HOME="$HOME"
+fi
+AM_AUTH_TOKEN_FILE="${_AM_RUN_HOME}/.config/agentmoss/xiaoo_token"
+mkdir -p "$(dirname "${AM_AUTH_TOKEN_FILE}")" 2>/dev/null || true
+if [ ! -s "${AM_AUTH_TOKEN_FILE}" ]; then
+    ( umask 077
+      if command -v python3 >/dev/null 2>&1; then
+          python3 -c 'import secrets; print(secrets.token_hex(32))' > "${AM_AUTH_TOKEN_FILE}"
+      else
+          od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "${AM_AUTH_TOKEN_FILE}"
+      fi )
+fi
+chmod 600 "${AM_AUTH_TOKEN_FILE}" 2>/dev/null || true
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    chown "$SUDO_USER" "${AM_AUTH_TOKEN_FILE}" 2>/dev/null || true
+fi
+
+# venv 路径与提权前缀在「安装方式」确定后按模式设置（见下方 USE_SYSTEMD 决策块之后）：
+#   方式 1（systemd）：/opt/agent_moss/venv + sudo
+#   方式 2（nohup）  ：~/.agent_moss/venv + 不提权
+# 可用环境变量 VENV_DIR 显式覆盖（自建路径的写权限由使用者自担）。
 
 # nohup 启动模式的日志文件：按实例命名，同机多 agentmoss 并存时
 # 后装的实例不覆盖先装实例的日志，排障指引才不会指向别人的输出。
@@ -67,6 +95,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "环境变量:"
             echo "  AM_ENABLE_LLM   设置 LLM 分析偏好（1=启用，0=禁用；未设置则不修改）"
+            echo "  VENV_DIR        自定义 venv 路径（默认：systemd 模式 /opt/agent_moss/venv，nohup 模式 ~/.agent_moss/venv）"
             exit 0
             ;;
         *)
@@ -112,6 +141,19 @@ if [ "$USE_SYSTEMD" = true ] && ! command -v systemctl &>/dev/null; then
     USE_SYSTEMD=false
 fi
 
+# ---- 按安装模式确定 venv 路径与提权前缀 ----
+# 方式 2（nohup）不写系统目录、无需 root：venv 放用户主目录，命令一律不加 sudo。
+if [ -z "${VENV_DIR:-}" ]; then
+    if [ "$USE_SYSTEMD" = true ]; then
+        VENV_DIR="/opt/agent_moss/venv"
+    else
+        VENV_DIR="$HOME/.agent_moss/venv"
+    fi
+fi
+AM_BIN="$VENV_DIR/bin/agent-moss"
+# 提权前缀：空值时 "$SUDO cmd" 等价直接执行 cmd（非 sudo 模式零提权）。
+if [ "$USE_SYSTEMD" = true ]; then SUDO="sudo"; else SUDO=""; fi
+
 # 步骤 1：创建 venv + 安装 agent-moss 包
 echo ""
 echo "步骤 1/5：创建 venv 并安装 agent-moss..."
@@ -126,7 +168,7 @@ if [ -d "$VENV_DIR" ] && [ -x "$VENV_DIR/bin/python3" ]; then
             VENV_VALID=true
         else
             echo "venv 中 agent-moss 版本为 ${INSTALLED_VER}，升级到 ${AM_VERSION}..."
-            if sudo "$VENV_DIR/bin/pip" install --upgrade agent-moss=="${AM_VERSION}" 2>&1; then
+            if $SUDO "$VENV_DIR/bin/pip" install --upgrade agent-moss=="${AM_VERSION}" 2>&1; then
                 VENV_VALID=true
             else
                 echo "⚠️ 升级失败，将重建 venv"
@@ -134,7 +176,7 @@ if [ -d "$VENV_DIR" ] && [ -x "$VENV_DIR/bin/python3" ]; then
         fi
     else
         echo "venv 中 agent-moss 模块导入失败，尝试重新安装..."
-        if sudo "$VENV_DIR/bin/pip" install --force-reinstall agent-moss=="${AM_VERSION}" 2>&1; then
+        if $SUDO "$VENV_DIR/bin/pip" install --force-reinstall agent-moss=="${AM_VERSION}" 2>&1; then
             echo "✅ 重新安装成功"
             VENV_VALID=true
         else
@@ -146,13 +188,13 @@ fi
 if [ "$VENV_VALID" = false ]; then
     if [ -d "$VENV_DIR" ]; then
         echo "删除旧的 venv 并重新创建..."
-        sudo rm -rf "$VENV_DIR"
+        $SUDO rm -rf "$VENV_DIR"
     fi
     echo "创建 venv 到 ${VENV_DIR}..."
-    sudo mkdir -p /opt/agent_moss
-    sudo python3 -m venv "$VENV_DIR"
+    $SUDO mkdir -p "$(dirname "$VENV_DIR")"
+    $SUDO python3 -m venv "$VENV_DIR"
     echo "安装 agent-moss==${AM_VERSION}（首次安装会下载依赖，可能需要几分钟）..."
-    sudo "$VENV_DIR/bin/pip" install agent-moss=="${AM_VERSION}" 2>&1 || {
+    $SUDO "$VENV_DIR/bin/pip" install agent-moss=="${AM_VERSION}" 2>&1 || {
         echo "❌ pip install 失败"
         exit 1
     }
@@ -196,7 +238,11 @@ if [ -n "$EXISTING_PORT" ]; then
             sudo systemctl stop agent-moss 2>/dev/null || true
             sudo systemctl disable agent-moss 2>/dev/null || true
         fi
-        # 杀掉所有 agent_moss 进程
+        # 杀掉 Python 版 agentmoss 进程。进程命令行实际形态是
+        # `<venv>/bin/agent-moss server ...`（entry point），旧版才是
+        # `agent_moss.cli` 模块路径——两种都杀，否则重装时旧服务不会被停
+        # （端口占用、新旧并存）。TS 版（OpenDesk）是 node 进程，不受影响。
+        pkill -f "bin/agent-moss server" 2>/dev/null || true
         pkill -f "agent_moss.cli" 2>/dev/null || true
         sleep 1
         echo "✅ 已停止现有服务"
@@ -213,15 +259,21 @@ echo "步骤 3/5：安装 systemd service..."
 # 多个 agentmoss 同机并存时，bridge 探测靠此字段过滤，避免漂移到别人的进程。
 # systemd 模式：service 的 EnvironmentFile=-/etc/agent_moss/agent_moss.env 读这个文件；
 # nohup 模式：下方 export 让进程继承。两种模式都覆盖。
-sudo mkdir -p /etc/agent_moss
-if [ -f /etc/agent_moss/agent_moss.env ]; then
-    # 已有 env 文件：删旧的同名行（避免重复），再追加
-    sudo sed -i '/^AGENT_MOSS_INSTANCE=/d' /etc/agent_moss/agent_moss.env
-    echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
-else
-    echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee /etc/agent_moss/agent_moss.env > /dev/null
+if [ "$USE_SYSTEMD" = true ]; then
+    sudo mkdir -p /etc/agent_moss
+    if [ -f /etc/agent_moss/agent_moss.env ]; then
+        # 已有 env 文件：删旧的同名行（避免重复），再追加
+        sudo sed -i '/^AGENT_MOSS_INSTANCE=/d' /etc/agent_moss/agent_moss.env
+        echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+        sudo sed -i '/^AGENT_MOSS_AUTH_TOKEN_FILE=/d' /etc/agent_moss/agent_moss.env
+        echo "AGENT_MOSS_AUTH_TOKEN_FILE=${AM_AUTH_TOKEN_FILE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+    else
+        echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee /etc/agent_moss/agent_moss.env > /dev/null
+        echo "AGENT_MOSS_AUTH_TOKEN_FILE=${AM_AUTH_TOKEN_FILE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+    fi
 fi
 export AGENT_MOSS_INSTANCE="${AM_INSTANCE}"
+export AGENT_MOSS_AUTH_TOKEN_FILE="${AM_AUTH_TOKEN_FILE}"
 if [ "$USE_SYSTEMD" = true ] && command -v systemctl &>/dev/null; then
     echo "正在安装 systemd service（${AM_BIN}）..."
     # 必须用 if 包裹：本脚本 set -e，裸执行失败会直接终止，走不到
@@ -337,12 +389,12 @@ if [ "$USE_SYSTEMD" = true ]; then
     echo "             sudo rm /etc/systemd/system/agent-moss.service"
     echo "             sudo systemctl daemon-reload"
 else
-    PROC_ID=$(pgrep -f "agent_moss.cli" 2>/dev/null | head -1 || true)
+    PROC_ID=$(pgrep -f "bin/agent-moss server" 2>/dev/null | head -1 || true)
     echo "  进程 PID:  ${PROC_ID:-?}（后台进程，退出 Shell 后服务停止）"
     echo "  启动：     ${AM_BIN} server --port 0"
     echo "  停止：     kill ${PROC_ID:-PID}"
     echo "  日志：     cat ${AM_LOG_FILE}"
     echo "  卸载：     rm -rf ${VENV_DIR}"
-    echo "             kill \$(pgrep -f agent_moss.cli)"
+    echo "             pkill -f 'bin/agent-moss server'"
 fi
 echo "═══════════════════════════════════════════════════════════════"

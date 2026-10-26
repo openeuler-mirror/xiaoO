@@ -68,6 +68,29 @@ _HEALTH_TIMEOUT = float(os.getenv("AGENT_MOSS_HEALTH_TIMEOUT", "2"))
 _LOG_PATH = os.getenv("AGENT_MOSS_LOG_PATH", "")
 _CHECK_SOURCE = os.getenv("AGENT_MOSS_CHECK_SOURCE", "") == "1"
 
+# AgentMoss 0.16.14 起默认开启鉴权（auto 生成 token）：不带 Bearer 会 401，
+# 而 bridge 的失败分支是 fail-closed，等于所有工具调用都被拒。
+# 解析顺序：显式 env > env 指定的文件 > 约定路径（install.sh 生成到
+# ~/.config/agentmoss/xiaoo_token，0600；systemd 以 root 运行也能读，
+# nohup 以当前用户运行同样可读）。
+def _resolve_auth_token() -> str:
+    tok = os.getenv("AGENT_MOSS_AUTH_TOKEN", "").strip()
+    if tok:
+        return tok
+    for candidate in (
+        os.getenv("AGENT_MOSS_AUTH_TOKEN_FILE", "").strip(),
+        str(Path.home() / ".config" / "agentmoss" / "xiaoo_token"),
+    ):
+        if not candidate:
+            continue
+        try:
+            val = Path(candidate).read_text(encoding="utf-8").strip()
+            if val:
+                return val
+        except OSError:
+            continue
+    return ""
+
 # 归属实例标识：bridge 只认自己起的 agentmoss（instance 字段 == _EXPECT_INSTANCE），
 # 避免漂移到同机其他 agent（如 OpenDesk）spawn 的 agentmoss——后者会用错 agent 规则判定 xiaoo 请求。
 # 值来自 env AGENT_MOSS_INSTANCE（install.sh 注入=xiaoo），默认 xiaoo。
@@ -382,10 +405,14 @@ def _handle_hook_payload(data: dict) -> int:
     # === Step 2: POST /api/v1/analyze ===
     # 用解析出的服务 URL（含探测兜底，跟 health 同一 URL）。
     url = f"{_resolve_service_url()}/api/v1/analyze"
+    _headers = {"Content-Type": "application/json"}
+    _token = _resolve_auth_token()
+    if _token:
+        _headers["Authorization"] = f"Bearer {_token}"
     req = urllib.request.Request(
         url,
         data=json.dumps(request_body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=_headers,
         method="POST",
     )
     try:
