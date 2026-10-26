@@ -14,7 +14,7 @@ use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::normalize_model_id;
-use crate::error::{map_reqwest_error, LlmError};
+use crate::error::{map_reqwest_error_raw as map_reqwest_error, LlmError};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
@@ -131,23 +131,32 @@ impl OpenRouterCatalog {
     }
 
     async fn fetch(&self) -> Result<CachedCatalog, LlmError> {
-        let response = self
-            .http
-            .get(&self.url)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            let mut redactor = crate::error::ErrorRedactor::new(&self.url, "");
+        let mut redactor = crate::error::ErrorRedactor::new(&self.url, "");
+        let result = async {
+            let request = self
+                .http
+                .get(&self.url)
+                .build()
+                .map_err(map_reqwest_error)?;
+            redactor.headers(request.headers());
+            let response = self
+                .http
+                .execute(request)
+                .await
+                .map_err(map_reqwest_error)?;
             redactor.headers(response.headers());
-            let body = response.text().await.unwrap_or_default();
-            return Err(redactor.error(LlmError::ApiError(format!(
-                "OpenRouter models request failed: HTTP {status}: {body}"
-            ))));
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(LlmError::ApiError(format!(
+                    "OpenRouter models request failed: HTTP {status}: {body}"
+                )));
+            }
+            let payload: serde_json::Value = response.json().await.map_err(map_reqwest_error)?;
+            parse_catalog_payload(&payload)
         }
-        let payload: serde_json::Value = response.json().await.map_err(map_reqwest_error)?;
-        parse_catalog_payload(&payload)
+        .await;
+        redactor.error_result(result)
     }
 
     fn persist_to_disk(&self, cached: &CachedCatalog) {

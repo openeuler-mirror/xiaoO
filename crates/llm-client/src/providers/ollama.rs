@@ -5,7 +5,9 @@ use futures::StreamExt;
 
 use super::openai_family::parse_openai_family_stream_line;
 use crate::convert::{chat_messages_to_wire, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
-use crate::error::{map_api_status_error, map_reqwest_error, map_serde_error, LlmError};
+use crate::error::{
+    map_api_status_error, map_reqwest_error_raw as map_reqwest_error, map_serde_error, LlmError,
+};
 use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::wire_types::{ParsedChunk, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -80,7 +82,6 @@ impl OllamaProvider {
 impl LlmProvider for OllamaProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/api/chat", self.base_url);
-        let started = std::time::Instant::now();
         let mut redactor = crate::error::ErrorRedactor::new(&url, "");
         let result = async {
             let body = self.build_ollama_body(request, false);
@@ -142,8 +143,8 @@ impl LlmProvider for OllamaProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        let url = format!("{}/api/chat", self.base_url);
         let started = std::time::Instant::now();
+        let url = format!("{}/api/chat", self.base_url);
         let mut redactor = crate::error::ErrorRedactor::new(&url, "");
         let result = async {
             let body = self.build_ollama_body(request, true);

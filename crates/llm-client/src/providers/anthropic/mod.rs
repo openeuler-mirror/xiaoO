@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use crate::convert::{parse_tool_arguments, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
-use crate::error::{map_api_status_error, map_reqwest_error, map_serde_error, LlmError};
+use crate::error::{
+    map_api_status_error, map_reqwest_error_raw as map_reqwest_error, map_serde_error, LlmError,
+};
 use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::wire_types::{ParsedChunk, WireToolCallDelta, WireToolCallFunctionDelta, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -247,7 +249,6 @@ fn anthropic_response_text(response: &serde_json::Value) -> Option<String> {
 impl LlmProvider for AnthropicProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/messages", self.base_url);
-        let started = std::time::Instant::now();
         let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
         let result = async {
             let body = self.build_body(request, false);
@@ -345,8 +346,8 @@ impl LlmProvider for AnthropicProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        let url = format!("{}/messages", self.base_url);
         let started = std::time::Instant::now();
+        let url = format!("{}/messages", self.base_url);
         let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
         let result = async {
             let body = self.build_body(request, true);

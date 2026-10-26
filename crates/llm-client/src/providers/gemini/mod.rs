@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use crate::convert::{parse_tool_arguments, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
-use crate::error::{map_api_status_error, map_reqwest_error, LlmError};
+use crate::error::{map_api_status_error, map_reqwest_error_raw as map_reqwest_error, LlmError};
 use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::wire_types::{ParsedChunk, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -58,7 +58,6 @@ impl LlmProvider for GeminiProvider {
             "{}/v1beta/{}:generateContent?key={}",
             self.base_url, model_name, self.api_key
         );
-        let started = std::time::Instant::now();
         let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
         let result = async {
             let body = build_gemini_request_body(request, &self.capabilities.model_name);
@@ -166,12 +165,12 @@ impl LlmProvider for GeminiProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
+        let started = std::time::Instant::now();
         let model_name = normalize_model_name(&self.capabilities.model_name);
         let url = format!(
             "{}/v1beta/{}:streamGenerateContent?alt=sse&key={}",
             self.base_url, model_name, self.api_key
         );
-        let started = std::time::Instant::now();
         let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
         let result = async {
             let body = build_gemini_request_body(request, &self.capabilities.model_name);

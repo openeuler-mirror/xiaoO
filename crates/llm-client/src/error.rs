@@ -3,141 +3,24 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use agent_types::common::error_log_path;
 pub use agent_types::LlmError;
 use chrono::Local;
 use regex::Regex;
 use reqwest::StatusCode;
 use serde_json::Value;
 
-/// Credentials are scoped to one request, including response authentication headers.
-#[derive(Default)]
-pub(crate) struct ErrorRedactor {
-    secrets: Vec<String>,
-}
-
-impl ErrorRedactor {
-    pub(crate) fn new(url: &str, api_key: &str) -> Self {
-        let mut redactor = Self::default();
-        redactor.add(api_key);
-        if let Ok(url) = reqwest::Url::parse(url) {
-            redactor.add_userinfo(url.username());
-            if let Some(password) = url.password() {
-                redactor.add_userinfo(password);
-            }
-            for (_, value) in url.query_pairs() {
-                redactor.add(&value);
-            }
-            // Preserve both wire-encoded and decoded credential spellings.
-            if let Some(query) = url.query() {
-                for pair in query.split('&') {
-                    if let Some((_, value)) = pair.split_once('=') {
-                        redactor.add(value);
-                    }
-                }
-            }
-        }
-        redactor
-    }
-
-    fn add(&mut self, value: &str) {
-        if value.is_empty() {
-            return;
-        }
-        if !self.secrets.iter().any(|secret| secret == value) {
-            self.secrets.push(value.to_string());
-        }
-        // SSE JSON error payloads can escape a known credential.
-        if let Ok(encoded) = serde_json::to_string(value) {
-            let escaped = &encoded[1..encoded.len() - 1];
-            if !self.secrets.iter().any(|secret| secret == escaped) {
-                self.secrets.push(escaped.to_string());
-            }
-        }
-    }
-
-    fn add_userinfo(&mut self, value: &str) {
-        self.add(value);
-        // Decode percent escapes without treating userinfo '+' as form whitespace.
-        let escaped = value
-            .replace('&', "%26")
-            .replace('#', "%23")
-            .replace('+', "%2B");
-        if let Ok(url) = reqwest::Url::parse(&format!("http://localhost/?v={escaped}")) {
-            if let Some((_, decoded)) = url.query_pairs().next() {
-                self.add(&decoded);
-            }
-        }
-    }
-
-    pub(crate) fn headers(&mut self, headers: &reqwest::header::HeaderMap) {
-        for (name, value) in headers {
-            if Self::is_auth_header(name.as_str()) {
-                if let Ok(value) = value.to_str() {
-                    self.add(value);
-                    if let Some(token) = value.strip_prefix("Bearer ") {
-                        self.add(token);
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) fn is_auth_header(name: &str) -> bool {
-        matches!(
-            name.to_ascii_lowercase().as_str(),
-            "x-api-key" | "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
-        )
-    }
-
-    pub(crate) fn text(&self, text: &str) -> String {
-        let mut output = String::new();
-        let mut rest = text;
-        while !rest.is_empty() {
-            let next = self
-                .secrets
-                .iter()
-                .filter_map(|secret| rest.find(secret).map(|pos| (pos, secret.len())))
-                .min_by_key(|&(pos, len)| (pos, std::cmp::Reverse(len)));
-            let Some((pos, len)) = next else {
-                output.push_str(rest);
-                break;
-            };
-            output.push_str(&rest[..pos]);
-            output.push_str("[REDACTED]");
-            rest = &rest[pos + len..];
-        }
-        output
-    }
-
-    pub(crate) fn error_result<T>(&self, result: Result<T, LlmError>) -> Result<T, LlmError> {
-        result.map_err(|error| self.error(error))
-    }
-
-    pub(crate) fn error(&self, mut error: LlmError) -> LlmError {
-        let message = match &mut error {
-            LlmError::RequestFailed { message }
-            | LlmError::HttpError(message)
-            | LlmError::ApiError(message)
-            | LlmError::ParseError(message)
-            | LlmError::RateLimited { message, .. }
-            | LlmError::AuthError { message }
-            | LlmError::ModelNotFound { model: message }
-            | LlmError::ProviderNotFound(message)
-            | LlmError::ConfigError(message)
-            | LlmError::ContextLengthExceeded { message }
-            | LlmError::StreamError { message }
-            | LlmError::IoError(message) => message,
-            LlmError::Timeout | LlmError::Cancelled => return error,
-        };
-        *message = self.text(message);
-        error
-    }
-}
+mod redaction;
+pub(crate) use redaction::ErrorRedactor;
 
 pub(crate) fn map_reqwest_error(err: reqwest::Error) -> LlmError {
     let redactor = ErrorRedactor::new(err.url().map(|url| url.as_str()).unwrap_or(""), "");
+    redactor.error(map_reqwest_error_raw(err))
+}
+
+pub(crate) fn map_reqwest_error_raw(err: reqwest::Error) -> LlmError {
     let cause_chain = render_error_chain(&err);
-    let error = if err.is_timeout() {
+    if err.is_timeout() {
         LlmError::HttpError(format!(
             "Request timeout: {} | cause chain: {}",
             err, cause_chain
@@ -156,16 +39,17 @@ pub(crate) fn map_reqwest_error(err: reqwest::Error) -> LlmError {
         }
     } else {
         LlmError::HttpError(format!("{} | cause chain: {}", err, cause_chain))
-    };
-    redactor.error(error)
+    }
 }
 
 /// Walk `std::error::Error::source()` chain and join each level's `Display`
-/// with ` -> `. reqwest's top-level `Display` is usually a generic
-/// "error sending request for url (...)", while the actual root cause
-/// (DNS, TCP, TLS handshake, proxy handshake) lives in the source chain.
-/// Without this, callers only see the generic top-level message and cannot
-/// tell TLS cert rejection from connection refused from DNS failure.
+/// with ` -> `. reqwest's top-level `Display` is usually a generic wrapper
+/// ("error sending request for url (...)" on send failures, "error decoding
+/// response body" on stream-read failures), while the actual root cause
+/// (DNS, TCP, TLS handshake, read timeout, truncated chunked body) lives
+/// in the source chain. Without this, callers only see the generic
+/// top-level message and cannot tell TLS cert rejection from connection
+/// refused from a mid-flight stream cut.
 fn render_error_chain(err: &dyn std::error::Error) -> String {
     let mut chain = Vec::new();
     let mut current: Option<&dyn std::error::Error> = Some(err);
@@ -386,10 +270,10 @@ pub(crate) fn write_redacted_stream_error_log(
     http_status: Option<u16>,
     redactor: &ErrorRedactor,
 ) {
-    let url = redactor.text(url);
-    let partial_response_buffer = redactor.text(partial_response_buffer);
-    let error_message = redactor.text(error_message);
-    let log_path = get_error_log_path();
+    let url = redactor.url(url);
+    let partial_response_buffer = redactor.diagnostic(partial_response_buffer);
+    let error_message = redactor.diagnostic(error_message);
+    let log_path = error_log_path();
 
     if let Some(parent) = log_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -398,7 +282,7 @@ pub(crate) fn write_redacted_stream_error_log(
         }
     }
 
-    match OpenOptions::new().create(true).append(true).open(&log_path) {
+    match open_error_log(&log_path) {
         Ok(mut file) => {
             let timestamp = Local::now().to_rfc3339();
 
@@ -433,7 +317,7 @@ pub(crate) fn write_redacted_stream_error_log(
                     let key_str = key.as_str();
                     if essential_keys.contains(&key_str) || debug_keys.contains(&key_str) {
                         let value_str = value.to_str().unwrap_or("<binary>");
-                        writeln!(file, "  {}: {}", key, redactor.text(value_str)).ok();
+                        writeln!(file, "  {}: {}", key, redactor.diagnostic(value_str)).ok();
                     }
                 }
             }
@@ -448,16 +332,6 @@ pub(crate) fn write_redacted_stream_error_log(
             writeln!(file).ok();
             writeln!(file, "{}", "=".repeat(60)).ok();
             writeln!(file).ok();
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(e) =
-                    std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600))
-                {
-                    tracing::warn!("Failed to set error.log permissions: {}", e);
-                }
-            }
         }
         Err(e) => {
             tracing::error!("Failed to write stream error log: {}", e);
@@ -465,14 +339,25 @@ pub(crate) fn write_redacted_stream_error_log(
     }
 }
 
-fn get_error_log_path() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".xiaoo").join("log").join("error.log"))
-        .unwrap_or_else(|| PathBuf::from(".xiaoo_error.log"))
+fn open_error_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 /// Structured details of a failed streaming LLM request, written to
-/// error.log by [`write_stream_error_log`] as one complete block.
+/// error.log by [`write_structured_stream_error_log`] as one complete block.
 ///
 /// reqwest's top-level `Display` for body-read failures is the generic
 /// "error decoding response body"; the actual root cause (read timeout,
@@ -482,15 +367,9 @@ fn get_error_log_path() -> PathBuf {
 /// bytes arrived, and why did it die" without re-reading provider source
 /// code after the fact.
 ///
-/// Sanitization: owned free-text fields are masked by
-/// [`redact_credentials`] at construction (in [`map_stream_read_error`]
-/// and [`map_protocol_mismatch`]). The borrowed SSE buffer cannot be
-/// masked there — masking returns an owned String — so
-/// [`write_stream_error_log`] masks it at the persistence boundary, where
-/// an error page or SSE error event echoing the credential-bearing
-/// request URL gets caught. With both boundaries covered, neither the log
-/// nor the caller-facing `LlmError` built from the report leaks
-/// query-string credentials (Gemini embeds its API key there).
+/// Free-text fields are sanitized with the request-scoped redactor before
+/// returning an error. Headers and the borrowed stream buffer are sanitized
+/// when the report is persisted.
 struct StreamErrorReport<'a> {
     url: String,
     http_status: u16,
@@ -538,11 +417,11 @@ pub(crate) fn map_stream_read_error(
     unconsumed_line_buffer: &str,
 ) -> LlmError {
     let report = StreamErrorReport {
-        url: redactor.text(&redact_credentials(url)),
+        url: redactor.url(url),
         http_status,
         response_headers,
-        error_message: redactor.text(&redact_credentials(&error.to_string())),
-        cause_chain: redactor.text(&redact_credentials(&render_error_chain(error))),
+        error_message: redactor.diagnostic(&error.to_string()).into_owned(),
+        cause_chain: redactor.diagnostic(&render_error_chain(error)).into_owned(),
         timed_out: error.is_timeout(),
         elapsed_ms: started.elapsed().as_millis() as u64,
         bytes_received,
@@ -586,10 +465,10 @@ pub(crate) fn map_protocol_mismatch(
     body: &str,
 ) -> LlmError {
     let report = StreamErrorReport {
-        url: redactor.text(&redact_credentials(url)),
+        url: redactor.url(url),
         http_status,
         response_headers,
-        error_message: redactor.text(&redact_credentials(&error_message)),
+        error_message: redactor.diagnostic(&error_message).into_owned(),
         cause_chain: String::new(),
         timed_out: false,
         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -622,7 +501,7 @@ fn write_structured_stream_error_log(
         }
     }
 
-    let mut file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+    let mut file = match open_error_log(&log_path) {
         Ok(file) => file,
         Err(e) => {
             tracing::error!("Failed to write stream error log: {}", e);
@@ -678,7 +557,7 @@ fn write_structured_stream_error_log(
         let key_str = key.as_str();
         if essential_keys.contains(&key_str) || debug_keys.contains(&key_str) {
             let value_str = value.to_str().unwrap_or("<binary>");
-            line!("  {}: {}", key, redactor.text(value_str));
+            line!("  {}: {}", key, redactor.diagnostic(value_str));
         }
     }
 
@@ -689,24 +568,12 @@ fn write_structured_stream_error_log(
     // note).
     line!("Unconsumed bytes: {}", report.unconsumed_line_buffer.len());
     if !report.unconsumed_line_buffer.is_empty() {
-        line!(
-            "{}",
-            redactor.text(&redact_credentials(report.unconsumed_line_buffer))
-        );
+        line!("{}", redactor.diagnostic(report.unconsumed_line_buffer));
     }
 
     line!();
     line!("{}", "=".repeat(60));
     line!();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600))
-        {
-            tracing::warn!("Failed to set error.log permissions: {}", e);
-        }
-    }
 
     if let Some(e) = first_write_error {
         tracing::error!("Failed to write stream error log: {}", e);

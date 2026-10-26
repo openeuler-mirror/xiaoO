@@ -273,7 +273,7 @@ pub fn should_try_next_candidate(error: &LlmError) -> bool {
 /// producing a duplicate `source=url_fallback` entry next to the
 /// `source=remote_input` one.
 ///
-/// Each attempt URL passes through [`crate::error::redact_credentials`]:
+/// Each attempt URL passes through the request-scoped URL display policy:
 /// users can put credentials in a configured base_url's query string
 /// (single endpoint configured as a full `...?api-key=...` URL), and this
 /// summary is the one place those URLs reach callers and the shared log.
@@ -283,7 +283,7 @@ pub fn build_url_fallback_error_message(attempts: &[UrlAttemptRecord]) -> String
         error_message.push_str(&format!(
             "  #{}: {} → {}\n",
             attempt.index + 1,
-            crate::error::redact_credentials(&attempt.url),
+            crate::error::ErrorRedactor::new(&attempt.url, "").url(&attempt.url),
             attempt.error
         ));
     }

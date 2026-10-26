@@ -17,6 +17,12 @@ const SECRETS: &[&str] = &[
     "SENTINEL-USERINFO",
     "SENTINEL-BODY",
     "SENTINEL-ECHO-HEADER",
+    "SENTINEL-XAPI",
+    "SENTINEL-AUTH",
+    "SENTINEL-PROXY",
+    "SENTINEL-COOKIE",
+    "SENTINEL-SETCOOKIE",
+    "SENTINEL-TOKEN",
 ];
 
 struct Home {
@@ -82,7 +88,7 @@ impl Home {
             assert!(log.contains("source=llm_stream_error"));
             assert!(log.contains(&format!("KEEP-CASE-{}", self.name)));
             assert!(log.contains("HTTP Status: 200"));
-            assert!(log.contains("[Response Body]"));
+            assert!(log.contains("[Response Body]") || log.contains("[Stream Buffer]"));
             assert!(log.contains("KEEP-BODY"));
             let timestamp = log
                 .lines()
@@ -118,6 +124,7 @@ impl Drop for Home {
 struct Endpoint {
     url: String,
     paths: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -134,6 +141,8 @@ impl Endpoint {
         let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
         let paths = Arc::new(Mutex::new(vec![]));
+        let requests = Arc::new(Mutex::new(vec![]));
+        let received = requests.clone();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen = paths.clone();
         let done = stop.clone();
@@ -183,6 +192,10 @@ impl Endpoint {
                     }
                     request.extend_from_slice(&buf[..n]);
                 }
+                received
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).into_owned());
                 seen.lock().unwrap().push(path.clone());
                 let code = if fallback && path != "/v1/chat/completions" {
                     404
@@ -198,6 +211,7 @@ impl Endpoint {
         Self {
             url: format!("http://{addr}"),
             paths,
+            requests,
             stop,
             worker: Some(worker),
         }
@@ -247,15 +261,24 @@ async fn interrupted(kind: &str, name: &str, userinfo: bool, echo_headers: bool)
     } else {
         "SENTINEL-KEY"
     };
-    let body = format!("KEEP-CASE-{name} KEEP-BODY echo key={echo}");
+    let body = format!(
+        "KEEP-CASE-{name} KEEP-BODY echo key={echo} {}",
+        if echo_headers {
+            "SENTINEL-XAPI SENTINEL-SETCOOKIE"
+        } else {
+            ""
+        }
+    );
     let extra = if echo_headers {
-        "x-api-key: SENTINEL-ECHO-HEADER\r\nset-cookie: SENTINEL-ECHO-HEADER\r\n"
+        "x-api-key: SENTINEL-XAPI\r\nset-cookie: SENTINEL-SETCOOKIE\r\n"
     } else {
         ""
     };
     let server = Endpoint::new(200, "text/event-stream", body, true, extra, false);
     let base = if userinfo {
-        server.url.replace("http://", "http://SENTINEL-USERINFO@")
+        server
+            .url
+            .replace("http://", "http://user:SENTINEL-USERINFO@")
     } else {
         server.url.clone()
     };
@@ -273,6 +296,10 @@ async fn interrupted(kind: &str, name: &str, userinfo: bool, echo_headers: bool)
     assert_eq!(logged_url.host_str(), endpoint.host_str());
     assert_eq!(logged_url.port(), endpoint.port());
     assert!(log.contains("Error: error decoding response body"));
+    assert!(log.contains("Cause Chain:"));
+    assert!(log.contains("Elapsed:"));
+    assert!(log.contains("Bytes Received:"));
+    assert!(log.contains("Timed Out:"));
     let endpoint_path = match kind {
         "anthropic" => "/messages",
         "gemini" => "/v1beta/models/m:streamGenerateContent",
@@ -324,14 +351,8 @@ async fn diagnostic_headers_and_body() {
     let _lock = HOME_LOCK.lock().await;
     let home = Home::new("diagnostic_headers_and_body");
     let mut headers = reqwest::header::HeaderMap::new();
-    for name in [
-        "x-api-key",
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "set-cookie",
-    ] {
-        headers.insert(name, "SENTINEL-ECHO-HEADER".parse().unwrap());
+    for (name, value) in authentication_headers() {
+        headers.insert(name, value.parse().unwrap());
     }
     for (name, value) in [
         ("content-type", "text/event-stream"),
@@ -345,7 +366,7 @@ async fn diagnostic_headers_and_body() {
     ] {
         headers.insert(name, value.parse().unwrap());
     }
-    write_stream_error_log("http://SENTINEL-USERINFO@127.0.0.1:9/v1beta/m:streamGenerateContent?alt=sse&key=SENTINEL-KEY&token=SENTINEL-BODY", Some(&headers), "KEEP-CASE-diagnostic_headers_and_body KEEP-BODY SENTINEL-BODY SENTINEL-ECHO-HEADER", "stream error SENTINEL-KEY", Some(200));
+    write_stream_error_log("http://user:SENTINEL-USERINFO@127.0.0.1:9/v1beta/m:streamGenerateContent?alt=sse&key=SENTINEL-KEY&token=SENTINEL-BODY", Some(&headers), "KEEP-CASE-diagnostic_headers_and_body KEEP-BODY SENTINEL-BODY SENTINEL-XAPI SENTINEL-AUTH SENTINEL-PROXY SENTINEL-COOKIE SENTINEL-SETCOOKIE", "stream error SENTINEL-KEY SENTINEL-XAPI SENTINEL-AUTH SENTINEL-PROXY SENTINEL-COOKIE SENTINEL-SETCOOKIE", Some(200));
     let log = home.record("unit logger returned ()", true);
     for value in [
         "x-ratelimit-limit: KEEP-RATELIMIT",
@@ -392,7 +413,7 @@ async fn response_error(
     let log = home.record(&full_error(&error), log_required);
     if log_required {
         assert!(log.contains("unexpected content type"));
-        assert!(log.contains("Length:"));
+        assert!(log.contains("Length:") || log.contains("Unconsumed bytes:"));
     }
     error
 }
@@ -426,6 +447,9 @@ async fn connection_refused_credentials() {
         assert!(matches!(error, LlmError::HttpError(_)));
         assert!(error.to_string().contains("Connection failed"));
         assert!(error.to_string().contains(&addr.to_string()));
+        assert!(error.to_string().contains("cause chain:"));
+        assert!(error.to_string().contains(" -> "));
+        assert!(error.to_string().contains("Connection refused"));
     }
     home.record(&results, false);
 }
@@ -507,7 +531,9 @@ async fn fallback_url_credentials() {
     let server = Endpoint::new(404, "application/json", "missing".into(), false, "", false);
     let base = format!(
         "{}/v1",
-        server.url.replace("http://", "http://SENTINEL-USERINFO@")
+        server
+            .url
+            .replace("http://", "http://user:SENTINEL-USERINFO@")
     );
     let expected = crate::url_fallback::build_final_candidates(
         &crate::url_fallback::build_base_url_candidates(&base),
@@ -557,7 +583,9 @@ async fn short_real_reqwest_timeout() {
         .build()
         .unwrap();
     let error = client
-        .get(format!("http://SENTINEL-USERINFO@{addr}/?key=SENTINEL-KEY"))
+        .get(format!(
+            "http://user:SENTINEL-USERINFO@{addr}/?key=SENTINEL-KEY"
+        ))
         .send()
         .await
         .unwrap_err();
@@ -577,7 +605,7 @@ async fn provider_connection_timeout() {
     let addr = listener.local_addr().unwrap();
     let p = provider(
         "openai",
-        format!("https://SENTINEL-USERINFO@{addr}/chat/completions"),
+        format!("https://user:SENTINEL-USERINFO@{addr}/chat/completions"),
     );
     let start = Instant::now();
     let error = call(p.as_ref(), true).await.unwrap_err();
@@ -719,23 +747,23 @@ async fn encoded_url_credentials() {
     let _lock = HOME_LOCK.lock().await;
     let home = Home::new("encoded_url_credentials");
     write_stream_error_log(
-        "http://SENTINEL%2DUSERINFO:KNOWN+PASS@127.0.0.1:9/path?key=SENTINEL%2DKEY&token=LONGTOKEN&other=LONG",
+        "http://api:SENTINEL%2dUSERINFO@api.example/path?ApI_Key=SENTINEL%2dKEY&ToKeN=LONGTOKEN&other=LONG&alt=sse",
         None,
-        "KEEP-CASE-encoded_url_credentials KEEP-BODY SENTINEL-USERINFO SENTINEL-KEY KNOWN+PASS LONGTOKEN LONG",
-        "encoded SENTINEL%2DKEY SENTINEL%2DUSERINFO",
+        "KEEP-CASE-encoded_url_credentials KEEP-BODY api passed classes sse LONG SENTINEL-USERINFO SENTINEL-KEY LONGTOKEN",
+        r"encoded SENTINEL%2DKEY SENTINEL\u002dUSERINFO",
         Some(200),
     );
     let log = home.record("unit logger returned ()", true);
+    assert!(log.contains("URL: http://api.example/path?ApI_Key=[REDACTED]&ToKeN=[REDACTED]&other=[REDACTED]&alt=[REDACTED]"));
+    assert!(log.contains("KEEP-BODY api passed classes sse LONG "));
     for secret in [
+        "SENTINEL%2dKEY",
         "SENTINEL%2DKEY",
-        "SENTINEL%2DUSERINFO",
-        "KNOWN+PASS",
+        r"SENTINEL\u002dUSERINFO",
         "LONGTOKEN",
-        "LONG",
     ] {
         assert!(!log.contains(secret));
     }
-    assert!(log.contains("/path"));
 }
 
 async fn catalog_credentials(kind: &str) {
@@ -758,7 +786,9 @@ async fn catalog_credentials(kind: &str) {
         "x-api-key: SENTINEL-ECHO-HEADER\r\n",
         false,
     );
-    let base = server.url.replace("http://", "http://SENTINEL-USERINFO@");
+    let base = server
+        .url
+        .replace("http://", "http://user:SENTINEL-USERINFO@");
     let key = "SENTINEL-KEY".to_string();
     let catalog: Box<dyn ModelCatalog> = match kind {
         "gemini" => Box::new(GeminiModelCatalog::new(key, base)),
@@ -800,9 +830,24 @@ async fn ollama_model_details_credentials() {
         false,
     );
     let catalog = crate::models::OllamaModelCatalog::new(
-        server.url.replace("http://", "http://SENTINEL-USERINFO@"),
+        server
+            .url
+            .replace("http://", "http://user:SENTINEL-USERINFO@"),
     );
     let error = catalog.get_context_length("m").await.unwrap_err();
     home.record(&full_error(&error), false);
     assert!(matches!(error, LlmError::ApiError(_)));
+}
+
+#[path = "error_boundary_test.rs"]
+mod boundaries;
+
+fn authentication_headers() -> [(&'static str, &'static str); 5] {
+    [
+        ("x-api-key", "SENTINEL-XAPI"),
+        ("authorization", "SENTINEL-AUTH"),
+        ("proxy-authorization", "SENTINEL-PROXY"),
+        ("cookie", "SENTINEL-COOKIE"),
+        ("set-cookie", "SENTINEL-SETCOOKIE"),
+    ]
 }
