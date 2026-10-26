@@ -12,19 +12,19 @@ runtime tools can use the backend's operation plane.
 ## Goals
 
 - Make backend lifecycle management provider-neutral.
-- Move provider-specific actions such as Conch/E2B sandbox create and delete
+- Move provider-specific actions such as E2B sandbox create and delete
   behind a shared backend lifecycle contract.
 - Keep lifecycle control separate from active operation execution.
 - Provide enough state, identity, capability, and error information for session
   resume, pause, cleanup, and diagnostics.
-- Allow local, Conch, Docker, SSH, Kubernetes, Firecracker, or future providers
+- Allow local, E2B, Docker, SSH, Kubernetes, Firecracker, or future providers
   to implement the same control surface.
 
 ## Non-Goals
 
 - This document does not replace the existing `OperationBackend` execution
   contract.
-- This document does not require an immediate Rust implementation.
+- Not every provider must implement the control plane immediately.
 - This document does not require all providers to support snapshots, but it
   does require them to report whether they support pause/load semantics.
 - This document does not prescribe a storage backend for persisted lifecycle
@@ -83,14 +83,14 @@ truth after process crashes, network failures, or partial lifecycle operations.
 
 The low-level `agent-contracts` lifecycle trait still exposes the historical
 method name `create_sandbox`. At the manager-facing layer, the current xiaoO API
-uses backend names such as `create_backend`, `checkpoint_backend`,
-`checkout_backend`, `delete_backend`, `BackendInfo`, and
+uses backend names such as `build_backend`, `checkpoint_backend`,
+`checkout_backend`, `delete_backend_instance`, `BackendInfo`, and
 `BackendCheckpointRef`.
 
 Treat `create_sandbox` here as a provider-lifecycle boundary name, not as the
 runtime control-plane vocabulary. Provider adapters may also use sandbox
 terminology internally when the provider API itself is sandbox-shaped, such as
-E2B snapshots or Conch sandbox handles. That provider-native vocabulary should
+E2B snapshots. That provider-native vocabulary should
 not leak into runtime checkpoint request/response shapes.
 
 ## Lifecycle State
@@ -150,8 +150,8 @@ pub struct BackendSnapshotId(pub String);
 | Field | Meaning | Stability |
 | --- | --- | --- |
 | `backend_id` | Stable manager-facing id for one backend instance record | Stable for the record |
-| `provider` | Provider kind, e.g. `local`, `conch`, `docker` | Stable |
-| `instance_id` | Provider-native live instance id, e.g. Conch sandbox id | May change after load |
+| `provider` | Provider kind, e.g. `local`, `e2b`, `docker` | Stable |
+| `instance_id` | Provider-native live instance id, e.g. E2B sandbox id | May change after load |
 | `snapshot_id` | Provider-native paused/snapshot id | Stable for a snapshot |
 | `session_id` | xiaoO session that owns the backend | Stable for session-scoped backends |
 
@@ -278,6 +278,7 @@ pub struct BackendResourceAllocation {
 
 ```rust
 pub struct BackendCreateRequest {
+    pub requested_backend_id: Option<BackendId>,
     pub session_id: String,
     pub conversation_id: Option<String>,
     pub workspace_root: BackendPath,
@@ -287,8 +288,8 @@ pub struct BackendCreateRequest {
 }
 ```
 
-Creates a new backend instance. Providers may allocate a new instance id or
-respect a requested id in `provider_options` if supported.
+Creates a new backend instance. `requested_backend_id` optionally specifies the
+desired backend id; when omitted, the provider generates one.
 
 ### BackendLoadRequest
 
@@ -396,11 +397,19 @@ pub struct BackendDeleteOutcome {
 ## Error Model
 
 ```rust
+pub enum BackendLifecycleOperation {
+    CreateSandbox,
+    Load,
+    Pause,
+    Delete,
+    Inspect,
+}
+
 pub enum BackendControlError {
     InvalidRequest { message: String },
     InvalidState {
-        current: BackendLifecycleState,
-        requested_operation: String,
+        current: Option<BackendLifecycleState>,
+        requested_operation: BackendLifecycleOperation,
         message: String,
     },
     UnsupportedCapability {
@@ -416,7 +425,7 @@ pub enum BackendControlError {
         message: String,
     },
     Timeout {
-        operation: String,
+        operation: BackendLifecycleOperation,
         timeout_ms: u64,
     },
     Transport {
@@ -424,6 +433,10 @@ pub enum BackendControlError {
     },
 }
 ```
+
+`current` is `None` when the manager has no recorded state for the target.
+`requested_operation` and `operation` are typed lifecycle operations, not
+strings.
 
 Errors should preserve provider-native details in `message` or `metadata`, but
 callers should make control-flow decisions using the structured variant.
@@ -487,24 +500,9 @@ pub struct BackendManagerRecord {
 | Provider | `create_sandbox` | `load` | `pause` | `delete` | `inspect` |
 | --- | --- | --- | --- | --- | --- |
 | `local` | Return an active local instance record | Return active local instance if workspace is valid | Return `UnsupportedCapability` | No-op successful delete | Check workspace path and report active/failed |
-| `conch` | Call `/api/sandbox/create`, then health check agent | Restore from `snapshot_id`, `sandbox_id`, or serialized handle | Create snapshot/freeze sandbox when supported | Call `/api/sandbox/delete` | Query sandbox status from Conch control plane |
 | `e2b` | Create or connect an E2B sandbox-backed backend | Checkout from a provider snapshot id where supported | Create provider snapshot via the E2B snapshot API | Delete provider sandbox resources where supported | Query provider status where supported |
 | `docker` future | Create container | Start container or restore named container | Stop or commit container | Remove container | Inspect container |
 | `ssh` future | Establish session record | Reattach to host/session | Usually unsupported | No-op or close session lease | Probe host/session |
-
-## Conch Contract Mapping
-
-Current Conch-specific code should map into the unified lifecycle contract as
-follows.
-
-| Current Conch behavior | Unified contract |
-| --- | --- |
-| `control::create_sandbox` | `BackendLifecycle::create_sandbox` |
-| `agent::health_check` after create | Provider-side create validation before returning `Active` |
-| `control::delete_sandbox` | `BackendLifecycle::delete` |
-| `ConchSandboxHandle { sandbox_id, ip, agent_port }` | `BackendInstance { instance_id, endpoint: Tcp { host: ip, port: agent_port } }` |
-| `ConchOperationBackend::shutdown` | Manager-initiated `delete` or provider cleanup fallback |
-| `snapshot_id` option | `BackendLoadSource::SnapshotId` or returned `BackendSnapshot` |
 
 ## Operation Plane Attachment
 
@@ -527,30 +525,18 @@ pub trait BackendProvider: Send + Sync {
 
 Attachment must fail unless the instance state is `Active`.
 
-## Implementation Checklist
+## Implementation Status
 
-| Item | Detail | Required |
-| --- | --- | --- |
-| Lifecycle trait | `BackendLifecycle` with `create_sandbox`, `load`, `pause`, `delete`, `inspect` | Yes |
-| Provider trait | `BackendProvider` with lifecycle and attach | Yes |
-| State enum | `BackendLifecycleState` | Yes |
-| Identity types | `BackendId`, `BackendProviderKind`, `BackendInstanceId`, `BackendSnapshotId` | Yes |
-| Instance model | `BackendInstance` | Yes |
-| Status model | `BackendInstanceStatus` | Yes |
-| Snapshot model | `BackendSnapshot`, `BackendSnapshotRef` | Yes |
-| Endpoint model | `BackendEndpoint` | Yes |
-| Runtime capabilities | `BackendRuntimeCapabilities` | Yes |
-| Resource limits | `BackendResourceLimits`, `BackendResourceAllocation` | Yes |
-| Create request | `BackendCreateRequest` | Yes |
-| Load request | `BackendLoadRequest`, `BackendLoadSource` | Yes |
-| Pause request | `BackendPauseRequest`, `BackendPauseMode` | Yes |
-| Delete request | `BackendDeleteRequest`, `BackendDeleteOutcome` | Yes |
-| Inspect request | `BackendInspectRequest` | Yes |
-| Error model | `BackendControlError` | Yes |
-| Manager record | `BackendManagerRecord` | Yes |
-| Policy table | Defines when manager calls create/load/pause/delete | Yes |
-| Conch mapping | Maps existing Conch control calls to unified lifecycle | Yes |
-| Local mapping | Defines local lifecycle semantics | Yes |
+All contract types in this document are implemented in
+`crates/agent-contracts/src/backend/lifecycle.rs`: the `BackendLifecycle` and
+`BackendProvider` traits, the `BackendLifecycleState` and
+`BackendLifecycleOperation` enums, the `BackendLifecycleStateMachine`, the
+request/response/record types (`BackendCreateRequest`, `BackendLoadRequest`,
+`BackendPauseRequest`, `BackendDeleteRequest`, `BackendInspectRequest`,
+`BackendInstance`, `BackendInstanceStatus`, `BackendSnapshot`,
+`BackendSnapshotRef`, `BackendManagerRecord`), and the `BackendControlError`
+error model. The manager-side runtime lives in `apps/shared/src/backend`,
+with `local` and `e2b` providers.
 
 ## Open Decisions
 
@@ -559,7 +545,6 @@ These are intentionally left for implementation planning.
 | Decision | Options |
 | --- | --- |
 | Method name | Keep `create_sandbox` at the low-level provider lifecycle boundary, or rename it to provider-neutral `create` in a later code cleanup |
-| Local pause | Fixed as `UnsupportedCapability` |
 | Snapshot storage | Provider-owned, manager-owned metadata, or mixed |
 | Manager persistence | In-memory only, session store extension, or dedicated backend store |
 | Delete idempotency window | Provider-specific or manager-enforced |

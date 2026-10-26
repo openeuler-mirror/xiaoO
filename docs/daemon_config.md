@@ -19,12 +19,9 @@ xiaoo-daemon config validate --config ~/.config/xiaoo/config.toml
 ```
 
 校验覆盖所有已启用的 LLM Profile，并检查 Provider、模型、API Base、API Key
-引用、数值范围和配置跨字段约束。命令始终向标准输出打印结构化 JSON；配置无效时
-`valid` 为 `false`，`errors` 包含字段路径和稳定错误码，同时进程返回非零状态。
-
-The command writes a JSON result to stdout. Invalid configurations return
-`valid: false`, the resolved configuration path, and an error list, then exit
-with a non-zero status.
+引用、数值范围和配置跨字段约束。命令始终向标准输出打印结构化 JSON（包含
+`valid`、解析出的配置文件路径与 `errors` 列表）；配置无效时 `valid` 为
+`false`，`errors` 包含字段路径和稳定错误码，同时进程返回非零状态。
 
 The versioned visual-configuration schema is available without loading a
 configuration file:
@@ -77,13 +74,20 @@ whether a key is required, and model-catalog support.
 | `--no-dashboard` | Do not start the dashboard server at all | off |
 | `--ready-stdio` | Print a readiness marker on stdout once listeners are bound | off |
 | `--bearer-token-env <NAME>` | Environment-variable name holding the runtime-API bearer token | — |
+
+The flags below are consumed only by the `config` subcommands; the daemon
+server itself ignores them (`DaemonRunOptions` in
+`apps/serverside/src/main.rs` holds only the flags above):
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
 | `--profile <ID>` | Select the `[llm.profiles.<ID>]` profile to activate | — |
 | `--agent <ID>` | Select the `[[agents.list]]` agent id | — |
 | `--hooker <ID>` | Select the hooker policy set | — |
 | `--server <NAME>` | Select the server/backend namespace | — |
 | `--workspace <PATH>` | Workspace root for the daemon | — |
 | `--manifest <PATH>` | Custom-tool manifest path | — |
-| `--allow-effects <bool>` | Allow effectful custom tools | off |
+| `--allow-effects` | Allow effectful custom tools (no-value switch; pass the flag alone) | off |
 | `--environment <NAME>` | Secret-store environment for `set-secret`/`delete-secret` | — |
 
 The bind defaults are confirmed by `--help` output: `Defaults: --host 127.0.0.1
@@ -137,7 +141,7 @@ xiaoo-daemon config render-cron < draft.json
 xiaoo-daemon protocol schema
 ```
 
-Source: the `config` command dispatch in `apps/serverside/src/main.rs:1045-1092`.
+Source: the `config` command dispatch in `apps/serverside/src/main.rs`.
 
 When the dashboard starts, the daemon prints and logs the resolved address, e.g.:
 
@@ -235,13 +239,13 @@ requests_per_second = 2             # Default refill rate; default: 2 (≈120 re
 burst = 10                          # Max burst size; default: 10
 ```
 
-> **Known gap — per-route overrides are dead code.** A
-> `[http.rate_limit.routes.<key>]` table *deserializes*, but nothing ever reads
-> it: `RateLimitConfig::effective_limit` and the `routes` /
-> `RouteRateLimitOverride` fields carry `#[allow(dead_code)]` and have no
-> caller (`apps/serverside/src/httpserver/rate_limit.rs:21-23,35-43,109-116`).
+> **Known gap — per-route rate-limit overrides are not implemented.** A
+> `[http.rate_limit.routes.<key>]` table *deserializes*, but the value is never
+> used: the `routes` / `RouteRateLimitOverride` fields and
+> `RateLimitConfig::effective_limit` carry `#[allow(dead_code)]` and have no
+> caller (`apps/serverside/src/httpserver/rate_limit.rs`).
 > The router installs exactly **one global governor** for the whole app
-> (`apps/serverside/src/httpserver/router.rs:631-634`).
+> (`apps/serverside/src/httpserver/router.rs`).
 >
 > Configuring per-route quotas (for example widening `/api/v1/health` or
 > narrowing the chat endpoint) therefore has **no effect** — there is no error,
@@ -295,9 +299,9 @@ model = "z-ai/glm-5"
 
 > **There is no `model` field on `[[agents.list]]`.** `AgentConfig` has exactly
 > `id`, `default`, `workspace`, `profile_id` and `system_prompt`
-> (`apps/serverside/src/daemon_config.rs:279-289`). To give an agent a model,
+> (`apps/serverside/src/daemon_config.rs`). To give an agent a model,
 > point `profile_id` at an `[llm.profiles.<id>]` entry
-> (`apps/serverside/src/daemon_config.rs:76-119`). Because the structs do not set
+> (`apps/serverside/src/daemon_config.rs`). Because the structs do not set
 > `deny_unknown_fields`, a stray `model = "..."` key is **silently ignored**
 > rather than reported.
 
@@ -401,7 +405,7 @@ allow_network = false
 
 ### [cron] - Scheduled Jobs
 
-The daemon parses `[cron]` (`apps/serverside/src/daemon_config.rs:58`) and runs
+The daemon parses `[cron]` (`apps/serverside/src/daemon_config.rs`) and runs
 jobs described by `jobs.toml` in the jobs directory.
 
 ```toml
@@ -417,10 +421,11 @@ default_timeout_secs = 3600         # Optional; default 3600
 | `max_concurrent_jobs` | integer | `3` | Maximum jobs running at the same time |
 | `default_timeout_secs` | integer | `3600` | Per-job timeout applied when a job sets none |
 
-Defaults: `apps/serverside/src/daemon_config.rs:1179-1192`. Individual jobs are
-declared in `jobs.toml` as `[[cron.jobs]]` entries with the fields `name`,
+Defaults: `apps/serverside/src/daemon_config.rs`. Individual jobs are
+declared in `jobs.toml` as top-level `[[job]]` entries with the fields `name`,
 `description`, `cron`, `prompt`, `agent_role`, `timeout_secs`, `enabled`,
-`max_retries`, `retry_delay_secs` (`config schema` → `cron.jobs[]`). Inspect the
+`max_retries`, `retry_delay_secs` (`CronJobsFileRaw` /
+`CronJobRaw`, `apps/serverside/src/daemon_config.rs`). Inspect the
 effective schedule with `xiaoo-daemon config cron`.
 
 ### [mcp_server] - Daemon-served MCP Endpoints
@@ -431,8 +436,8 @@ The daemon can expose its own MCP endpoint to external clients. This is
 ```toml
 [mcp_server]
 enabled = false                     # Optional; default false
-idle_timeout_secs = 300             # Optional; default 300
-reaper_interval_secs = 60           # Optional; default 60
+idle_timeout_secs = 600             # Optional; default 600
+reaper_interval_secs = 30           # Optional; default 30
 allowed_origins = []                # Optional CORS allow-list
 
 [mcp_server.chatbot]
@@ -455,15 +460,16 @@ agent_role = "code-reviewer"        # Optional fixed role; MCP clients cannot ov
 | `agent.bearer_token_env` | secret env | Bearer token for the agent surface |
 | `agent.agent_role` | string | Fixed `[agent.<role_id>]` preset for `/mcp/agent` sessions |
 
-Sources: `apps/serverside/src/daemon_config.rs:329-362` (`McpServerConfig`,
-`McpChatbotConfig`, `McpAgentConfig`), section registered at `:64`. Note that
-`agent_role` references an **`[agent.<role_id>]`** entry and cannot be overridden
-per MCP request (`apps/serverside/src/daemon_config.rs:352-358`).
+Sources: `apps/serverside/src/daemon_config.rs` (`McpServerConfig`,
+`McpChatbotConfig`, `McpAgentConfig`). Note that `agent_role` references an
+**`[agent.<role_id>]`** entry and
+cannot be overridden per MCP request
+(`apps/serverside/src/daemon_config.rs`).
 
 ### [mcp] - Outbound MCP Servers
 
 Configures MCP servers the agent can call. The daemon parses it at
-`apps/serverside/src/daemon_config.rs:60`.
+`apps/serverside/src/daemon_config.rs`.
 
 ```toml
 [[mcp.servers]]
@@ -481,9 +487,9 @@ Server entries accept `name`, `transport`, `command`, `args`, `env`, `url`,
 
 ### [lsp] - LSP Configuration (Daemon)
 
-The daemon **does** parse `[lsp]` (`apps/serverside/src/daemon_config.rs:54`)
-and wires it into its runtime (`apps/serverside/src/daemon_runtime.rs:254`,
-`apps/serverside/src/daemon_config.rs:938`), so LSP is not TUI-only.
+The daemon **does** parse `[lsp]` (`apps/serverside/src/daemon_config.rs`)
+and wires it into its runtime (`apps/serverside/src/daemon_runtime.rs`,
+`apps/serverside/src/daemon_config.rs`), so LSP is not TUI-only.
 
 ```toml
 [lsp]
@@ -501,7 +507,7 @@ language_id = "lua"
 
 As in the TUI, `enabled` defaults to **`false`** and `extensions` entries are
 matched exactly against the file extension — a glob such as `"*.lua"` never
-matches (`crates/lsp/src/manager.rs:112-120`). Manage it with
+matches (`crates/lsp/src/manager.rs`). Manage it with
 `xiaoo-daemon config lsp`, `config install-lsp --server <id>` and
 `config test-lsp --server <id>`.
 
@@ -514,9 +520,9 @@ db_path = "~/.xiaoo/traces.db"
 ```
 
 `storage_backend` is an enum of `moirai-sqlite`, `stdout`, `noop`, and the
-default backend is `moirai-sqlite` (`crates/trace/src/framework/config.rs:22,35`;
+default backend is `moirai-sqlite` (`crates/trace/src/framework/config.rs`;
 enum values in `config schema` → `trace.storage_backend`). The section is
-parsed at `apps/serverside/src/daemon_config.rs:48`.
+parsed at `apps/serverside/src/daemon_config.rs`.
 
 ---
 
@@ -945,19 +951,13 @@ for id in "$RUNTIME" "$CHILD_RUNTIME"; do
 done
 ```
 
-With E2B as `[server.operation_backend]`, a local smoke run on 2026-06-13
-measured:
-
-| Operation | Measured `curl` `time_total` | E2B work included |
-|-----------|-------------------------------|-------------------|
-| Runtime checkpoint | `1.516061s` | Create an E2B provider snapshot for the dirty parent sandbox |
-| Runtime checkout | `2.335461s` | Start a new E2B sandbox from the provider snapshot and bind it to the child runtime |
-
-These values are examples, not guarantees. They vary with E2B provider latency,
-network path, snapshot size, template cold/warm state, and daemon host load. The
-numbers above do not include the LLM turns before or after the checkpoint, and
-they do not include closing the runtimes. Closing an E2B-backed runtime calls
-backend release, which deletes the corresponding E2B sandbox.
+With E2B as `[server.operation_backend]`, checkpoint and checkout calls take
+seconds, dominated by E2B provider latency (creating a provider snapshot for the
+dirty parent sandbox, and starting a new sandbox from the snapshot respectively).
+These timings vary with provider latency, network path, snapshot size, template
+cold/warm state, and daemon host load. The numbers do not include the LLM turns
+before or after the checkpoint, nor closing the runtimes. Closing an E2B-backed
+runtime calls backend release, which deletes the corresponding E2B sandbox.
 
 **SSE Event Types:**
 
@@ -981,11 +981,11 @@ All events are tagged with `type` and emit a matching SSE `event:` name. `agent_
 
 That is the complete set of **13** event names. Both the daemon's capabilities
 list and the protocol enum agree on exactly these
-(`apps/serverside/src/httpserver/router.rs:755-769`;
-`crates/protocol/src/sse.rs:173-190`). Field shapes for the newer events:
+(`apps/serverside/src/httpserver/router.rs`;
+`crates/protocol/src/sse.rs`). Field shapes for the newer events:
 `tool_call`, `tool_file_change`, `plan_update`, `subagent_spawn`, `loop_end` and
-the `args_preview` addition on `tool_result` are defined at
-`crates/protocol/src/sse.rs:67-118`.
+the `args_preview` addition on `tool_result` are defined in the same
+`RuntimeSseEvent` enum (`crates/protocol/src/sse.rs`).
 
 > The `done` and `cancelled` events serialize the runtime handle as `runtime_id`
 > in the JSON body even though the internal field is `session_id`; this is the
@@ -1003,7 +1003,7 @@ the `args_preview` addition on `tool_result` are defined at
 >
 > **Client identity is the peer IP only.** The limiter is built on
 > `PeerIpKeyExtractor`, so the bucket key is the TCP peer address as observed by
-> the daemon (`apps/serverside/src/httpserver/rate_limit.rs:6-11,61-63`). The
+> the daemon (`apps/serverside/src/httpserver/rate_limit.rs`). The
 > `X-Forwarded-For` and `X-Real-Ip` headers are **not read** — there is no
 > trusted-proxy handling.
 >
@@ -1070,7 +1070,7 @@ session_id = "{channel_instance_id or channel}:{conversation_id}"
 > `"feishu"` / `"telegram"`), not by `channel_instance_id`;
 > registering a second runtime with an already-present channel id is rejected
 > with `duplicate channel runtime id`
-> (`apps/serverside/src/httpserver/router.rs:109-121`). You cannot run two
+> (`apps/serverside/src/httpserver/router.rs`). You cannot run two
 > Feishu bots (or two Telegram bots) side by side in one daemon process.
 > `channel_instance_id` only namespaces the derived `session_id` string — it
 > does not create a second dispatch route.

@@ -106,7 +106,7 @@ python3 run_rules_tests.py
 ### 2.2 常用参数
 
 ```bash
-# 只跑 level-1 基础规则（~33 条）
+# 只跑 level-1 基础规则（~32 条）
 python3 run_rules_tests.py --api-key "your-key" --level 1
 
 # 只跑 level-2 + level-3
@@ -297,17 +297,17 @@ plugins/tests/hookers/agent_moss/
 │   ├── run-allow-*.sh              # Allow 场景（合法操作不被误拦）
 │   ├── run-deny-*.sh               # Deny 场景（危险操作被拦截）
 │   └── rules/
-│       ├── level-1/                # Layer 1: 基础规则匹配（33 条）
+│       ├── level-1/                # Layer 1: 基础规则匹配（32 条）
 │       │   ├── sudo.json           # 提权执行
 │       │   ├── rm_rf.json          # 递归删除
 │       │   ├── curl_POST.json      # curl POST 请求
 │       │   ├── etc_passwd.json     # 访问系统文件
 │       │   └── ...
-│       ├── level-2/                # Layer 2: 逻辑规则（4 条）
+│       ├── level-2/                # Layer 2: 逻辑规则（11 条）
 │       │   ├── read_before_write.json
 │       │   ├── intent_consistency.json
 │       │   ├── sensitive_paths.json
-│       │   └── dangerous_patterns.json
+│       │   └── ...
 │       ├── level-3/                # Layer 3: 深度分析（13 条）
 │       │   ├── reverse_shell_nc.json
 │       │   ├── supply_chain_typosquatting.json
@@ -316,7 +316,7 @@ plugins/tests/hookers/agent_moss/
 │       └── cerberus/               # 内核级沙箱保护
 │           ├── test_cerberus_via_xiaoo.sh
 │           └── xiaoo_guardian_protection.json
-├── cases/                          # auditagent CLI 测试用例
+├── cases/                          # xiaoo run 端到端用例 + bridge hang 自愈复现
 └── test_fastpass.py                # 快速放行集成测试
 ```
 
@@ -465,7 +465,7 @@ sudo dnf remove xiaoO.x86_64
 
 ```bash
 # 安装 xiaoO 主程序
-sudo dnf install ./xiaoO-0.0.4-1.oe2403sp3.aarch64.rpm
+sudo dnf install ./xiaoO-0.0.4-1.oe2403sp3.x86_64.rpm
 
 # 安装 xiaoO-skills（技能插件）
 sudo dnf install ./xiaoO-skills-0.0.4-1.oe2403sp3.x86_64.rpm
@@ -491,7 +491,7 @@ cd ~/rpmbuild/SOURCES/ && tar -zxvf xiaoO-v0.0.4.tar.gz
 #### 7.1.4 注册开启 agent-moss
 
 ```bash
-xiaoo-hookers-install --non-interactive agent-moss
+xiaoo-hookers-install --non-interactive agent_moss
 ```
 
 ### 7.2 运行全部 rules 测试

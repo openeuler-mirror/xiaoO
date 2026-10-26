@@ -107,9 +107,9 @@ When `auto_connect = true`, TUI enters remote backend mode on startup using the 
 | `/remote close` | Close the remote session **on the daemon** (destroys it server-side), unlike `off` which only detaches |
 | `/new` | Start a new TUI session; in remote mode this closes the old remote session first |
 
-Bare `/remote` (no argument) opens the session dialog rather than connecting;
-see `apps/endside/src/input/event_key.rs:952`. `/remote close` is handled at
-`apps/endside/src/input/event_key.rs:967`.
+Bare `/remote` (no argument) opens the session dialog rather than connecting,
+and `/remote close` is handled in
+`apps/endside/src/input/event_key.rs`.
 
 After `/remote <base_url>` succeeds, new turns go through Machine A's daemon. The status bar shows `Remote: <base_url>`.
 
@@ -149,20 +149,20 @@ runtime state.
 | `POST /api/v1/channels/:channel_id/events` | Channel webhook ingress, keyed by `channel_id` (`feishu` / `telegram`). This one is **not** in the protected group — see note below |
 
 The route list above is drawn from the protected route group at
-`apps/serverside/src/httpserver/router.rs:577-614`; the channel webhook route
-(`router.rs:620-623`) sits outside that group. `/api/v1/health`
-(`router.rs:619`) also bypasses bearer auth — that is what makes the daemon's
+`apps/serverside/src/httpserver/router.rs` (including the cron and channels
+routes); the channel webhook route
+(`router.rs`) sits outside that group. `/api/v1/health`
+(`router.rs`) also bypasses bearer auth — that is what makes the daemon's
 HEALTHCHECK work.
 
 Remote TUI directly consumes `open` / `input` / `interaction` / `cancel` /
 `close` (the turn lifecycle) **plus** `POST /api/v1/runtimes/detach` and
 `POST /api/v1/runtimes/heartbeat`, which implement the attach-lease protocol
 that lets a second TUI detect a takeover. `detach` is issued on exit / `/new` /
-`/remote off` (`apps/endside/src/gateway_api/remote.rs:413-431`); `heartbeat`
-is issued every 15 s by the app event loop
-(`apps/endside/src/gateway_api/remote.rs:461-473`, driven from the
-`heartbeat_interval.tick()` arm at `apps/endside/src/app/core.rs:232` /
-`:298`, interval defined at `:94`). The remaining endpoints
+`/remote off` (`apps/endside/src/gateway_api/remote.rs`, with a bounded
+variant); `heartbeat` is issued every 15 s by the app event loop
+(`apps/endside/src/gateway_api/remote.rs`, driven from the
+`heartbeat_interval.tick()` arm in `apps/endside/src/app/core.rs`). The remaining endpoints
 (`checkpoint`, `checkout`, `pause`, `resume`, `exec`, `read-file`,
 `write-file`, the catalogs, cron and channels) are programmatic control-plane
 endpoints exposed on the same protected route group for other clients. See

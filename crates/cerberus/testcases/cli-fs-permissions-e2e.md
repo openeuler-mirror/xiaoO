@@ -13,7 +13,6 @@
 不包括：
 
 - network policy 的 eBPF 行为
-- `/etc` 路径组历史兼容
 - host adapter 安装流程
 
 ---
@@ -25,7 +24,7 @@
 - `POLICY_FILE`：临时 policy 文件路径
 - `CERBERUS`：CLI 可执行入口，例如 `cargo run -p cerberus-cli --`
 - 除非特别说明，命令退出码 `0` 代表成功，非 `0` 代表失败
-- 如果某条剧本依赖 execute 语义而当前运行时后端无法精确 enforce，**预期行为是 fail closed**，而不是静默降级放过
+- Landlock 不可用且策略允许 mount fallback 时，execute 语义退化为挂载级控制（`readonly`/`readexecute` 映射为只读挂载，`readwrite`/`readwriteexecute` 映射为可写挂载），execute 维度不独立精确 enforce，这是已知降级行为，不 fail closed（见 TC-010 与 `docs/runtime-capability-matrix.md`）
 
 ---
 
@@ -353,16 +352,16 @@ ${CERBERUS} --policy-file "${POLICY_FILE}" profile show custom
 
 ---
 
-## TC-010：如果 execute 语义无法被当前后端精确 enforce，则 CLI 必须 fail closed
+## TC-010：mount fallback 下 execute 语义退化为挂载级控制
 
 ### 目的
 
-防止 `readexecute` / `readwriteexecute` 在不支持精确 execute 隔离的 fallback 下被错误放行。
+确认 Landlock 不可用且策略允许降级时，mount fallback 对 `readexecute` / `readwriteexecute` 的实际执行语义。
 
 ### 前提
 
 - 当前运行环境无法使用 Landlock
-- mount fallback 仍可用，但不能精确表达 execute 维度
+- policy 配置 `landlock_optional = true` 且 `mount_isolation_fallback = true`
 
 ### 步骤
 
@@ -371,10 +370,10 @@ ${CERBERUS} --policy-file "${POLICY_FILE}" profile show custom
 
 ### 期望
 
-- CLI 失败退出
-- 报错应说明当前 runtime / backend 无法满足所请求的 filesystem execute 语义
-- **不能**继续执行
-- **不能**静默退化为“只要能挂载就算成功”
+- CLI 走 mount 隔离继续执行，不 fail closed
+- `readonly` 与 `readexecute` 同样映射为只读 bind mount（`MS_RDONLY`），`readwrite` 与 `readwriteexecute` 同样映射为可写 bind mount，execute 维度不独立控制
+- 保留执行位的脚本在对应挂载下通常仍可执行
+- 这是 mount fallback 的已知降级行为（见 `docs/runtime-capability-matrix.md`），不构成对 execute 语义的精确 enforce
 
 ---
 
@@ -386,14 +385,3 @@ ${CERBERUS} --policy-file "${POLICY_FILE}" profile show custom
 | `readwrite` | 成功显示 | 允许 | 允许 | 拒绝 |
 | `readexecute` | 成功显示 | 允许 | 拒绝 | 允许 |
 | `readwriteexecute` | 成功显示 | 允许 | 允许 | 允许 |
-
----
-
-## 审阅重点
-
-审阅时重点确认以下问题：
-
-1. `readwriteexecute` 是否应该作为正式公开权限值
-2. built-in workspace 注入是否坚持保持 `readwrite`，而不是自动放大
-3. execute 相关场景是否一律要求 exact enforcement，不能接受 silent downgrade
-4. CLI 展示是否继续使用单字符串风格，还是后续改成 capability list

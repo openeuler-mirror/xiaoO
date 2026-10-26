@@ -48,28 +48,46 @@ cd plugins/hookers/cerberus_bash_control
 
 ### 策略文件
 
-`policy.toml` 定义了沙箱策略。可根据需要修改：
+`policy.toml` 定义了沙箱策略（即 `cerberus-core::policy::Policy` 的 TOML 表达，`deny_unknown_fields`——写了 schema 外的字段会直接解析失败）。可根据需要修改：
 
 ```toml
-[filesystem]
-readwrite = ["/path/to/workspace"]
+landlock_optional = true
+mount_isolation_fallback = false
+
+[path_groups]
+system_binaries = true
+system_libraries = true
+temp_directories = true
+
+[[custom_paths]]
+path = "/path/to/workspace"
+permission = "readwrite"
 
 [namespaces]
 network = false  # 禁止网络访问
+
+[resources]
+timeout_secs = 60
+max_memory_bytes = 268435456
+
+[environment]
+whitelist = ["PATH", "LANG", "HOME", "TERM"]
 ```
 
-详细配置参考 `crates/cerberus/docs/configuration.md`。
+顶层字段为 `landlock_optional` / `mount_isolation_fallback`；路径访问由 `[path_groups]` 预定义开关 + `[[custom_paths]]`（`path` / `permission`，取值 `readonly` / `readwrite` / `readexecute` / `readwriteexecute`）表达；细粒度网络管控用 `[network_policy]`（需要 eBPF backend，默认构建下启用会 fail-closed）。
+
+完整 schema 与内置 profile 说明参考 `crates/cerberus/docs/configuration.md`，完整示例参考本目录的 `policy.toml`。
 
 ### hooker default 模式
 
-安装时会询问 `[hooker]` 段的 `default` 模式。**它决定的是「已注册的 hooker 里哪些处于启用状态」，不是工具层的允许/拦截策略**（`crates/hook/src/framework/registry/builder.rs:118-127`）：
+安装时会询问 `[hooker]` 段的 `default` 模式。**它决定的是「已注册的 hooker 里哪些处于启用状态」，不是工具层的允许/拦截策略**（`crates/hook/src/framework/registry/builder.rs`）：
 
 - `All`：所有**已注册**的 hooker 默认启用；再用 `disabled` 列表排除个别 hooker
 - `None`：所有已注册 hooker 默认不启用；只有 `enabled` 列表里列出的 hooker 会跑
 
 也就是说 `default = "All"` ≠ 「允许所有工具调用」。工具调用是否被拦，取决于跑起来的 hooker 脚本返回什么（这里是 `wrap_bash_with_cerberus.py` 返回 `allow` / `deny` / `transform`），与 `default` 无关。如果一个 hooker 没被启用，它就像不存在一样——既不拦截也不放行任何东西。
 
-> `enabled` / `disabled` / `policies` 里出现**未注册**的 hooker id 会让 xiaoo 启动构建失败（`crates/hook/src/framework/registry/builder.rs:81-98`），而不是静默忽略。
+> `enabled` / `disabled` / `policies` 里出现**未注册**的 hooker id 会让 xiaoo 启动构建失败（`crates/hook/src/framework/registry/builder.rs`），而不是静默忽略。
 
 ## 工作原理
 

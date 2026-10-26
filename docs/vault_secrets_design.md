@@ -1,15 +1,14 @@
 # Secrets 存储方案设计
 
-> **状态：已实现，但与本设计文档的若干描述不符。**
+> **状态：已实现。**
 >
-> 加密存储本身是真实可用的：`apps/vault`（InstanceKey / SDF）与
-> `apps/shared/src/llm_secrets.rs` 均已落地，并通过
-> `xiaoo-daemon config vault|set-secret|delete-secret` 暴露。
-> 本文件中的**设计意图**予以保留，但凡与代码不一致处已按实际实现更正并标注
-> 「已知缺口」，全部结论以 `path:line` 为据。
+> `apps/vault`（InstanceKey / SDF）与 `apps/shared/src/llm_secrets.rs` 均已落地，
+> 并通过 `xiaoo-daemon config vault|set-secret|delete-secret` 暴露。
+> 本文件中的**设计意图**予以保留，全部结论以 `path:line` 为据。
 >
-> 主要偏差：`vault.enabled` 不是开关（§2.3）；§1.2 的「按需解密、用完即销毁」不成立（§2.2）；
-> 早期版本描述的 `SecretProvider` / `gateway/decrypted_api_keys.rs` 集成层**不存在**（§4.2、§6.1）。
+> 需要注意的现状：`[vault] enabled` 不是开关（§2.3）；Secrets 在进程启动时
+> 一次性解密并注入环境变量，进程生命周期内驻留（§2.2）；不存在
+> `SecretProvider` / `gateway/decrypted_api_keys.rs` 集成层（§4.2、§6.1）。
 >
 > **安全演进（修复 Issue #132）**：`use_sdf=false` 的软件加密已从「源码常量派生的
 > 白盒密钥」改为**每实例随机主密钥**（§3.1、§3.2）。旧 v1 格式文件在首次启动时
@@ -37,7 +36,7 @@
 
 - **本地存储**：不依赖外部服务，所有数据存储在本地文件系统
 - **加密保护**：Secrets 加密后存储，防止泄露
-- **按需解密**: 发起 LLM 请求时从加密文件解密获取 API key，请求完成后立即销毁，不在内存中长期驻留
+- **集中加密存储、启动时注入**：Secrets 集中加密存储在 `llm_secrets.json`，进程启动时一次性解密并注入环境变量，进程生命周期内驻留内存
 - **多密钥支持**：支持 InstanceKey（每实例随机主密钥）、TEE/SDF、HSM 三种密钥提供方式
 
 ### 1.3 支持的密钥类型
@@ -59,7 +58,7 @@
 use_sdf = false  # false=InstanceKey+AES-GCM, true=SDF国密
 ```
 
-> ⚠️ **`enabled` 不是开关（截至 master `a58d79f`）**：`[vault] enabled` 在运行路径中
+> ⚠️ **`enabled` 不是开关**：`[vault] enabled` 在运行路径中
 > **从未被读取**，保存与注入 Secrets 都是无条件执行的。详见 §2.2 与 §5.2.3 的说明。
 
 ### 2.2 Secrets 的实际行为（不依赖 `enabled`）
@@ -69,10 +68,10 @@ use_sdf = false  # false=InstanceKey+AES-GCM, true=SDF国密
 保存通过两条路径发生：
 
 1. **首次启动自动保存**：daemon / TUI / CLI `run` 的启动路径统一经
-   `init_llm_secrets()`（`apps/shared/src/llm_secrets.rs:194-207`）完成
+   `init_llm_secrets()`（`apps/shared/src/llm_secrets.rs`）完成
    「先保存后注入」，该函数在注入环境变量**之前**调用
-   `auto_save_from_env()`（`apps/serverside/src/main.rs:545`、
-   `apps/endside/src/main.rs:81`、`apps/endside/src/cli/entry.rs:224`）——读
+   `auto_save_from_env()`（`apps/serverside/src/main.rs`、
+   `apps/endside/src/main.rs`、`apps/endside/src/cli/entry.rs`）——读
    `config.toml` 的 `llm.api_key_env`，若同名环境变量已设且非空、且 store 中
    **尚无该条目**，则加密写入 `llm_secrets.json`（仅首次保存语义）。
    - 顺序不能反：注入会把 store 里的密钥写进同一批变量名，先注入就等于把
@@ -82,18 +81,19 @@ use_sdf = false  # false=InstanceKey+AES-GCM, true=SDF国密
      配置缺失、无 `api_key_env`、环境变量未设或为空时同样静默跳过（不视为错误）。
 2. **显式 CLI 调用**：
    - **`config set-secret --environment <name>`**：从 stdin 读取密钥 → 加密 → 写入 `llm_secrets.json`
-     （`apps/serverside/src/main.rs:430-452`）。
+     （`apps/serverside/src/main.rs`）。
    - **`config delete-secret --environment <name>`**：从文件中删除该条目
-     （`apps/serverside/src/main.rs:453-467`）。
+     （`apps/serverside/src/main.rs`）。
 
 #### 写入的并发与原子性
 
 - 所有读改写路径（自动保存 / `set-secret` / `delete-secret`）持有同目录下的
-  `flock` 互斥锁（`.llm_secrets.json.lock`，`apps/shared/src/llm_secrets.rs:56-91`），
+  `flock` 互斥锁（`.llm_secrets.json.lock`，锁文件路径由
+  `lock_file_path()` 决定，`apps/shared/src/llm_secrets.rs`），
   「存在性检查 + 写入」在同一个锁临界区内完成，跨进程并发不会丢失更新；
   锁随进程退出由内核释放，崩溃不会死锁。
 - 落盘为原子写：先写同目录临时文件再 `rename` 覆盖
-  （`apps/shared/src/llm_secrets.rs:235-259`），进程崩溃不会留下半写的
+  （`apps/shared/src/llm_secrets.rs`），进程崩溃不会留下半写的
   `llm_secrets.json`（撕裂文件会让后续每次启动解密失败）。只读路径
   （注入 / 查询 / inspect）不加锁，靠 rename 原子性读到旧或新的完整文件。
 
@@ -105,7 +105,7 @@ use_sdf = false  # false=InstanceKey+AES-GCM, true=SDF国密
 ```
 
 路径由 `llm_secrets_path()` 决定：`config.toml` 所在目录下的 `llm_secrets.json`
-（`apps/shared/src/llm_secrets.rs:7,342-349`）。同目录还会有一个
+（`apps/shared/src/llm_secrets.rs`）。同目录还会有一个
 `.llm_secrets.json.lock`（仅作 `flock` 句柄，内容恒为空）。
 
 #### 数据格式
@@ -125,25 +125,25 @@ use_sdf = false  # false=InstanceKey+AES-GCM, true=SDF国密
 
 #### 数据获取方式
 
-**进程启动时一次性注入环境变量**，而非「按需解密、用完即销毁」：
+**进程启动时一次性注入环境变量**：
 
 - `inject_llm_secrets_into_env()` 解密整个 store，并把每个条目 `set_var` 到进程环境
-  （`apps/shared/src/llm_secrets.rs:368-378`）。三条启动路径均经
+  （`apps/shared/src/llm_secrets.rs`）。三条启动路径均经
   `init_llm_secrets()`（先自动保存、后注入）调用它：Daemon 在 runtime 组装前
-  （`apps/serverside/src/main.rs:545`），TUI 在启动时调用（`apps/endside/src/main.rs:81`），
-  CLI `run` 在组装配置前调用（`apps/endside/src/cli/entry.rs:224`）。
+  （`apps/serverside/src/main.rs`），TUI 在启动时调用（`apps/endside/src/main.rs`），
+  CLI `run` 在组装配置前调用（`apps/endside/src/cli/entry.rs`）。
 - `get_llm_secret()` 用于单次查询：先查 store，再回退到进程环境变量
-  （`apps/shared/src/llm_secrets.rs:351-366`）。
+  （`apps/shared/src/llm_secrets.rs`）。
 
-> **已知缺口**：文档 §1.2 所述的「请求完成后立即销毁，不在内存中长期驻留」并不成立 ——
-> 注入使用 `std::env::set_var`，密钥在整个进程生命周期内都留在环境变量中。
+> 注入使用 `std::env::set_var`，密钥在整个进程生命周期内都留在环境变量中，
+> 进程退出前不会清除。
 
 ### 2.3 `vault.enabled` 的真实作用
 
 `vault.enabled` 在运行路径中**不被读取**：`save_llm_secret()` / `delete_llm_secret()` /
 `inject_llm_secrets_into_env()` 都只依据 `use_sdf` 决定加密方式
-（`apps/shared/src/llm_secrets.rs:93-132,368-378`）。整个代码库中唯一的读取点是
-`config vault` 报告的展示字段（`apps/serverside/src/vault_management.rs:74`）。
+（`apps/shared/src/llm_secrets.rs`）。整个代码库中唯一的读取点是
+`config vault` 报告的展示字段（`apps/serverside/src/vault_management.rs`）。
 
 因此 `enabled = false` **不会**关闭加密存储，`enabled = true` 也**不会**开启它 ——
 保存由首次启动自动保存与显式 CLI 共同驱动。
@@ -187,7 +187,7 @@ use_sdf = false  # false=InstanceKey+AES-GCM, true=SDF国密
 `key_tag` 是主密钥对固定 label 的 HMAC-SHA256 截断值：解密时先比对 tag，
 密钥不匹配立即报「master key 不一致」而非笼统的解密失败。
 
-#### 解密流程（按需获取）
+#### 解密流程
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -257,7 +257,15 @@ use_sdf = false  # false=InstanceKey+AES-GCM, true=SDF国密
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 解密流程（按需获取，用完即销毁）
+#### 解密流程（启动时一次性解密）
+
+SDF 路径与 InstanceKey 路径相同：进程启动时 `inject_llm_secrets_into_env()`
+（`apps/shared/src/llm_secrets.rs`）调用 `load_secrets_store()`
+（SDF 分支经 `vault::sdf::decrypt_secret` 解密），
+一次性解密整个 store 并把每个条目 `set_var` 到进程环境变量；
+密钥在进程生命周期内驻留，进程退出前不会清除（§3.4、§7.4）。
+
+单次解密操作的内部步骤（`sdf_decrypt()`，`apps/vault/src/sdf.rs`）：
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -271,27 +279,28 @@ use_sdf = false  # false=InstanceKey+AES-GCM, true=SDF国密
 │  5. SDF_GetKEKAccessRight() → 获取 KEK 权限                        │
 │  6. SDF_ImportKeyWithKEK() → 导入加密的会话密钥                     │
 │  7. SDF_Decrypt() → 使用会话密钥进行国密解密                        │
-│  8. 发起 LLM 请求时按需获取密钥                                      │
-│  9. 请求完成后立即销毁（不驻留内存）                                  │
-│  10. SDF_ReleaseKEKAccessRight() → 释放权限                         │
-│  11. SDF_CloseSession()                                            │
-│  12. SDF_CloseDevice()                                             │
+│  8. SDF_ReleaseKEKAccessRight() → 释放权限                         │
+│  9. SDF_CloseSession()                                             │
+│  10. SDF_CloseDevice()                                             │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.4 密钥获取机制（按实现更正）
+### 3.4 密钥获取机制
 
-**不存在**「按需解密 provider」这一层。早期版本在此处给出的
-`get_decrypted_api_key(env_name)` 与 `init_secret_provider(secrets_path, use_sdf)`
-在本仓库中**没有实现**（§4.2、§6.1 的证据）。
+**不存在**「按需解密 provider」这一层：`get_decrypted_api_key(env_name)` 与
+`init_secret_provider(secrets_path, use_sdf)` 等符号在本仓库中**没有定义**
+（§4.2、§6.1 的证据）。
 
 实际机制是**启动时一次性解密并注入进程环境变量**：
 
 ```rust
-// apps/shared/src/llm_secrets.rs:368-378
+// apps/shared/src/llm_secrets.rs
 pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
-    let store = load_secrets_store(&llm_secrets_path(config_path), use_sdf)?;
+    let store = load_secrets_store(
+        &llm_secrets_path(config_path),
+        get_use_sdf_from_config(config_path),
+    )?;
     for (environment, secret) in store.api_keys.into_iter().chain(store.tokens) {
         std::env::set_var(environment, secret);
     }
@@ -300,18 +309,16 @@ pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
 ```
 
 调用点：三条启动路径均经组合函数 `init_llm_secrets()`
-（`apps/shared/src/llm_secrets.rs:194-207`，内部固定「先 `auto_save_from_env()`
-后注入」的顺序）——`apps/serverside/src/main.rs:545`（daemon）、
-`apps/endside/src/main.rs:81`（TUI）与 `apps/endside/src/cli/entry.rs:224`（CLI `run`）。
+（`apps/shared/src/llm_secrets.rs`，内部固定「先 `auto_save_from_env()`、
+后注入」的顺序）——`apps/serverside/src/main.rs`（daemon）、
+`apps/endside/src/main.rs`（TUI）与 `apps/endside/src/cli/entry.rs`（CLI `run`）。
 
-**特点（实际）**：
+**特点**：
 - 启动时解密整个 store，一次 `set_var` 完成注入
-- 之后程序通过环境变量读取，**密钥在进程生命周期内一直驻留**
+- 之后程序通过环境变量读取，**密钥在进程生命周期内一直驻留**，
+  进程退出前不会清除
 - 单次查询可用 `get_llm_secret()`，它先查 store、再回退环境变量
-  （`apps/shared/src/llm_secrets.rs:351-366`）
-
-> **已知缺口**：与 §1.2 宣称的「请求完成后立即销毁，不在内存中长期驻留」不符 ——
-> 注入使用 `std::env::set_var`，进程退出前不会清除。
+  （`apps/shared/src/llm_secrets.rs`）
 
 ### 3.5 API Key 解析优先级
 
@@ -363,11 +370,11 @@ apps/shared/src/
                                     # - encrypt_aes_gcm() / decrypt_aes_gcm()
 ```
 
-> 早期版本的文档在此处描述了一个 `gateway/decrypted_api_keys.rs` 模块，导出
-> `SecretProvider`、`init_secret_provider()`、`get_decrypted_api_key()`。**该模块与这些
-> 符号均不存在**（`git grep -n 'decrypted_api_keys\|SecretProvider\|init_secret_provider\|get_decrypted_api_key' -- '*.rs'`
+> `SecretProvider`、`init_secret_provider()`、`get_decrypted_api_key()` 等符号以及
+> `gateway/decrypted_api_keys.rs` 模块在本仓库中**不存在**
+> （`git grep -n 'decrypted_api_keys\|SecretProvider\|init_secret_provider\|get_decrypted_api_key' -- '*.rs'`
 > 无匹配）。真实的公开 API 就是上表列出的函数
-> （`apps/shared/src/llm_secrets.rs:93-391`）。
+> （`apps/shared/src/llm_secrets.rs`）。
 
 ### 4.3 apps/endside (TUI 配置入口)
 
@@ -379,9 +386,9 @@ apps/endside/src/
                                     # init_llm_secrets
 ```
 
-`apps/endside/src/main.rs:81` 调用 `config::init_llm_secrets()`；
-`apps/endside/src/support/config.rs:489-495` 是这两个函数的薄转发。CLI `run`
-同样经 `init_llm_secrets()` 完成保存+注入（`apps/endside/src/cli/entry.rs:224-231`）。
+`apps/endside/src/main.rs` 调用 `config::init_llm_secrets()`；
+`apps/endside/src/support/config.rs` 是这两个函数的薄转发。CLI `run`
+同样经 `init_llm_secrets()` 完成保存+注入（`apps/endside/src/cli/entry.rs`）。
 
 ### 4.4 各文件作用
 
@@ -438,23 +445,23 @@ apps/endside/src/
 
 ```toml
 [vault]
-enabled = false  # 是否启用加密存储
+enabled = false  # 运行路径不读取该字段（见下表与 §2.3）
 use_sdf = false  # 加密方式
 ```
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `enabled` | bool | `false` | 是否启用加密存储到 `llm_secrets.json` |
+| `enabled` | bool | `false` | 无运行效果：运行路径不读取该字段（§2.3），保存与注入无条件执行 |
 | `use_sdf` | bool | `false` | false=InstanceKey(每实例随机主密钥)，true=SDF国密(仅鲲鹏服务器) |
 
 #### 5.2.2 配置文件示例
 
-**vault.enabled = true (加密存储 - InstanceKey)**
+**`use_sdf = false`（InstanceKey + AES-GCM，默认）**
 
 ```toml
 [vault]
 enabled = true
-use_sdf = false  # 仅测试环境使用
+use_sdf = false  # InstanceKey + AES-GCM（默认）
 
 [llm]
 provider = "openrouter"
@@ -466,7 +473,7 @@ api_key_env = "OPENROUTER_API_KEY"
 > 备份配置目录时必须连同该文件一起备份，丢失后密文不可恢复；对「整个用户目录被拿走」
 > 的威胁模型请使用 `use_sdf=true`。
 
-**vault.enabled = true (加密存储 - SDF 国密)**
+**`use_sdf = true`（SDF 国密，仅鲲鹏服务器）**
 
 ```toml
 [vault]
@@ -477,11 +484,14 @@ use_sdf = true  # 仅适用于鲲鹏服务器
 > ⚠️ **SDF 国密要求**: `use_sdf=true` 仅支持**鲲鹏系列服务器**，并需要部署 SDF 国密模块。详细方法请参考：
 > - [鲲鹏商密应用使用指南](https://www.hikunpeng.com/document/detail/zh/kunpengcctrustzone/cca/twp/Kunpeng_ommercialcryptography_19_0002.html)
 
-**vault.enabled = false (不加密存储)**
+**`enabled` 任意取值（对加密行为无影响）**
+
+`enabled = false` **不会**关闭加密存储：该字段在运行路径中不被读取，
+加密与否只由 `use_sdf` 决定。下面的配置与 `enabled = true` 的行为完全一致：
 
 ```toml
 [vault]
-enabled = false  # 不保存 Secrets，使用环境变量
+enabled = false  # 运行路径不读取该字段，加密与否只由 use_sdf 决定
 
 [llm]
 provider = "openrouter"
@@ -499,15 +509,21 @@ api_key_env = "OPENROUTER_API_KEY"
 | `use_sdf=false` | `set-secret` / 自动保存用 InstanceKey+AES-GCM 加密 | 用每实例主密钥解密 |
 | `use_sdf=true` | `set-secret` / 自动保存用 SDF 国密加密 | 用 SDF 密钥解密（仅鲲鹏） |
 
-真实的加密方式选择来自 `[vault] use_sdf`，由 `get_use_sdf_from_config()` 读取
-（`apps/shared/src/llm_secrets.rs:23-39`）。
+真实的加密方式选择来自 `[vault] use_sdf`，由 `get_use_sdf_from_config()`
+及其辅助函数 `use_sdf_from_config_value()` 读取
+（`apps/shared/src/llm_secrets.rs`）。
 
 ### 5.3 环境变量
 
-| 环境变量 | 说明 | 默认值 |
-|---------|------|--------|
-| `USE_SDF` | 使用 SDF 国密 | `false` |
-| `LD_LIBRARY_PATH` | SDF 动态库路径 | `/usr/local/sdf/lib` |
+没有控制加密方式的环境变量：加密与否只由 `config.toml` 的 `[vault] use_sdf`
+决定（`apps/shared/src/llm_secrets.rs`），`USE_SDF` 环境变量在运行路径中
+不产生任何效果。SDF 动态库路径同样不受 `LD_LIBRARY_PATH` 影响——代码不读取
+该变量，库路径硬编码为 `/usr/local/sdf/lib/libsdf.so`
+（`apps/vault/src/sdf.rs`，由 `apps/shared/src/llm_secrets.rs` 传入）。
+
+与 Secrets 相关的环境变量是各 `*_env` 配置项指向的密钥变量（如
+`OPENROUTER_API_KEY`）：首次启动自动保存从中读取明文，注入时把解密后的值
+写回同名变量。
 
 ### 5.4 SDF 国密部署要求
 
@@ -528,9 +544,14 @@ api_key_env = "OPENROUTER_API_KEY"
 # 默认编译 (InstanceKey + AES-GCM)
 cargo build --release -p xiaoo-endside --bin xiaoo
 
-# 启用 SDF 国密 (仅鲲鹏服务器)
-cargo build --release -p xiaoo-endside --bin xiaoo --features tee_sdf
+# 启用 SDF 国密 (仅鲲鹏服务器；feature 链 xiaoo-serverside → xiaoo-shared → vault，
+# apps/endside 没有 tee_sdf feature)
+cargo build --release -p xiaoo-serverside --features tee_sdf
 ```
+
+> 注：`tee_sdf` 只 gate `SdfKeyProvider` 的 `KeyProvider` trait 实现
+> （`apps/vault/src/sdf.rs`）；`use_sdf=true` 路径实际使用的
+> `encrypt_secret()` / `decrypt_secret()` 不受该 feature 限制。
 
 #### 单元测试
 
@@ -544,7 +565,6 @@ cargo test --package xiaoo-shared
 ```bash
 # 设置环境变量
 export OPENROUTER_API_KEY='sk-or-v1-xxx'
-export USE_SDF=false
 
 # 运行 TUI（config.toml 设置了 llm.api_key_env 且同名环境变量非空、store 中
 # 尚无该条目时，首次启动自动保存，与 vault.enabled 无关）
@@ -564,57 +584,59 @@ hexdump -C ~/.xiaoo/config/llm_secrets.json | head
 
 ```rust
 // 写入 / 删除单个密钥（按 environment 变量名索引；写路径持锁 + 原子落盘）
-pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Result<()>;   // :93-106
-pub fn delete_llm_secret(config_path: &Path, env_name: &str) -> Result<bool>;            // :108-132
+pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Result<()>;   // :103-116
+pub fn delete_llm_secret(config_path: &Path, env_name: &str) -> Result<bool>;            // :118-138
 
 // 首次启动自动落盘（读 llm.api_key_env 指向的环境变量；store 已有该条目时跳过）
-pub fn auto_save_from_env(config_path: &Path) -> Result<()>;                              // :134-191
+pub fn auto_save_from_env(config_path: &Path) -> Result<()>;                              // :144-196
 
 // 启动路径组合入口：先 auto_save_from_env() 再 inject_llm_secrets_into_env()，
 // 顺序在函数内部固化，调用方无法写反
-pub fn init_llm_secrets(config_path: &Path) -> Result<()>;                                // :194-207
+pub fn init_llm_secrets(config_path: &Path) -> Result<()>;                                // :204-217
 
 // 解析单个密钥（先查 store，再回退进程环境变量）
-pub fn get_llm_secret(config_path: &Path, env_name: &str) -> Result<String>;             // :351-366
+pub fn get_llm_secret(config_path: &Path, env_name: &str) -> Result<String>;             // :392-405
 
 // 解密整个 store 并注入进程环境变量（经 init_llm_secrets 使用）
-pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()>;                    // :368-378
+pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()>;                    // :409-418
 
 // 只返回密钥名称，不暴露值
-pub fn inspect_secret_store(config_path: &Path) -> Result<SecretStoreMetadata>;          // :380-391
+pub fn inspect_secret_store(config_path: &Path) -> Result<SecretStoreMetadata>;          // :421-430
 
 // 存储路径
-pub fn llm_secrets_path(config_path: &Path) -> PathBuf;                                  // :342-349
+pub fn llm_secrets_path(config_path: &Path) -> PathBuf;                                  // :383-388
 ```
 
 > **不存在**：`load_llm_secrets_to_memory()` 与 `save_token()` 从未在本仓库中定义
 > （`git grep -n 'load_llm_secrets_to_memory\|save_token' -- '*.rs'` 无匹配）。
 
-### 6.2 CLI / 参考面（此前文档缺失）
+### 6.2 CLI / 参考面
 
 Secrets 的唯一入口是 daemon 的 `config` 子命令。全部经 `xiaoo-daemon` 提供：
 
 | 命令 | 行为 | 位置 |
 |------|------|------|
-| `xiaoo-daemon config vault [--config <path>]` | 打印 `VaultReport` JSON：provider、是否可用、以及每个 `*_env` 配置项的解析状态 | `apps/serverside/src/main.rs:421-429` |
-| `xiaoo-daemon config set-secret --environment <name> [--config <path>] < secret` | 从 **stdin** 读取密钥（去除尾部换行），校验该 environment 被配置引用后加密写入 | `apps/serverside/src/main.rs:430-452` |
-| `xiaoo-daemon config delete-secret --environment <name> [--config <path>]` | 删除条目，输出 `{"schema_version":1,"removed":<bool>}` | `apps/serverside/src/main.rs:453-467` |
+| `xiaoo-daemon config vault [--config <path>]` | 打印 `VaultReport` JSON：provider、是否可用、以及每个 `*_env` 配置项的解析状态 | `apps/serverside/src/main.rs` |
+| `xiaoo-daemon config set-secret --environment <name> [--config <path>] < secret` | 从 **stdin** 读取密钥（去除尾部换行），校验该 environment 被配置引用后加密写入 | `apps/serverside/src/main.rs` |
+| `xiaoo-daemon config delete-secret --environment <name> [--config <path>]` | 删除条目，输出 `{"schema_version":1,"removed":<bool>}` | `apps/serverside/src/main.rs` |
 
-命令的用法文本见 `apps/serverside/src/main.rs:1376-1377`。
+命令的用法文本见 `apps/serverside/src/main.rs`。
 
 `set-secret` / `delete-secret` 会先调用 `ensure_environment_is_referenced()`：environment
 必须被某个配置文件字段引用（例如 `llm.api_key_env`、`mcp_server.agent.bearer_token_env`、
 `server.operation_backend.options.api_key_env`），否则命令报错
-（`apps/serverside/src/vault_management.rs:92-268`）。
+（`apps/serverside/src/vault_management.rs`，含引用收集逻辑）。
 
 > **没有引用语法**：不存在 `vault://` 或 `ref:` 形式的取值语法 ——
 > `git grep -n 'vault://\|ref:' -- '*.rs'` 无匹配。配置中一律写**环境变量名**，
 > 运行时由 `inject_llm_secrets_into_env()` 把对应值放进环境（§2.2）。
 
-`config vault` 报告中的 `status` 还包含 `inline` 分类：若配置里把
+`config vault` 报告（`VaultReport`，`apps/serverside/src/vault_management.rs`）
+中的 `inline` 分类体现在 `references[].source` 字段：若配置里把
 `api_key` / `bearer_token` / `webhook_secret_token` / `verification_token`
-直接写成了字面值，会被标记为内联密钥
-(`apps/serverside/src/vault_management.rs:261-267`)。
+直接写成了字面值，对应引用的 `source` 为 `inline`
+（键名判定与取值来源均见 `vault_management.rs`；
+其余取值为 `encrypted_store` / `environment` / `missing`）。
 
 ### 6.3 密钥提供者
 
@@ -638,9 +660,10 @@ pub struct HsmKeyProvider { ... }
 impl KeyProvider for HsmKeyProvider { ... }
 ```
 
-> 注：早期文档在此处列出 `encrypt_secret()` / `decrypt_secret()` 作为 SDF 的公开函数。
-> 实际的 SDF 加解密接口位于 `apps/vault/src/sdf.rs` 的
-> `sdf_encrypt()`（`:336`）与 `sdf_decrypt()`（`:478`）。
+> 注：SDF 的加解密公开入口为 `encrypt_secret()` / `decrypt_secret()`
+> （`apps/vault/src/sdf.rs`），内部委托 `sdf_impl::sdf_encrypt()`
+> （`apps/vault/src/sdf.rs`）与 `sdf_impl::sdf_decrypt()`
+> （`apps/vault/src/sdf.rs`）。
 
 ---
 
@@ -658,11 +681,11 @@ impl KeyProvider for HsmKeyProvider { ... }
 - KEK 口令默认为 NULL，需要配置真实 KEK
 - libcrypto 版本需与 libsdf.so 匹配
 
-### 7.4 实现缺口（截至 master `a58d79f`）
+### 7.4 实现缺口
 
 - **`vault.enabled` 是死配置**：运行路径从不读取，保存/注入无条件执行（§2.3）。
 - **密钥常驻进程环境**：`inject_llm_secrets_into_env()` 用 `std::env::set_var` 注入
-  （`apps/shared/src/llm_secrets.rs:368-378`），与 §1.2 宣称的「用完即销毁」不符。
+  （`apps/shared/src/llm_secrets.rs`），进程退出前不会清除。
 - **无 `vault://` / `ref:` 引用语法**：配置中只能引用环境变量名（§6.2）。
 
 ---
@@ -705,11 +728,8 @@ master key 匹配（`apps/vault/src/instance_key.rs` 的 `store_key_tag()`）。
 
 布局由 `sdf_encrypt()` 写出：`vec![1u8]` + `key_length.to_be_bytes()` +
 `key_buffer[..key_length]` + ciphertext
-（`apps/vault/src/sdf.rs:465-470`）。最小头部为 5 字节
+（`apps/vault/src/sdf.rs`）。加密使用 SMS4-ECB，没有 IV 概念，
+头部第二个字段是变长的 `key_buffer` 长度 + 内容。最小头部为 5 字节
 （`ENCRYPTED_HEADER_SIZE = ENCRYPTED_VERSION_SIZE + ENCRYPTED_KEY_LENGTH_SIZE`，
-`apps/vault/src/sdf.rs:291`），`sdf_decrypt()` 按同样顺序解析
-（`apps/vault/src/sdf.rs:478-520`）。
-
-> **修正**：早期文档把此处写成 `Version(1) | IV(16) | Ciphertext`。**SDF 路径不存在 IV** ——
-> 加密使用 SMS4-ECB（无 IV 概念），头部的第二个字段是变长的 `key_buffer` 长度 + 内容，
-> 而不是 16 字节随机 IV。
+`apps/vault/src/sdf.rs`），`sdf_decrypt()` 按同样顺序解析
+（`apps/vault/src/sdf.rs`）。

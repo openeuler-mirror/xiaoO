@@ -71,7 +71,7 @@ Field meaning:
 
 Optional fields you may add:
 
-- `raw_command`: the command as written by the author, before path resolution. `plugins/hookers/install.sh` resolves relative paths / `~` / `VAR=value` tokens in `command` against the hooker directory and, when it rewrites anything, stores the original in `raw_command` and writes the rewritten value back to `command` (`plugins/hookers/install.sh:95-99,118-121`). A shipped plugin uses it to keep the human-readable form: `plugins/hookers/agent_moss/plugin.json:6` has `"raw_command": "python3 bridge.py"` alongside the resolved `command`. You normally do not need to write this field by hand — `install.sh` adds it.
+- `raw_command`: the command as written by the author, before path resolution. `plugins/hookers/install.sh` resolves relative paths / `~` / `VAR=value` tokens in `command` against the hooker directory and, when it rewrites anything, stores the original in `raw_command` and writes the rewritten value back to `command` (`plugins/hookers/install.sh`). A shipped plugin uses it to keep the human-readable form: `plugins/hookers/agent_moss/plugin.json` has `"raw_command": "python3 bridge.py"` alongside the resolved `command`. You normally do not need to write this field by hand — `install.sh` adds it.
 - any other extra JSON field. Extra fields are preserved verbatim in `definition` and passed to the plugin process, so custom settings belong there.
 
 ## 4. How to choose the hook point
@@ -89,7 +89,7 @@ The `action` segment selects which hook family the entry belongs to. Today **fou
 - `Chat` — wraps user input / system prompt assembly. Three sub-points exist (see section 14 below): `*.Chat.command.before`, `*.Chat.message.received`, `*.Chat.system.transform`.
 - `Session` — wraps session lifecycle events. Three sub-points exist (see section 15): `*.Session.lifecycle.created`, `*.Session.lifecycle.closed`, `*.Session.lifecycle.state`.
 
-The family is routed on the `action` segment, and the exact hook-point category is resolved from the **`(action, stage)` pair only** (`crates/hook/src/hookers/plugin/builder.rs:21-31`; `crates/hook/src/hookers/hook_point_category.rs:45-62`):
+The family is routed on the `action` segment, and the exact hook-point category is resolved from the **`(action, stage)` pair only** (`crates/hook/src/hookers/plugin/builder.rs`; `crates/hook/src/hookers/hook_point_category.rs`):
 
 | `action` | accepted `stage` | family |
 |---|---|---|
@@ -100,9 +100,9 @@ The family is routed on the `action` segment, and the exact hook-point category 
 | `Chat` | `received` | chat message |
 | `Chat` | `before` | chat command-before |
 
-**The `detail` segment is free-form and is never validated.** The matcher reads the segments as `[agent, action, detail, stage]` and deliberately ignores `detail` (`crates/hook/src/hookers/hook_point_category.rs:34,45-62`). So `*.Chat.message.received` and `*.Chat.whatever.received` select the *same* category; `detail` is a readability/documentation convention (`message` / `system` / `command`, `file_read`, `lifecycle`), not a routing key. Use the conventional `detail` values shown in the examples so your `plugin.json` stays readable, and never branch on `detail` from inside the script — branch on `payload.stage` (section 14.2).
+**The `detail` segment is free-form and is never validated.** The matcher reads the segments as `[agent, action, detail, stage]` and deliberately ignores `detail` (`crates/hook/src/hookers/hook_point_category.rs`). So `*.Chat.message.received` and `*.Chat.whatever.received` select the *same* category; `detail` is a readability/documentation convention (`message` / `system` / `command`, `file_read`, `lifecycle`), not a routing key. Use the conventional `detail` values shown in the examples so your `plugin.json` stays readable, and never branch on `detail` from inside the script — branch on `payload.stage` (section 14.2).
 
-A hook point must have exactly **four** dot-separated segments. Anything else, or an empty `action`/`stage`, or an unlisted `(action, stage)` pair, is a hard config error at registry build time (`crates/hook/src/hookers/hook_point_category.rs:25-43,63-68`) — the daemon refuses to start rather than silently ignoring the hook.
+A hook point must have exactly **four** dot-separated segments. Anything else, or an empty `action`/`stage`, or an unlisted `(action, stage)` pair, is a hard config error at registry build time (`crates/hook/src/hookers/hook_point_category.rs`) — the daemon refuses to start rather than silently ignoring the hook.
 
 Examples:
 
@@ -114,7 +114,7 @@ Examples:
 - `*.Session.lifecycle.created`
 - `*.Session.lifecycle.state`
 
-A live example of the `Llm` family ships in this repo: `plugins/hookers/llm_pre_secret_guard/plugin.json:4` registers `*.Llm.complete.pre` (see also its [README](./llm_pre_secret_guard/README.md)).
+A live example of the `Llm` family ships in this repo: `plugins/hookers/llm_pre_secret_guard/plugin.json` registers `*.Llm.complete.pre` (see also its [README](./llm_pre_secret_guard/README.md)).
 
 Wildcard support today:
 
@@ -164,18 +164,18 @@ If the command exits non-zero, the hook is treated as failed.
 
 ### Subprocess timeout
 
-Every plugin command runs under a **hard timeout**, and the child is killed when it expires (`kill_on_drop`, `crates/hook/src/hookers/plugin/core.rs:297-355`). A plugin script that hangs (deadlock, infinite loop, a network call without its own timeout) fails the hook instead of stalling the agent loop — but a legitimately slow script is still a bug, so keep plugins fast and give any network call its own timeout.
+Every plugin command runs under a **hard timeout**, and the child is killed when it expires (`kill_on_drop`, `crates/hook/src/hookers/plugin/core.rs`). A plugin script that hangs (deadlock, infinite loop, a network call without its own timeout) fails the hook instead of stalling the agent loop — but a legitimately slow script is still a bug, so keep plugins fast and give any network call its own timeout.
 
 | hook family | cap | where |
 |---|---|---|
-| `Tool` | 600000 ms (10 min) | `crates/hook/src/hookers/plugin/tool/adaptor.rs:21` |
-| `Llm` | 600000 ms (10 min) | `crates/hook/src/hookers/plugin/llm/adaptor.rs:21` |
-| `Chat` | 30000 ms (30 s) | `crates/hook/src/hookers/plugin/core.rs:268` |
-| `Session` | 30000 ms (30 s) | `crates/hook/src/hookers/plugin/core.rs:268` |
+| `Tool` | 600000 ms (10 min) | `crates/hook/src/hookers/plugin/tool/adaptor.rs` |
+| `Llm` | 600000 ms (10 min) | `crates/hook/src/hookers/plugin/llm/adaptor.rs` |
+| `Chat` | 30000 ms (30 s) | `crates/hook/src/hookers/plugin/core.rs` |
+| `Session` | 30000 ms (30 s) | `crates/hook/src/hookers/plugin/core.rs` |
 
-Tool/Llm hooks get the longer cap because their plugins may proxy slow LLM/tool work; chat/session hookers are short observers. The cap covers the **whole** interaction — the stdin write and the stdout wait share one deadline (`crates/hook/src/hookers/plugin/core.rs:312-320`), so a plugin that never reads stdin still cannot hang the host, even when the payload exceeds the pipe buffer.
+Tool/Llm hooks get the longer cap because their plugins may proxy slow LLM/tool work; chat/session hookers are short observers. The cap covers the **whole** interaction — the stdin write and the stdout wait share one deadline (`crates/hook/src/hookers/plugin/core.rs`), so a plugin that never reads stdin still cannot hang the host, even when the payload exceeds the pipe buffer.
 
-On timeout the hook fails with a timeout error carrying the cap in milliseconds: for `Tool` this maps to `ToolExecutionError::Timeout { timeout_ms }` (`crates/hook/src/hookers/plugin/tool/adaptor.rs:48-50`), for `Llm` to the dedicated `LlmError::Timeout` variant (`crates/hook/src/hookers/plugin/llm/adaptor.rs:49-51`), and for `Chat`/`Session` to the generic plugin error (`crates/hook/src/hookers/plugin/chat/adaptor.rs:43-45`; `crates/hook/src/hookers/plugin/session/adaptor.rs:59-61`).
+On timeout the hook fails with a timeout error carrying the cap in milliseconds: for `Tool` this maps to `ToolExecutionError::Timeout { timeout_ms }` (`crates/hook/src/hookers/plugin/tool/adaptor.rs`), for `Llm` to the dedicated `LlmError::Timeout` variant (`crates/hook/src/hookers/plugin/llm/adaptor.rs`), and for `Chat`/`Session` to the generic plugin error (`crates/hook/src/hookers/plugin/chat/adaptor.rs`; `crates/hook/src/hookers/plugin/session/adaptor.rs`).
 
 A failed hook — spawn failure, non-zero exit, timeout, invalid JSON on stdout, missing required response field, or an unsupported `result` tag — is logged and skipped by the host; it never propagates as a turn failure. Exit non-zero only when you actually mean "this hook failed".
 
@@ -230,30 +230,30 @@ Typical pre-hook payload shape:
 }
 ```
 
-Every plugin payload — all four families, all stages — carries these five common fields (`crates/hook/src/hookers/plugin/core.rs:173-191`):
+Every plugin payload — all four families, all stages — carries these five common fields (`crates/hook/src/hookers/plugin/core.rs`):
 
 | field | meaning |
 |---|---|
 | `stage` | stage discriminator string (see 14.2 for chat values) — `pre` / `post` / `error` for Tool/Llm, `session_created` / `session_closed` / `session_state` for Session |
-| `hooker` | `{ id, hook_point, command, agent_id }` — id/hook-point/command as configured plus the ambient agent id (`crates/hook/src/hookers/plugin/core.rs:63-70`) |
-| `metadata` | trace/span correlation: `{ trace_id, span_id, parent_span_id }` (`crates/hook/src/hookers/plugin/core.rs:74-80`) |
-| `policy` | the effective per-hooker policy `Value` for this hooker id, or `null` when none is configured (`crates/hook/src/hookers/plugin/core.rs:184`) |
+| `hooker` | `{ id, hook_point, command, agent_id }` — id/hook-point/command as configured plus the ambient agent id (`crates/hook/src/hookers/plugin/core.rs`) |
+| `metadata` | trace/span correlation: `{ trace_id, span_id, parent_span_id }` (`crates/hook/src/hookers/plugin/core.rs`) |
+| `policy` | the effective per-hooker policy `Value` for this hooker id, or `null` when none is configured (`crates/hook/src/hookers/plugin/core.rs`) |
 | `definition` | your own `plugin.json` entry, verbatim — this is where custom fields land |
 
-Tool `pre` adds these stage fields on top (`crates/hook/src/hookers/plugin/tool/adaptor.rs:292-304`):
+Tool `pre` adds these stage fields on top (`crates/hook/src/hookers/plugin/tool/adaptor.rs`):
 
 | field | type | meaning |
 |---|---|---|
-| `session_id` | string | session driving the tool call; never `null` — falls back to `call.call_id` when the runtime carries no session id (`crates/hook/src/hookers/plugin/tool/adaptor.rs:142-149`) |
-| `workspace` | string \| null | absolute workspace root bound to the agent (`crates/hook/src/hookers/plugin/core.rs:250-255`) |
+| `session_id` | string | session driving the tool call; never `null` — falls back to `call.call_id` when the runtime carries no session id (`crates/hook/src/hookers/plugin/tool/adaptor.rs`) |
+| `workspace` | string \| null | absolute workspace root bound to the agent (`crates/hook/src/hookers/plugin/core.rs`) |
 | `call` | object | the tool call being gated: `{ call_id, tool_name, input }` |
-| `prompt_session` | string | the **most recent** user message text, `""` when there is none. This is the "current intent", not the first user message of the session — user answers to `ask_user_question` come back as tool results, not user messages, so this stays the last thing the user actually typed (`crates/hook/src/hookers/plugin/tool/adaptor.rs:166-176`) |
-| `prompt_history` | array | interleaved conversation history: one entry per user turn `{ text, actions: [...] }`, where `actions` holds the tool results that followed that turn, each `{ action_type, action_detail, call_id, output, is_error }` (`crates/hook/src/hookers/plugin/tool/adaptor.rs:237-282`). Use this when a later "continue" must not erase the earlier intent. |
-| `action_history` | array | flat, chronological list of completed tool calls with their results: `{ action_type, action_detail, call_id, output, is_error }` (`crates/hook/src/hookers/plugin/tool/adaptor.rs:205-231`). `action_type` is the tool name, `action_detail` is that tool's input. |
+| `prompt_session` | string | the **most recent** user message text, `""` when there is none. This is the "current intent", not the first user message of the session — user answers to `ask_user_question` come back as tool results, not user messages, so this stays the last thing the user actually typed (`crates/hook/src/hookers/plugin/tool/adaptor.rs`) |
+| `prompt_history` | array | interleaved conversation history: one entry per user turn `{ text, actions: [...] }`, where `actions` holds the tool results that followed that turn, each `{ action_type, action_detail, call_id, output, is_error }` (`crates/hook/src/hookers/plugin/tool/adaptor.rs`). Use this when a later "continue" must not erase the earlier intent. |
+| `action_history` | array | flat, chronological list of completed tool calls with their results: `{ action_type, action_detail, call_id, output, is_error }` (`crates/hook/src/hookers/plugin/tool/adaptor.rs`). `action_type` is the tool name, `action_detail` is that tool's input. |
 
-Both histories are derived from the last 100 conversation messages (`crates/hook/src/hookers/plugin/tool/adaptor.rs:159`).
+Both histories are derived from the last 100 conversation messages (`crates/hook/src/hookers/plugin/tool/adaptor.rs`).
 
-`session_id` is the id of the session driving the tool call (`null` never happens here; when the runtime carries no session id the call id is used as the fallback identity). `workspace` is the absolute workspace root bound to the agent (`null` when none); the plugin subprocess inherits the host's cwd, which may have drifted (e.g. after a `cd` inside a bash tool), so treat `payload.workspace` — not `process.cwd()` — as the authoritative workspace path. **There is no `cwd` field in the payload.** This is not a cosmetic naming difference: a plugin that reads `cwd` gets an empty string rather than an error, which is how the agent_moss hooker silently lost its indirect-file-access guard (it reads `data.get("cwd", "")`). Read `payload.workspace`.
+`session_id` is the id of the session driving the tool call (`null` never happens here; when the runtime carries no session id the call id is used as the fallback identity). `workspace` is the absolute workspace root bound to the agent (`null` when none); the plugin subprocess inherits the host's cwd, which may have drifted (e.g. after a `cd` inside a bash tool), so treat `payload.workspace` — not `process.cwd()` — as the authoritative workspace path. **There is no `cwd` field in the payload.** This is not a cosmetic naming difference: a plugin that reads `cwd` gets an empty string rather than an error. Read `payload.workspace`.
 
 ### Allowed output
 
@@ -324,7 +324,7 @@ defines one generic key:
 
 ### Input payload
 
-The post-hook payload carries the same common blocks (`stage` / `hooker` / `metadata` / `policy` / `definition`) plus `session_id`, `workspace`, `call`, and `outcome` (`crates/hook/src/hookers/plugin/tool/adaptor.rs:322-332`).
+The post-hook payload carries the same common blocks (`stage` / `hooker` / `metadata` / `policy` / `definition`) plus `session_id`, `workspace`, `call`, and `outcome` (`crates/hook/src/hookers/plugin/tool/adaptor.rs`).
 
 Success example:
 
@@ -362,7 +362,7 @@ Error output example:
 }
 ```
 
-`outcome.type` is either `"success"` (carrying `output`) or `"error"` (carrying `message`) (`crates/hook/src/hookers/plugin/tool/adaptor.rs:363-374`). Note this is a **tool outcome** on the `post` stage — a tool that ran and returned an error message. A tool that *failed to execute* fires the `error` stage instead (section 9). `call` is identical in shape to the pre payload, so post hookers correlate an event with the call that produced it without cross-process state.
+`outcome.type` is either `"success"` (carrying `output`) or `"error"` (carrying `message`) (`crates/hook/src/hookers/plugin/tool/adaptor.rs`). Note this is a **tool outcome** on the `post` stage — a tool that ran and returned an error message. A tool that *failed to execute* fires the `error` stage instead (section 9). `call` is identical in shape to the pre payload, so post hookers correlate an event with the call that produced it without cross-process state.
 
 ### Allowed output
 
@@ -382,7 +382,7 @@ Rewrite successful output text:
 
 ### Input payload
 
-The error-hook payload carries the same common blocks (`stage` / `hooker` / `metadata` / `policy` / `definition`) plus `session_id`, `workspace`, `call`, and `error` (`crates/hook/src/hookers/plugin/tool/adaptor.rs:350-360`).
+The error-hook payload carries the same common blocks (`stage` / `hooker` / `metadata` / `policy` / `definition`) plus `session_id`, `workspace`, `call`, and `error` (`crates/hook/src/hookers/plugin/tool/adaptor.rs`).
 
 Example:
 
@@ -407,7 +407,7 @@ Example:
 }
 ```
 
-`error.type` is one of four tags (`crates/hook/src/hookers/plugin/tool/adaptor.rs:376-397`):
+`error.type` is one of four tags (`crates/hook/src/hookers/plugin/tool/adaptor.rs`):
 
 | `error.type` | extra fields | meaning |
 |---|---|---|
@@ -436,8 +436,8 @@ Recover with replacement output:
 
 Shipped plugins in this repository that you can read as complete, working protocol examples:
 
-- [`tool_post_secret_guard`](./tool_post_secret_guard/README.md) — a `*.Tool.*.post` hooker (`plugins/hookers/tool_post_secret_guard/plugin.json:4`) that reads `payload.call.tool_name` and `payload.outcome` and returns `accept` or `transform`.
-- [`llm_pre_secret_guard`](./llm_pre_secret_guard/README.md) — a `*.Llm.complete.pre` hooker (`plugins/hookers/llm_pre_secret_guard/plugin.json:4`) that scans `payload.request` and returns `allow` or `transform`.
+- [`tool_post_secret_guard`](./tool_post_secret_guard/README.md) — a `*.Tool.*.post` hooker (`plugins/hookers/tool_post_secret_guard/plugin.json`) that reads `payload.call.tool_name` and `payload.outcome` and returns `accept` or `transform`.
+- [`llm_pre_secret_guard`](./llm_pre_secret_guard/README.md) — a `*.Llm.complete.pre` hooker (`plugins/hookers/llm_pre_secret_guard/plugin.json`) that scans `payload.request` and returns `allow` or `transform`.
 - [`cerberus_bash_control`](./cerberus_bash_control/README.md) — a `*.Tool.bash.pre` / `*.Tool.bash.post` pair that rewrites the command and inspects the result.
 
 The smallest possible runnable pre-hook, copied from the pre payload in section 7:
@@ -752,9 +752,9 @@ xiaoo presents the widget to the user. After the user answers, xiaoo calls the *
 
 The plugin inspects `interaction.response` and either returns another `action: "ask_user"` (loop) or returns a `result` (`final`). When `action` is absent or `"final"`, the `result` is treated as the hook's terminal output. This lets a plugin gate a `Transform`/`Deny` behind explicit user consent.
 
-**Which hooks support `ask_user`**: the round-trip lives in the shared plugin-hooker core, so it is available to the **chat**, **tool**, and **llm** families — not only chat (`crates/hook/src/hookers/plugin/core.rs:193-235`). All three call it through the same `resolve_plugin_output` path: chat (`crates/hook/src/hookers/plugin/chat/adaptor.rs:85`), tool (`crates/hook/src/hookers/plugin/tool/adaptor.rs:85`), llm (`crates/hook/src/hookers/plugin/llm/adaptor.rs:86`). A tool `pre` hooker can therefore ask the user whether to allow a call, and an llm `pre` hooker whether to send a request as-is.
+**Which hooks support `ask_user`**: the round-trip lives in the shared plugin-hooker core, so it is available to the **chat**, **tool**, and **llm** families — not only chat (`crates/hook/src/hookers/plugin/core.rs`). All three call it through the same `resolve_plugin_output` path: chat (`crates/hook/src/hookers/plugin/chat/adaptor.rs`), tool (`crates/hook/src/hookers/plugin/tool/adaptor.rs`), llm (`crates/hook/src/hookers/plugin/llm/adaptor.rs`). A tool `pre` hooker can therefore ask the user whether to allow a call, and an llm `pre` hooker whether to send a request as-is.
 
-The session lifecycle hooks (section 15) do **not** support `ask_user` — they are event-only, and they call the one-shot subprocess driver directly rather than the interaction loop (`crates/hook/src/hookers/plugin/session/adaptor.rs:136-144`).
+The session lifecycle hooks (section 15) do **not** support `ask_user` — they are event-only, and they call the one-shot subprocess driver directly rather than the interaction loop (`crates/hook/src/hookers/plugin/session/adaptor.rs`).
 
 ## 15. Session lifecycle hook protocol
 
@@ -860,7 +860,7 @@ Switching on `payload.state` is intentional — the same hooker script keeps wor
 
 The `*.Llm.*` family wraps a single LLM request/response round-trip: `pre` (before the request is sent), `post` (after the response arrives), and `error` (the call failed). It shares the subprocess protocol and the common payload blocks with the other families, and — like Chat and Tool — it supports the `ask_user` interaction round-trip (section 14.6) and gets the 10-minute subprocess cap (section 6).
 
-**`*.Llm.*` payloads do not carry `session_id` or `workspace`.** Unlike Tool/Chat/Session hooks, the LLM adaptor adds no session-identity fields; its payload is the common skeleton plus `request` / `response` / `error` only (`crates/hook/src/hookers/plugin/llm/adaptor.rs:139-203`). If your plugin needs the session id, it is not in the payload.
+**`*.Llm.*` payloads do not carry `session_id` or `workspace`.** Unlike Tool/Chat/Session hooks, the LLM adaptor adds no session-identity fields; its payload is the common skeleton plus `request` / `response` / `error` only (`crates/hook/src/hookers/plugin/llm/adaptor.rs`). If your plugin needs the session id, it is not in the payload.
 
 ### 15b.1 Input payloads
 
@@ -877,7 +877,7 @@ The `*.Llm.*` family wraps a single LLM request/response round-trip: `pre` (befo
 }
 ```
 
-`*.Llm.*.post` adds `response` (`crates/hook/src/hookers/plugin/llm/adaptor.rs:157-179`):
+`*.Llm.*.post` adds `response` (`crates/hook/src/hookers/plugin/llm/adaptor.rs`):
 
 ```json
 {
@@ -894,9 +894,9 @@ The `*.Llm.*` family wraps a single LLM request/response round-trip: `pre` (befo
 }
 ```
 
-`stop_reason` is one of `end_turn` / `max_tokens` / `tool_use` / `content_filter` (`crates/hook/src/hookers/plugin/llm/adaptor.rs:220-225`).
+`stop_reason` is one of `end_turn` / `max_tokens` / `tool_use` / `content_filter` (`crates/hook/src/hookers/plugin/llm/adaptor.rs`).
 
-`*.Llm.*.error` adds `error` instead (`crates/hook/src/hookers/plugin/llm/adaptor.rs:181-203`). `error.type` is one of: `request_failed`, `http_error`, `api_error`, `parse_error`, `rate_limited` (extra `retry_after_ms`), `auth_error`, `model_not_found` (extra `model`), `provider_not_found`, `config_error`, `context_length_exceeded`, `stream_error`, `io_error`, `timeout`, `cancelled`; `message` accompanies every variant (`crates/hook/src/hookers/plugin/llm/adaptor.rs:230-291`).
+`*.Llm.*.error` adds `error` instead (`crates/hook/src/hookers/plugin/llm/adaptor.rs`). `error.type` is one of: `request_failed`, `http_error`, `api_error`, `parse_error`, `rate_limited` (extra `retry_after_ms`), `auth_error`, `model_not_found` (extra `model`), `provider_not_found`, `config_error`, `context_length_exceeded`, `stream_error`, `io_error`, `timeout`, `cancelled`; `message` accompanies every variant (`crates/hook/src/hookers/plugin/llm/adaptor.rs`).
 
 ### 15b.2 Legal output
 
@@ -930,7 +930,7 @@ Error — propagate or recover:
 { "result": "recover", "response": { "message": { ... } } }
 ```
 
-`modified_request` must deserialize as a complete `LlmRequest`; a partially-specified object is rejected. For `modified_response` / `recover`, the `message` object must contain `tool_calls` (array), `usage` (object), and `stop_reason` (one of the four strings above); `text` and `reasoning_content` are optional strings (`crates/hook/src/hookers/plugin/llm/adaptor.rs:367-496`). A response that omits a required sub-field fails the hook rather than being silently coerced.
+`modified_request` must deserialize as a complete `LlmRequest`; a partially-specified object is rejected. For `modified_response` / `recover`, the `message` object must contain `tool_calls` (array), `usage` (object), and `stop_reason` (one of the four strings above); `text` and `reasoning_content` are optional strings (`crates/hook/src/hookers/plugin/llm/adaptor.rs`). A response that omits a required sub-field fails the hook rather than being silently coerced.
 
 See [`llm_pre_secret_guard`](./llm_pre_secret_guard/README.md) for a shipped `*.Llm.complete.pre` example.
 
@@ -973,7 +973,7 @@ Field rules:
 
 `send_prompt` also accepts a `chain_depth` field, but it is **host-controlled**: plugins must not set it. The daemon overwrites any plugin-supplied value with `emitting_turn_depth + 1` before forwarding, so a plugin cannot forge a low depth to bypass the cross-turn cap (see 16.9). The TUI relays the stamped value back via `RuntimeTurnRequest.chain_depth` so the resulting turn's depth is tracked.
 
-Both kinds collapse to the same daemon call today (`open_session` is idempotent), but the two variants exist so future xiaoo versions can distinguish "create a brand-new session and seed it" from "switch the TUI to an existing session" without breaking the JSON contract.
+`create_session` / `switch_session` collapse to the same daemon call today (`open_session` is idempotent), but the two variants exist so future xiaoo versions can distinguish "create a brand-new session and seed it" from "switch the TUI to an existing session" without breaking the JSON contract.
 
 ### 16.4 Execution flow
 
@@ -1092,7 +1092,7 @@ A `send_prompt`-triggered turn ends by firing `*.Session.lifecycle.state` again,
 max_prompt_chain_depth = 128   # default; lower it for debugging
 ```
 
-The cap is exclusive on `chain_depth`: the daemon allows `next = N + 1` while `next < max`, and drops at `next >= max`. So with the default of 128, a chain may run **128 turns total** (1 user-initiated + 127 `send_prompt`-triggered) before being cut off. Setting `N = 3` yields exactly 3 sessions: the user turn (depth 0) plus 2 `send_prompt`-triggered turns (depths 1 and 2); the `send_prompt` that would have started depth 3 is dropped.
+The cap is exclusive on `chain_depth`: the daemon allows `next = N + 1` while `next < max`, and drops at `next >= max`. So with the default of 128, a chain may run **128 turns total** (1 user-initiated + 127 `send_prompt`-triggered) before being cut off. Setting `N = 3` yields exactly 3 turns: the user turn (depth 0) plus 2 `send_prompt`-triggered turns (depths 1 and 2); the `send_prompt` that would have started depth 3 is dropped.
 
 ### 16.10 Checklist before you say "my actions don't fire"
 

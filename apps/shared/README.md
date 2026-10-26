@@ -18,7 +18,7 @@ Application-layer package for XiaoO.
   request/result shapes grouped in `src/backend/base.rs`.
 
 The public control plane should talk in runtime/checkpoint terms. In the current
-v1 implementation, `runtime_id` is backed by the internal `session_id`, while
+implementation, `runtime_id` is backed by the internal `session_id`, while
 backend ids remain internal manager state. See
 [`docs/runtime_checkpoint.md`](../../docs/runtime_checkpoint.md)
 for the current checkpoint layering.

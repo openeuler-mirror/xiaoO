@@ -58,12 +58,14 @@ version: 3.0.0
 
 #### 执行转换
 ```bash
-python3 ~/.claude/skills/block-analyzer/scripts/trace_to_alert.py \
+python3 <skill安装目录>/block-analyzer/scripts/trace_to_alert.py \
   --trace-id <TRACE_ID> \
   --moirai-bin /path/to/xiaoO/target/release/moirai \
   --db /path/to/traces.db \
   --output <alert.json>
 ```
+
+脚本路径：开发仓内为 `plugins/skills/block-analyzer/scripts/trace_to_alert.py`；安装后位于 `~/.xiaoo/skills/`（用户级）或 `/usr/lib/.xiaoo/skills/`（系统级）。
 
 #### 转换器内部流程
 1. 调用 `moirai export --trace-id --db` 导出 trace JSON

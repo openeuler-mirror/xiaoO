@@ -144,7 +144,7 @@ Example:
 ```bash
 git clone <your-repo-url> /opt/xiaoo/src
 cd /opt/xiaoo/src
-git checkout telegram
+git checkout <your-branch>
 cargo build -p xiaoo-serverside
 ```
 
@@ -250,10 +250,10 @@ Do not put the Telegram bot token directly into `config.toml`.
 Both Telegram modes share the same LLM and bot identity settings.
 
 > **LLM shape.** The canonical form is a named profile plus `active_profile`
-> (`apps/serverside/src/config_schema.rs:10-21`). The older flat
+> (`apps/serverside/src/config_schema.rs`). The older flat
 > `[llm] provider/model/api_key_env` form still validates and is still honored —
 > `activate_profile` returns `Ok(None)` and falls through to the flat fields when
-> `llm.profiles` is empty (`apps/serverside/src/daemon_config.rs:138-146`) — but
+> `llm.profiles` is empty (`apps/serverside/src/daemon_config.rs`) — but
 > new configs should use profiles. Both forms below pass
 > `xiaoo-daemon config validate`.
 
@@ -401,9 +401,9 @@ When `webhook_secret_token` **is** set, xiaoO rejects the webhook request when
 the header does not match it.
 
 > ⚠️ **Security-relevant: omitting `webhook_secret_token` disables webhook auth
-> entirely.** The field is optional (`apps/serverside/src/daemon_config.rs:214`)
+> entirely.** The field is optional (`apps/serverside/src/daemon_config.rs`)
 > and `verify_secret_token` short-circuits to `Ok` when it is absent
-> (`apps/serverside/src/channels/telegram/channel.rs:151-154`):
+> (`apps/serverside/src/channels/telegram/channel.rs`):
 >
 > ```rust
 > let Some(expected) = config.webhook_secret_token.as_deref() else {
@@ -419,15 +419,15 @@ the header does not match it.
 
 ## 10. Why Reverse Proxy Is Needed for Webhook
 
-> ⚠️ **Security-relevant correction.** An earlier revision of this document
-> claimed xiaoO "does not bind directly on the public interface". The built-in
-> default is now `--host 127.0.0.1 --port 18080` (loopback only), and the daemon
-> refuses to start on a non-loopback address unless a bearer token is configured
-> (`[http].bearer_token` / `[http].bearer_token_env`). Started with no flags,
-> xiaoO is reachable only from the local host.
+xiaoO binds to loopback by default (`--host 127.0.0.1 --port 18080`), and a
+non-loopback bind requires a configured bearer token — the daemon refuses to
+start otherwise (`ensure_external_bind_is_authenticated`,
+`apps/serverside/src/main.rs`; configure `[http].bearer_token` /
+`[http].bearer_token_env`). Started with no flags, xiaoO is reachable only from
+the local host.
 
-In the recommended secure server deployment, xiaoO listens on loopback:
-on loopback only, by passing the flag explicitly:
+In the recommended secure server deployment, xiaoO listens on loopback only
+(the default; `--host 127.0.0.1`):
 
 - xiaoO listens on:
   - `127.0.0.1:18080` (the default; `--host 127.0.0.1`)
@@ -585,6 +585,7 @@ Example environment file:
 ```bash
 # ~/.config/xiaoo/telegram.env
 TELEGRAM_BOT_TOKEN=your-real-telegram-bot-token
+OPENROUTER_API_KEY=your-real-openrouter-key
 ```
 
 Example script:
@@ -597,26 +598,22 @@ set -a
 source "$HOME/.config/xiaoo/telegram.env"
 set +a
 
-export OPENROUTER_API_KEY="$(
-python3 - <<'PY'
-import json
-import pathlib
-
-path = pathlib.Path.home() / ".config" / "xiaoo" / "llm_secrets.json"
-data = json.loads(path.read_text())
-value = str(data.get("OPENROUTER_API_KEY", "")).strip()
-if not value:
-    raise SystemExit("OPENROUTER_API_KEY is missing from ~/.config/xiaoo/llm_secrets.json")
-print(value)
-PY
-)"
-
 cd "/path/to/xiaoO"
 exec cargo run -p xiaoo-serverside --bin xiaoo-daemon -- \
   --config "$HOME/.config/xiaoo/config.toml" \
   --host 127.0.0.1 \
   --port 18080
 ```
+
+> **Note:** do not try to read the API key from
+> `~/.config/xiaoo/llm_secrets.json` in a script. That file is an encrypted
+> store (AES-256-GCM with a per-instance master key, or SDF 国密 when
+> `use_sdf = true`; decryption in `apps/shared/src/llm_secrets.rs`),
+> and its plaintext shape is `{api_keys: {...}, tokens: {...}}`, not a flat map
+> of environment-variable names. The daemon itself injects those secrets into
+> its environment at startup; a shell script cannot reuse the file directly.
+> Keep the model-provider key in a plain env file such as
+> `~/.config/xiaoo/telegram.env` (or export it in your shell profile) instead.
 
 Recommended permissions:
 
@@ -654,7 +651,7 @@ These layers must line up for webhook mode:
 4. `[channels.telegram].transport = "webhook"`
 5. `webhook_secret_token` is configured — **mandatory**: with it unset,
    `verify_secret_token` returns `Ok` and the endpoint accepts any POST
-   (`apps/serverside/src/channels/telegram/channel.rs:151-154`)
+   (`apps/serverside/src/channels/telegram/channel.rs`)
 6. xiaoO daemon is listening on `127.0.0.1:18080` (the default; loopback only)
 7. nginx has a matching HTTPS `location`
 8. nginx proxies to `/api/v1/channels/telegram/events`
@@ -719,7 +716,7 @@ Expected for webhook mode:
 ### 16.4.1 Check channel registration and config (bearer-protected)
 
 Both endpoints below sit in the protected route group
-(`apps/serverside/src/httpserver/router.rs:613-614`), so they need the bearer
+(`apps/serverside/src/httpserver/router.rs`), so they need the bearer
 token from your `[http] bearer_token_env`:
 
 ```bash
@@ -756,8 +753,8 @@ alone — the fastest diagnostic when the service will not start:
 xiaoo-daemon config channels --config /opt/xiaoo/config/config.toml
 ```
 
-Dispatch: `apps/serverside/src/main.rs:383-391`; report builder
-`apps/serverside/src/channel_management.rs:235-240`.
+Dispatch: `apps/serverside/src/main.rs`; report builder
+`apps/serverside/src/channel_management.rs`.
 
 ### 16.5 Check service logs
 

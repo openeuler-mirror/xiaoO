@@ -38,7 +38,7 @@
 // crates/core/src/agent_loop.rs 文件尾
 #[cfg(test)]
 #[path = "../../../tests/unit/core/agent_loop_test.rs"]
-mod tests;
+mod basics_test;
 ```
 
 - 迁出文件中 `use super::*` 语义不变（模块树位置未动，仅文件挪位），私有项访问保留；

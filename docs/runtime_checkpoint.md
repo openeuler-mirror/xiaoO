@@ -9,12 +9,12 @@ The external API is runtime-oriented. Callers control a runtime object by using
 `runtime_id` and `checkpoint_id`; they do not need to know which session or
 backend instance is carrying that runtime.
 
-Internally, the current v1 implementation uses this layering:
+Internally, the implementation uses this layering:
 
 | Layer | Current role | External exposure |
 | --- | --- | --- |
 | Runtime | Control-plane object used for checkpoint and checkout | Exposed as `runtime_id` and `RuntimeRecord` |
-| Session | Gateway execution state, conversation identity, lifecycle state, handle state, and resolved agent runtime snapshot | Mostly hidden behind runtime APIs; v1 uses `runtime_id == session_id` |
+| Session | Gateway execution state, conversation identity, lifecycle state, handle state, and resolved agent runtime snapshot | Mostly hidden behind runtime APIs; `runtime_id` equals `session_id` |
 | Backend | Operation substrate for file, exec, search, export, and provider snapshots | Internal; backend ids are not returned by `RuntimeRecord` |
 
 `RuntimeRecord` is derived from `SessionRecord`:
@@ -30,7 +30,7 @@ pub struct RuntimeRecord {
 }
 ```
 
-In v1, `runtime_id` is the same value as `SessionRecord.session_id`. The
+`runtime_id` is the same value as `SessionRecord.session_id`. The
 backend binding is kept inside `SessionRecord.backend_instance` and the
 `BackendManager` session index, which maps a session/runtime id to a backend id.
 This keeps backend placement and provider-native ids out of the public runtime
@@ -51,15 +51,15 @@ Bearer authentication applies when `[http]` auth is configured.
 | `POST /api/v1/runtimes/resume` | `RuntimeResumeRequest` | `RuntimeResumeResult` | Restore a paused runtime with the same runtime id |
 
 The catalog endpoint is registered alongside the mutating routes
-(`apps/serverside/src/httpserver/router.rs:579-582`) and is protected by the same
+(`apps/serverside/src/httpserver/router.rs`) and is protected by the same
 bearer authentication. Each returned `RuntimeCheckpointSummary` carries
 `has_provider_snapshot`, which tells you whether the checkpoint can currently back a
 provider-side checkout without a fresh snapshot
-(`apps/shared/src/runtime_checkpoint.rs:106-115`; computed at
-`apps/shared/src/runtime_checkpoint.rs:130-143`). It is `true` only when a
+(`apps/shared/src/runtime_checkpoint.rs`; computed at
+`apps/shared/src/runtime_checkpoint.rs`). It is `true` only when a
 `BackendCheckpointRef` exists *and* still holds a provider snapshot id; after
 `checkpoint/delete-snapshot` clears that id the flag becomes `false` while the checkpoint
-record itself remains (`apps/shared/src/runtime_checkpoint.rs:225-233`).
+record itself remains (`apps/shared/src/runtime_checkpoint.rs`).
 
 ### Lease fields on mutating requests
 
@@ -68,25 +68,25 @@ that identifies the lease holder:
 
 | Request | Field | Source |
 | --- | --- | --- |
-| `RuntimeCheckpointRequest` | `client_id: Option<String>` | `crates/protocol/src/wire.rs:365-367` |
-| `RuntimePauseRequest` | `client_id: Option<String>` | `crates/protocol/src/wire.rs:400-402` |
-| `RuntimeResumeRequest` | `client_id: Option<String>` | `crates/protocol/src/wire.rs:413-415` |
+| `RuntimeCheckpointRequest` | `client_id: Option<String>` | `crates/protocol/src/wire.rs` |
+| `RuntimePauseRequest` | `client_id: Option<String>` | `crates/protocol/src/wire.rs` |
+| `RuntimeResumeRequest` | `client_id: Option<String>` | `crates/protocol/src/wire.rs` |
 
 `RuntimeCheckoutRequest` instead accepts `options: Option<Value>` for backend-specific
-checkout options (`crates/protocol/src/wire.rs:384-386`); it does not carry a `client_id`.
+checkout options (`crates/protocol/src/wire.rs`); it does not carry a `client_id`.
 
 Lease enforcement is **opt-in** and driven by the `XIAOO_ENFORCE_LEASE` environment
-variable (`apps/shared/src/gateway/bootstrap.rs:111-124`). Accepted truthy values are
+variable (`apps/shared/src/gateway/bootstrap.rs`). Accepted truthy values are
 `1`, `true`, `yes`, and `on` (case-insensitive, trimmed); anything else — including unset —
 leaves enforcement off for gradual rollout.
 
 - **Default (off):** mutating RPCs that carry no `client_id` bypass the lease check
-  (`apps/serverside/src/httpserver/router.rs:944`).
+  (`apps/serverside/src/httpserver/router.rs`).
 - **`XIAOO_ENFORCE_LEASE=on`:** mutating RPCs without a `client_id` are rejected with
-  `LeaseRequired` (HTTP 401) (`apps/shared/src/gateway/session_service_impl.rs:2021`).
+  `LeaseRequired` (HTTP 401) (`apps/shared/src/gateway/session_service_impl.rs`).
 
 Anonymous callers are the target of the check; clients that already hold a lease are
-unaffected (`apps/shared/src/gateway/session_service_impl.rs:1824`).
+unaffected (`apps/shared/src/gateway/session_service_impl.rs`).
 
 `RuntimeCheckpointRequest` contains `runtime_id`, optional `name`, and optional
 `metadata`. The result returns a generated `checkpoint_id`, the public
@@ -95,7 +95,7 @@ exists.
 
 `RuntimeCheckoutRequest` contains `checkpoint_id`, optional `conversation_id`,
 optional `sender_id`, and optional `metadata`. Checkout always creates a new
-runtime branch in v1. The caller cannot provide the child runtime id; the service
+runtime branch. The caller cannot provide the child runtime id; the service
 generates it from the source runtime id plus a UUID suffix.
 
 `RuntimeCheckpointSnapshotDeleteRequest` contains `checkpoint_id`. The service
@@ -127,18 +127,17 @@ The in-memory checkpoint store records:
 - creation time, name, and metadata
 
 Alongside the checkpoint records it keeps two runtime-scoped head indexes
-(`apps/shared/src/runtime_checkpoint.rs:155-156`):
+(`apps/shared/src/runtime_checkpoint.rs`):
 
 - `runtime_heads` — maps a runtime id to its latest (current) checkpoint id
-  (`apps/shared/src/runtime_checkpoint.rs:164-172`);
+  (`apps/shared/src/runtime_checkpoint.rs`);
 - `paused_runtime_heads` — maps a paused runtime id to the checkpoint it should resume from
-  (`apps/shared/src/runtime_checkpoint.rs:201-218`).
+  (`apps/shared/src/runtime_checkpoint.rs`).
 
 Closing a runtime removes both index entries together with every checkpoint record for that
-runtime (`apps/shared/src/runtime_checkpoint.rs:271-279`).
+runtime (`apps/shared/src/runtime_checkpoint.rs`).
 
-The store is process-local in v1. Restarting the daemon loses runtime
-checkpoints unless a later persistence layer is added.
+The store is process-local: restarting the daemon loses runtime checkpoints.
 
 Checkpoint and checkout require the source runtime to be idle. A running or busy
 session returns `SessionBusy` because the session snapshot and backend snapshot
@@ -158,7 +157,7 @@ snapshot API and stores the returned provider snapshot id inside
 create a new E2B-backed backend for the child runtime.
 
 Providers without snapshot checkout support return `UnsupportedBackend` for
-checkout. The current v1 implementation does not implement local restore.
+checkout. Local restore is not implemented.
 
 ## E2B Sandbox Timing
 
@@ -167,7 +166,7 @@ E2B runtime checkpoint and checkout include provider-side sandbox work:
 | Operation | Provider work | Notes |
 | --- | --- | --- |
 | `POST /api/v1/runtimes/checkpoint` | Calls the E2B snapshot API for the source sandbox when the backend is dirty or has no reusable checkpoint | Clean backends with an existing checkpoint can reuse the prior `BackendCheckpointRef` and avoid a new provider snapshot |
-| `POST /api/v1/runtimes/checkout` | Starts a new E2B sandbox from the provider snapshot and binds it to the child runtime id | The child runtime receives a generated id; callers cannot provide it in v1 |
+| `POST /api/v1/runtimes/checkout` | Starts a new E2B sandbox from the provider snapshot and binds it to the child runtime id | The child runtime receives a generated id; callers cannot provide it |
 | `POST /api/v1/runtimes/checkpoint/delete-snapshot` | Deletes the E2B snapshot/template by calling the E2B delete-template API | This is explicit cleanup for snapshots the caller no longer needs for future checkout |
 | `POST /api/v1/runtimes/close` | Releases the runtime backend and deletes the E2B sandbox when no runtimes remain bound to that backend | Close time is separate from checkpoint/checkout timing |
 | `POST /api/v1/runtimes/pause` | Calls the E2B snapshot API, then deletes the live sandbox | The checkpoint template remains available for resume |
@@ -178,16 +177,10 @@ measuring from a client. That value is end-to-end HTTP latency as observed by th
 caller; it includes daemon bookkeeping and E2B provider calls, but not the LLM
 turns needed to prepare or validate the runtime state.
 
-One local smoke run against an E2B backend on 2026-06-13 measured:
-
-| Operation | Measured `time_total` |
-| --- | ---: |
-| Runtime checkpoint | `1.516061s` |
-| Runtime checkout | `2.335461s` |
-
-These numbers are operational examples rather than SLA values. They can vary
-with E2B service latency, network path, snapshot size, template cold/warm state,
-and daemon host load.
+As an order of magnitude, checkpoint takes roughly 1-2 seconds and checkout
+roughly 2-3 seconds against an E2B backend. These are operational examples
+rather than SLA values. They can vary with E2B service latency, network path,
+snapshot size, template cold/warm state, and daemon host load.
 
 ## Dirty Tracking
 
@@ -198,9 +191,14 @@ The backend is marked dirty after these successful operations:
 
 - `write_bytes`
 - `create_dir_all`
+- `create_dir_all_with_extra`
 - `temp_path`
 - `exec`, once it returns `Ok(ExecResult)`, even if the process exit code is
   non-zero
+
+`exec_streaming` intentionally does not mark the backend dirty: streaming stdout
+is read-only and does not change the workspace
+(`apps/shared/src/backend/dirty_write.rs`).
 
 Read-only operations do not mark the backend dirty:
 
@@ -224,7 +222,7 @@ the manager creates a new backend checkpoint and clears the dirty flag.
 | `resume_runtime` | paused `runtime_id` | No | Backend checkout from the paused checkpoint | Continue a paused runtime |
 | `resume_session` | existing `session_id` | No | No checkpoint or backend checkout | Reattach to an existing live session handle |
 
-Checkout is non-destructive in v1. It copies the checkpointed session context,
+Checkout is non-destructive. It copies the checkpointed session context,
 optionally overrides `conversation_id` and `sender_id`, binds a checked-out
 backend when the checkpoint has one, saves the child session, and registers the
 checkpoint as the child runtime head.

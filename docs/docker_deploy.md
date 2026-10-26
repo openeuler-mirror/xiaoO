@@ -1,19 +1,10 @@
 # Docker 容器化部署
 
-> ## ⚠️ 剩余 known gap：runtime 依赖清单尚未精简（2026-10 核对）
->
-> 2026-09 记录的三处 Dockerfile 缺陷（COPY 已删除的 `llm-client-cli`、遗漏
-> COPY `crates/xiaoo-api` / `crates/protocol`、对已删除
-> `plugins/hookers/audit_agent/` 的残留操作）均已修复，`docker build` 可走通；
-> COPY 清单与 workspace 成员 / 插件目录的漂移由 CI 静态门禁
-> `scripts/check-dockerfile-copy-coverage.sh` 持续把关（编排见 `scripts/ci.sh`）。
-> 尚未处理的一项：runtime 阶段 dnf 清单仍含已删除的 `audit_agent` /
-> `audit_dashboard` 所需的 Python 包，见 §1 的 known-gap 说明。除此之外，
-> 本文档描述的即当前可用状态。
-
-xiaoO 提供官方 `Dockerfile`，设计目标是从代码仓构建出一个包含 `xiaoo`、
-`xiaoo-daemon` 和 `moirai` 三个程序的镜像。镜像默认拉起 `xiaoo-daemon`，
-对外暴露 HTTP API（`18080`）与只读 dashboard（`28081`）。
+xiaoO 提供官方 `Dockerfile`，从代码仓构建一个包含 `xiaoo`、`xiaoo-daemon`
+和 `moirai` 三个程序的镜像。镜像默认拉起 `xiaoo-daemon`，对外暴露 HTTP API
+（`18080`）；只读 dashboard（`28081`）默认只绑容器内回环地址，需
+`--dashboard-host 0.0.0.0`（或配置 `[http.dashboard].host`）才能经端口映射访问，
+见 §3。
 
 > **镜像不内置 `config.toml`**：运行时挂载配置文件，同一镜像可服务
 > OpenRouter / OpenAI / 智谱 / 本地模型 / Feishu bot 等任何场景，只需换
@@ -25,7 +16,7 @@ xiaoO 提供官方 `Dockerfile`，设计目标是从代码仓构建出一个包�
 ## 1. 镜像内容
 
 基于 `openeuler/openeuler:24.03-lts-sp3`，两阶段构建：builder 阶段用 dnf
-自带的 Rust 1.90 编译三个二进制并打包到 `/staging/`，runtime 阶段只装运行时
+自带的 Rust 工具链编译三个二进制并打包到 `/staging/`，runtime 阶段只装运行时
 依赖并拷入 staged 产物，最终镜像不带任何编译工具链。
 
 ### 文件布局
@@ -36,8 +27,8 @@ xiaoO 提供官方 `Dockerfile`，设计目标是从代码仓构建出一个包�
 | `/usr/bin/xiaoo-daemon` | HTTP daemon 二进制（默认启动） |
 | `/usr/bin/moirai` | moirai tracing 工具 |
 | `/usr/bin/xiaoo-hookers-install` / `-uninstall` | → hookers `install.sh` / `uninstall.sh` 的软链 |
-| `/usr/lib/.xiaoo/skills/` | 内置 skills |
-| `/usr/lib/.xiaoo/hookers/` | hookers 插件（随仓发布的四个：`agent_moss`、`cerberus_bash_control`、`llm_pre_secret_guard`、`tool_post_secret_guard`） |
+| `/usr/lib/.xiaoo/skills/` | 内置 skills（`block-analyzer`、`security-rules-tester`、`xiaoo-guardian`） |
+| `/usr/lib/.xiaoo/hookers/` | hookers 插件（`agent_moss`、`cerberus_bash_control`、`llm_pre_secret_guard`、`tool_post_secret_guard`） |
 | `/usr/share/doc/xiaoO/` | `README.md`、`README.zh-CN.md`、`docs/*.md` |
 | `/usr/share/licenses/xiaoO/` | `LICENSE` |
 | `/root/.xiaoo/` | 运行时数据（trace.db 等），`VOLUME`；即 `~/.xiaoo` |
@@ -57,24 +48,14 @@ xiaoO 提供官方 `Dockerfile`，设计目标是从代码仓构建出一个包�
 | 用途 | 包 |
 | --- | --- |
 | 主二进制 | `xclip`、`git`、`ca-certificates`、`curl`（HEALTHCHECK） |
-| hookers（`agent_moss` 等 Python 脚本） | `python3` + `python3-tomli`（`agent_moss/bridge.py:57-60` 优先用 3.11+ 标准库 `tomllib`，降级用 `tomli`） |
-
-> **依赖清单已失配（known gap）**：`Dockerfile:159-174` 仍安装 `python3-openai` /
-> `httpx` / `pydantic` / `tenacity` / `fastapi` / `uvicorn` / `starlette`，这些是
-> 已删除的 `audit_agent` / `audit_dashboard` 所需。实际随镜像发布的 hooker 脚本
-> 只用标准库：对 `plugins/hookers/*/` 下全部 `*.py` 取 import 并集，第三方依赖
-> 仅 `tomli`（`agent_moss/bridge.py:57-60` 优先用 3.11+ 标准库 `tomllib`，降级用
-> `tomli`；`llm_pre_secret_guard` / `tool_post_secret_guard` /
-> `cerberus_bash_control` 的脚本无第三方 import）。
-> `agent_moss/install.sh:116-143` 走的是 `pip install agent-moss` 的独立 venv 流程
-> （该脚本已被镜像移除，见上文 agent_moss 形态说明）。后续精简该清单时应据此
-> 只保留 `python3` + `python3-tomli`。
+| hookers（Python 脚本） | `python3`、`python3-tomli`（脚本本身只用标准库，`agent_moss/bridge.py` 优先用 3.11+ 标准库 `tomllib`，降级用 `tomli`） |
+| 镜像内附加 Python 包 | `python3-openai`、`python3-httpx`、`python3-pydantic`、`python3-tenacity`、`python3-fastapi`、`python3-uvicorn`、`python3-starlette` |
 
 ### 镜像元信息
 
 | 指令 | 值 |
 | --- | --- |
-| `CMD` | `["xiaoo-daemon"]`（无 `ENTRYPOINT`；`docker run` 追加的参数整体覆盖 `CMD`） |
+| `CMD` | `["xiaoo-daemon", "--host", "0.0.0.0"]`（无 `ENTRYPOINT`；`docker run` 追加的参数整体覆盖 `CMD`） |
 | `EXPOSE` | `18080 28081` |
 | `VOLUME` | `["/root/.xiaoo"]` |
 | `HEALTHCHECK` | `curl -fsS http://127.0.0.1:18080/api/v1/health`（`/api/v1/health` 绕过 bearer） |
@@ -94,9 +75,11 @@ docker build -t xiaoo:latest .
 ```
 
 构建约 10–20 分钟（主要耗时在 `cargo fetch` + `cargo build --release`）。
-国内网络通常无需任何 build-arg：`.cargo/config.toml` 走华为云 crates.io 镜像
-（`Dockerfile:37` 将该文件拷为全局 cargo 配置）、Python 依赖走 openEuler dnf 仓库
-（`Dockerfile:14-28` builder 工具链同样由 dnf 的华为云镜像提供）。
+国内网络通常无需任何 build-arg：builder 工具链由 dnf 的华为云镜像提供，
+`.cargo/config.toml` 被拷为全局 cargo 配置走华为云 crates.io 镜像。构建先
+分层 COPY 各 `Cargo.toml` + `Cargo.lock` 并 `cargo fetch`，再拷入源码编译，
+因此仅改代码时依赖下载层可直接复用；COPY 清单与 workspace 成员 / 插件目录
+的一致性由 CI 静态门禁 `scripts/check-dockerfile-copy-coverage.sh` 持续把关。
 
 ---
 
@@ -120,12 +103,13 @@ docker build -t xiaoo:latest .
 > 镜像默认以 `--host 0.0.0.0` 启动（容器内绑回环时 `-p` 端口映射无法到达），
 > 因此 `my.toml` **必须**配置 bearer token（`[http].bearer_token` 或
 > `[http].bearer_token_env`）。未配置时 daemon 会拒绝在非回环地址上启动并
-> 立即退出，容器不会静默地不可达。
+> 立即退出，容器不会静默地不可达。同理，daemon 启动时会校验配置引用的
+> API key 环境变量（`[llm].api_key_env` 指向的变量），缺失时立即退出。
 
 ```bash
 # my.toml 中：[http]
 #            bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
-docker run --rm -d -p 18080:18080 -p 28081:28081 \
+docker run --rm -d -p 18080:18080 \
   -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
   -e OPENROUTER_API_KEY=sk-or-... \
   -e XIAOO_HTTP_BEARER_TOKEN=change-me \
@@ -133,17 +117,21 @@ docker run --rm -d -p 18080:18080 -p 28081:28081 \
 ```
 
 启动后：API `http://localhost:18080/api/v1/...`（除 `/api/v1/health` 外需
-bearer token），dashboard `http://localhost:28081/`（只读，无需 token）。
+bearer token）。
 
-daemon flags（显式写 `xiaoo-daemon` 覆盖默认 `CMD`）：
+dashboard 默认绑容器内 `127.0.0.1:28081`，`-p 28081:28081` 无法到达；要经
+端口映射访问，需显式覆盖 `CMD` 传 `--dashboard-host 0.0.0.0`（只读，无需
+token）：
 
 ```bash
-docker run --rm -d -p 18099:18080 -p 28081:28081 \
+docker run --rm -d -p 18080:18080 -p 28081:28081 \
   -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
   -e OPENROUTER_API_KEY=sk-or-... \
   -e XIAOO_HTTP_BEARER_TOKEN=change-me \
   xiaoo:latest xiaoo-daemon --host 0.0.0.0 --dashboard-host 0.0.0.0
 ```
+
+其余 daemon flags 同样通过覆盖 `CMD` 传递。
 
 宿主机端口冲突时优先用 `-p <HOST_PORT>:18080` 端口映射，容器内 daemon 仍监听
 默认 18080，镜像内置 `HEALTHCHECK`（探 `127.0.0.1:18080`）自动生效。
@@ -184,7 +172,7 @@ docker run --rm \
 
 ```bash
 # 起常驻容器后 exec 进去
-docker run -d --name xiaoo-box -p 18080:18080 -p 28081:28081 \
+docker run -d --name xiaoo-box -p 18080:18080 \
   -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
   -v xiaoo-data:/root/.xiaoo \
   -e OPENROUTER_API_KEY=sk-or-... xiaoo:latest
@@ -193,7 +181,8 @@ docker exec -it xiaoo-box bash
 # 一次性 shell（覆盖默认 CMD）；`xiaoo` / `xiaoo-daemon` 均在 PATH 中
 docker run --rm -it \
   -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
-  -e OPENROUTER_API_KEY=sk-or-... xiaoo:latest bash
+  -e OPENROUTER_API_KEY=sk-or-... \
+  xiaoo:latest bash
 ```
 
 ### 环境变量
@@ -203,4 +192,4 @@ docker run --rm -it \
 | `XIAOO_CONFIG` | 未设置（走 `~/.config/xiaoo/config.toml`） | 显式指定配置文件 |
 | `RUST_LOG` | `info` | 日志级别 |
 | `HOME` | `/root` | 影响 `~/.xiaoo` / `~/.config/xiaoo` 解析 |
-| provider 凭证 | — | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ZAI_API_KEY` / `FEISHU_APP_SECRET` 等，与配置中 `[llm].api_key_env` 对应 |
+| provider 凭证 | — | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ZHIPU_API_KEY` / `FEISHU_APP_SECRET` 等，与配置中 `[llm].api_key_env` 对应 |

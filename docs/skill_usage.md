@@ -14,8 +14,8 @@ Skills are automatically loaded from multiple directories. The scan order is:
 The order above is also the **precedence** order: project level has the highest priority and
 system level the lowest. Deduplication is first-wins by directory order, so a skill whose name
 already appeared in an earlier directory is skipped
-(`crates/skill/src/loading/loader.rs:14-60`; directory assembly in
-`apps/endside/src/cli/skills.rs:24-53`). This is why a project-local skill can shadow a
+(`crates/skill/src/loading/loader.rs`; directory assembly in
+`apps/endside/src/cli/skills.rs`). This is why a project-local skill can shadow a
 built-in one of the same name — the built-in does **not** win.
 
 ```
@@ -75,20 +75,20 @@ Use grep and file_read to examine the code, then provide a structured report.
 | `argument-hint` / `argument_hint` | string | — | Parameter hint text |
 | `paths` | list | `[]` | Conditional activation glob patterns |
 
-Field parsing in `crates/skill/src/loading/md_parser.rs:93-151`; `author` and `tags` are read at
-`:98-99` and `:132-135`. `name` falls back to the containing directory name when omitted
-(`md_parser.rs:31-41`). Note that `user-invocable`, `disable-model-invocation` and
+Frontmatter fields (including `author` and `tags`) are declared and parsed in
+`crates/skill/src/loading/md_parser.rs`. `name` falls back to the containing directory name when omitted
+(`md_parser.rs`). Note that `user-invocable`, `disable-model-invocation` and
 `argument-hint` each accept **both** the kebab-case and the snake_case spelling. An unrecognized
 `context` value is silently ignored (falls back to no explicit context) rather than being an
-error (`md_parser.rs:144-150`).
+error (`md_parser.rs`).
 
 > When `description` is left empty, the first non-heading paragraph is automatically extracted
-> from the markdown body (`crates/skill/src/loading/md_parser.rs:156-173`).
+> from the markdown body (`crates/skill/src/loading/md_parser.rs`).
 
 ### Disabling And Audit Configuration
 
-`[skills]` accepts the following keys (`apps/serverside/src/daemon_config.rs:261-268`,
-`apps/endside/src/support/config.rs:182-189`):
+`[skills]` accepts the following keys (`apps/serverside/src/daemon_config.rs`,
+`apps/endside/src/support/config.rs`):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -104,31 +104,31 @@ disabled = ["block-analyzer"]
 ```
 
 A skill listed in `disabled` is skipped by name during loading
-(`crates/skill/src/loading/loader.rs:59-67`); the daemon still *discovers* it so it can report
-it as disabled rather than missing (`apps/serverside/src/skill_management.rs:41-44`).
+(`crates/skill/src/loading/loader.rs`); the daemon still *discovers* it so it can report
+it as disabled rather than missing (`apps/serverside/src/skill_management.rs`).
 
 Audit on load is controlled by the `audit_enabled` field on the internal `SkillsConfig`, which
-**defaults to `false`** (`crates/skill/src/types/config.rs:10,22`). When enabled, a skill
+**defaults to `false`** (`crates/skill/src/types/config.rs`). When enabled, a skill
 directory failing the audit is skipped with a warning
-(`crates/skill/src/loading/loader.rs:46-57`).
+(`crates/skill/src/loading/loader.rs`).
 
 > **Known gap**: `audit_enabled`, `prompt_injection_mode`, `prompt_budget_ratio` and
 > `max_listing_description_chars` exist only on the internal `SkillsConfig`
-> (`crates/skill/src/types/config.rs:8-13`) and are **not** exposed in the config file schema:
+> (`crates/skill/src/types/config.rs`) and are **not** exposed in the config file schema:
 > `SkillsSection` declares only `dirs` / `allow_scripts` / `disabled`
-> (`apps/serverside/src/daemon_config.rs:261-268`), and every construction site fills the rest
-> from `SkillsConfig::default()` (`apps/serverside/src/daemon_config.rs:884-898`,
-> `apps/endside/src/support/config.rs:350-362`, `apps/endside/src/cli/skills.rs:55-67`). Because
+> (`apps/serverside/src/daemon_config.rs`), and every construction site fills the rest
+> from `SkillsConfig::default()` (`apps/serverside/src/daemon_config.rs`,
+> `apps/endside/src/support/config.rs`, `apps/endside/src/cli/skills.rs`). Because
 > the config structs do not use `deny_unknown_fields`, writing these keys into `config.toml`
-> **passes validation silently but has no effect**. As of this document, enabling the load-time
+> **passes validation silently but has no effect**. Enabling the load-time
 > audit requires an API consumer to set the field programmatically.
 >
 > **Known gap**: `prompt_injection_mode`, `prompt_budget_ratio` and
 > `max_listing_description_chars` have no reader anywhere in the workspace — a search finds only
-> their declarations and defaults in `crates/skill/src/types/config.rs:11-13,23-25` — so the
+> their declarations and defaults in `crates/skill/src/types/config.rs` — so the
 > `full`/`compact` injection modes, the prompt budget ratio and the description-length cap are
-> currently inert. Skill listings reach the prompt through the skills *directory* table instead
-> (`apps/shared/src/gateway/prompt_utils.rs:33-70`).
+> inert. Skill listings reach the prompt through the skills *directory* table instead
+> (`apps/shared/src/gateway/prompt_utils.rs`).
 
 ### Management Commands
 
@@ -152,19 +152,19 @@ xiaoo --cli skill install https://github.com/user/my-skill.git
 xiaoo --cli skill remove <name>
 ```
 
-The subcommands above are defined in `apps/endside/src/cli/skills.rs:9-20`.
-`skill install` copies into a **user-level** destination by default (`:351`) — system level
+The subcommands above are defined in `apps/endside/src/cli/skills.rs`.
+`skill install` copies into a **user-level** destination by default — system level
 (`/usr/lib/.xiaoo/skills`) is reserved for built-in skills.
 
 ### Built-in Skills
 
 Builtin skills are automatically installed when you run `cargo install --path apps/endside`
 (the install step is a build script gated on `is_cargo_install()`:
-`apps/shared/build.rs:6-9`, source directory `plugins/skills` at `apps/shared/build.rs:55-63`).
+`apps/shared/build.rs`, source directory `plugins/skills` at `apps/shared/build.rs`).
 They provide security policy enforcement and other built-in capabilities.
 
 > **Priority note**: builtins live at the system level, which is the *lowest* priority directory
-> (`crates/skill/src/loading/loader.rs:14-60`; `apps/endside/src/cli/skills.rs:47-48`). A skill
+> (`crates/skill/src/loading/loader.rs`; `apps/endside/src/cli/skills.rs`). A skill
 > of the same name in the project, a config dir, or the user directory takes precedence, and the
 > builtin is then skipped as a duplicate.
 
@@ -173,7 +173,7 @@ They provide security policy enforcement and other built-in capabilities.
 - **User level** (fallback): `~/.xiaoo/skills/` - used if system-level installation fails
 
 Fallback logic: system-level install is attempted first, and only the skills that failed there are
-retried at user level (`apps/shared/build.rs:99-152`).
+retried at user level (`apps/shared/build.rs`).
 
 **Builtin skills** (located in `<xiaoO>/plugins/skills/`):
 - `xiaoo-guardian` - Security policy enforcement
@@ -217,12 +217,12 @@ A security audit can be run manually on a skill directory before installation. T
 - Symbolic links
 - Script files (`.sh` / `.bash`, etc., unless `allow_scripts = true` is configured)
 - High-risk command patterns (`rm -rf /`, `sudo`, `curl | sh`, etc.)
-- Shell chaining operators (`&&`, `||`, `;`)
+- Shell chaining operators (`&&`, `||`, `;`, `|`, and backticks)
 - Oversized files
 
 > **Note**: The audit is **not** run automatically during `skill install`. The install command
 > records this explicitly — "Audit is currently disabled by default; use
-> `xiaoo skill audit <path>` for manual checks." (`apps/endside/src/cli/skills.rs:353`). Run the
+> `xiaoo skill audit <path>` for manual checks." (`apps/endside/src/cli/skills.rs`). Run the
 > audit manually first with `xiaoo --cli skill audit <path>` if you want to review a skill before
 > installing it.
 

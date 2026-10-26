@@ -35,9 +35,9 @@ triggers:
 - 示例：`/home/hkl/gitcode/xiaoO/target/release/moirai`
 
 ### 5. 安全规则来源路径
-- agent_moss 判定逻辑迁出为常驻 AgentMoss HTTP 服务，规则文件在 AgentMoss 仓库（不再在 xiaoO 插件目录）
+- 权威规则在 AgentMoss 仓库（判定逻辑为常驻 AgentMoss HTTP 服务）；本仓 `plugins/hookers/agent_moss/{skills,rules,templates}/` 为参考副本
 - 待测试的规则文件路径
-- 示例：`/home/hkl/gitcode/AgentMoss/agent_moss/rules/user_rules.json`
+- 示例：`<AgentMoss 仓库>/agent_moss/rules/user_rules.json`
 
 ### 6. 测试用例输出目录 (RULES_DIR)
 - 测试用例 JSON 文件的存放目录
@@ -134,20 +134,25 @@ grep "$(date +%Y-%m-%d)" $AGENT_MOSS_LOG_PATH | tail -50
 
 测试用例放入 `$RULES_DIR/level-1/`
 
-规则类型：
+规则类型（只看 a_next 本身）：
 - 1.1 用户敏感规则匹配 (sensitive_actions)
 - 1.2 关键命令正则检测 (Critical/High 级别)
 - 1.3 Prompt 注入检测 (Critical/High/Medium 级别)
+- 敏感路径访问检测 (sensitive_paths)
+- 危险操作模式检测 (dangerous_patterns)
+- 横向移动检测
 
 ### Level-2: 逻辑规则检测
 
 测试用例放入 `$RULES_DIR/level-2/`
 
-规则类型：
+规则类型（需要 action_history / prompt_session / cwd 等上下文）：
 - 2.1 read_before_write 原则
 - 2.2 意图一致性检测 (intent_consistency)
-- 2.3 敏感路径访问检测 (sensitive_paths)
-- 2.4 危险操作模式检测 (dangerous_patterns)
+- 2.3 间接文件访问检测 (indirect_file_access)
+- 2.4 密码修改授权检测
+- 2.5 用户/组删除授权检测
+- 2.6 提权检测 (privilege_escalation)
 
 ### Level-3: LLM + Skill 深度分析
 
@@ -155,7 +160,7 @@ grep "$(date +%Y-%m-%d)" $AGENT_MOSS_LOG_PATH | tail -50
 
 规则类型：
 - 3.0 脚本内容预分析 (关键词检测)
-- 3.1-3.2 Skill 规则匹配 (12个 Skill)
+- 3.1-3.2 Skill 规则匹配 (13个 Skill)
 
 ---
 
@@ -238,9 +243,9 @@ grep "$(date +%Y-%m-%d)" $AGENT_MOSS_LOG_PATH | tail -50
 
 ## 执行顺序建议
 
-1. 先测试 Level-1 规则（33条）
-2. 再测试 Level-2 规则（4类）
-3. 最后测试 Level-3 规则（脚本内容分析 + 12个 Skill）
+1. 先测试 Level-1 规则（32条）
+2. 再测试 Level-2 规则
+3. 最后测试 Level-3 规则（脚本内容分析 + 13个 Skill）
 4. 每测试一条规则，立即创建对应 JSON 文件
 5. 完成后在规则文档末尾追加测试结果汇总表
 

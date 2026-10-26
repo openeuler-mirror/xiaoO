@@ -149,13 +149,10 @@ RUN mkdir -p /staging/usr/share/licenses/xiaoO && \
 # ── Stage 2 — runtime: install deps, copy staged files ──────────────────────
 FROM openeuler/openeuler:24.03-lts-sp3 AS runtime
 
-# Runtime deps via dnf. openEuler's container image enables OS / everything /
-# EPOL(main) / update by default, so all packages below resolve directly —
-# NO pip needed. NOTE: the python3-openai / httpx / pydantic / tenacity /
-# fastapi / uvicorn / starlette set is a leftover from the removed
-# audit_agent / audit_dashboard; the shipped hooker scripts are stdlib-only
-# (python3 + python3-tomli suffice). Trimming the list is a known gap
-# tracked in docs/docker_deploy.md.
+# Runtime deps via dnf (no pip). openEuler's container image enables OS /
+# everything / EPOL(main) / update by default, so all packages below resolve
+# directly. The shipped hooker scripts only need python3 + python3-tomli
+# (bridge.py prefers the 3.11+ stdlib tomllib, falling back to tomli).
 RUN dnf install -y \
         ca-certificates \
         curl \

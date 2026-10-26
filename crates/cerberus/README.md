@@ -22,6 +22,8 @@ Secure command execution toolkit for Rust and AI agent hosts. It combines policy
 Use the crate(s) you need from this workspace via local path dependencies:
 
 ```toml
+# 以下相对路径写法以仓库根 workspace 的 [workspace.dependencies] 为前提；
+# 若在你的独立 crate manifest 中引用，请按你 manifest 的位置调整相对路径
 [dependencies]
 cerberus-core = { path = "crates/cerberus/cerberus-core" }
 
@@ -30,13 +32,13 @@ cerberus-cli = { path = "crates/cerberus/cerberus-cli" }
 ```
 
 > **Important — Cerberus ships outside the main workspace.** The three Cerberus crates
-> are commented out of the root workspace (`Cargo.toml:26-29`), and
+> are commented out of the root workspace (`Cargo.toml`), and
 > `crates/cerberus/` has no `[workspace]` of its own. Their manifests inherit
 > `version.workspace = true`, so they cannot resolve a workspace root as checked out and
 > are not built by `cargo build --workspace`. To build or install them you must first
 > make them workspace members (uncomment the entries in the root `Cargo.toml`) or add a
 > `[workspace]` table under `crates/cerberus/`. An eBPF toolchain is additionally required
-> for the `ebpf` feature. See `tests/README.md:13` for the same caveat.
+> for the `ebpf` feature. See `tests/README.md` for the same caveat.
 
 ## Project Layout
 
@@ -86,10 +88,10 @@ cargo install --path crates/cerberus/cerberus-cli
 ```
 
 > **Prerequisite:** the command above only works once Cerberus is a resolvable workspace —
-> either uncomment the three Cerberus entries in the root `Cargo.toml:26-29`, or add a
+> either uncomment the three Cerberus entries in the root `Cargo.toml`, or add a
 > `[workspace]` table under `crates/cerberus/`. As checked out, their
 > `version.workspace = true` manifests cannot find a workspace root and the install fails
-> (same caveat as `tests/README.md:13`). The `cargo run -p cerberus-cli` examples above
+> (same caveat as `tests/README.md`). The `cargo run -p cerberus-cli` examples above
 > have the same requirement.
 
 If you need `network_policy` enforcement, install Cerberus with the eBPF-enabled core feature:
@@ -98,7 +100,7 @@ If you need `network_policy` enforcement, install Cerberus with the eBPF-enabled
 cargo install --path crates/cerberus/cerberus-cli --features cerberus-core/ebpf --force
 ```
 
-This is required for profiles such as `repo-root-python-network-filtered`. Without the `cerberus-core/ebpf` feature, enabled `network_policy` configurations fail closed before execution.
+This is required for any file-backed profile you create under `config/cerberus-policies/` that enables `network_policy`. Without the `cerberus-core/ebpf` feature, enabled `network_policy` configurations fail closed before execution.
 
 Then make sure your shell can find Cargo-installed binaries:
 

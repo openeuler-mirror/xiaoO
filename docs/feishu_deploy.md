@@ -10,7 +10,7 @@ It covers:
 - how to configure Feishu persistent connection (websocket) when you do not want a public callback
 - how to verify URL challenge, message delivery, and reply behavior
 
-The examples below match the currently deployed `xiaoo-rebuild` service layout on the server, but the same structure can be adapted to any host.
+The examples below use a generic `xiaoo` service layout (`xiaoo.service`); the same structure can be adapted to any host.
 
 ## 1. End-to-end Request Flow
 
@@ -41,9 +41,9 @@ nginx bridges the two.
 
 > `/api/v1/channels/xiaoo/events` exists **only** in your nginx config. The
 > daemon has no such route: it registers `POST /api/v1/channels/:channel_id/events`
-> (`apps/serverside/src/httpserver/router.rs:620-623`) with `channel_id` =
-> `"feishu"` (`apps/serverside/src/channels/mod.rs:26-33`). An unmatched
-> `channel_id` returns `503` (`router.rs:1740-1753`). See §10 for the rewrite.
+> (`apps/serverside/src/httpserver/router.rs`) with `channel_id` =
+> `"feishu"` (`apps/serverside/src/channels/mod.rs`). An unmatched
+> `channel_id` returns `503` (`router.rs`). See §10 for the rewrite.
 
 This distinction is important. If you configure Feishu with the internal route directly, but your reverse proxy only exposes the public route, URL verification will fail.
 
@@ -560,13 +560,12 @@ Important:
 
 ## 9. Why Reverse Proxy Is Needed for Webhook Mode
 
-> ⚠️ **Security-relevant correction.** An earlier revision of this document
-> claimed xiaoO "does not bind directly on the public interface". The built-in
-> default is now `--host 127.0.0.1 --port 18080` (loopback only), and the daemon
-> refuses to start on a non-loopback address unless a bearer token is configured
-> (`[http].bearer_token` / `[http].bearer_token_env`). Started with no flags,
-> xiaoO is therefore reachable only from the local host. The localhost-only
-> layout below is what you get by default.
+xiaoO binds to loopback by default (`--host 127.0.0.1 --port 18080`), and a
+non-loopback bind requires a configured bearer token — the daemon refuses to
+start otherwise (`ensure_external_bind_is_authenticated`,
+`apps/serverside/src/main.rs`; configure `[http].bearer_token` /
+`[http].bearer_token_env`). Started with no flags, xiaoO is reachable only from
+the local host, so the loopback-only layout below is what you get by default.
 
 In the recommended secure webhook deployment, xiaoO listens on loopback:
 
@@ -611,12 +610,12 @@ This is the key part many deployments miss.
 > **`/api/v1/channels/xiaoo/events` is an nginx-only alias — it is not a xiaoO
 > route.** The daemon registers exactly one channel ingress route,
 > `POST /api/v1/channels/:channel_id/events`
-> (`apps/serverside/src/httpserver/router.rs:620-623`). The `:channel_id` is the
+> (`apps/serverside/src/httpserver/router.rs`). The `:channel_id` is the
 > adapter's `channel_id`, which for Feishu is the literal string `"feishu"`
-> (`apps/serverside/src/channels/mod.rs:26-33`) — so the real internal path is
+> (`apps/serverside/src/channels/mod.rs`) — so the real internal path is
 > `/api/v1/channels/feishu/events`. Resolving an unknown `channel_id` returns
 > `503` with `"<id> webhook is not configured"`
-> (`apps/serverside/src/httpserver/router.rs:1740-1753`). If you point Feishu
+> (`apps/serverside/src/httpserver/router.rs`). If you point Feishu
 > straight at `/api/v1/channels/xiaoo/events` without the nginx rewrite below,
 > you get a 503, not URL verification.
 
@@ -793,13 +792,13 @@ OPENROUTER_API_KEY=your-real-model-key
 
 | Field | Required | Notes |
 |---|---|---|
-| `enabled` | no | Defaults to `false` (`apps/serverside/src/config_schema.rs:29`) |
-| `transport` | no | `"webhook"` or `"websocket"` (`config_schema.rs:30`) |
-| `channel_instance_id` | no | Free-form label (`config_schema.rs:31`; `apps/serverside/src/daemon_config.rs:192`). **It has no routing effect**: the runtime is always registered under the fixed `channel_id` `"feishu"` (`apps/serverside/src/channels/mod.rs:26-33`), and `router.rs:112-121` rejects a duplicate `channel_id` outright — so you cannot run two Feishu instances on one daemon by setting this. It is safe to omit. |
-| `app_id` | no | `config_schema.rs:32` |
-| `app_secret_env` | no | Env-var *name*, not the secret (`config_schema.rs:33`) |
-| `verification_token` | no | Required for webhook URL challenge; see §8 (`config_schema.rs:34`) |
-| `base_url` | no | Defaults to `https://open.feishu.cn` (`config_schema.rs:35`) |
+| `enabled` | no | Defaults to `false` (`apps/serverside/src/config_schema.rs`) |
+| `transport` | no | `"webhook"` or `"websocket"` (`config_schema.rs`) |
+| `channel_instance_id` | no | Free-form label (`config_schema.rs`; `apps/serverside/src/daemon_config.rs`). **It has no routing effect**: the runtime is always registered under the fixed `channel_id` `"feishu"` (`apps/serverside/src/channels/mod.rs`), and `router.rs` rejects a duplicate `channel_id` outright — so you cannot run two Feishu instances on one daemon by setting this. It is safe to omit. |
+| `app_id` | no | `config_schema.rs` |
+| `app_secret_env` | no | Env-var *name*, not the secret (`config_schema.rs`) |
+| `verification_token` | no | Required for webhook URL challenge; see §8 (`config_schema.rs`) |
+| `base_url` | no | Defaults to `https://open.feishu.cn` (`config_schema.rs`) |
 
 Then start xiaoO locally:
 
@@ -835,7 +834,7 @@ If you are creating the service from scratch, use a full unit file instead of on
 
 ```ini
 [Unit]
-Description=xiaoO rebuild daemon
+Description=xiaoO daemon
 After=network.target
 
 [Service]
@@ -862,13 +861,13 @@ After creating or editing the unit file:
 
 ```bash
 systemctl daemon-reload
-systemctl enable --now xiaoo-rebuild.service
+systemctl enable --now xiaoo.service
 ```
 
 After changing either the config file or env file, restart the service:
 
 ```bash
-systemctl restart xiaoo-rebuild.service
+systemctl restart xiaoo.service
 ```
 
 If you changed the environment file, a restart is required. A plain nginx reload is not enough.
@@ -1048,12 +1047,12 @@ Expected:
 >
 > An unknown `channel_id` (for example `xiaoo`) answers `503` with
 > `{"error":"xiaoo webhook is not configured"}`
-> (`apps/serverside/src/httpserver/router.rs:1740-1753`).
+> (`apps/serverside/src/httpserver/router.rs`).
 
 ### 14.3.1 Check channel registration and config (bearer-protected)
 
 Both endpoints below sit in the protected route group
-(`apps/serverside/src/httpserver/router.rs:613-614`), so they need the bearer
+(`apps/serverside/src/httpserver/router.rs`), so they need the bearer
 token from your `[http] bearer_token_env`:
 
 ```bash
@@ -1092,13 +1091,13 @@ alone — the fastest diagnostic when the service will not start:
 xiaoo-daemon config channels --config /opt/xiaoo/config/config.toml
 ```
 
-Dispatch: `apps/serverside/src/main.rs:383-391`; report builder
-`apps/serverside/src/channel_management.rs:235-240`.
+Dispatch: `apps/serverside/src/main.rs`; report builder
+`apps/serverside/src/channel_management.rs`.
 
 ### 14.4 Check persistent-connection logs (Websocket mode)
 
 ```bash
-journalctl -u xiaoo-rebuild.service -f | grep -i "feishu websocket"
+journalctl -u xiaoo.service -f | grep -i "feishu websocket"
 ```
 
 What you want to see:
@@ -1127,7 +1126,7 @@ What you want to see:
 ### 14.5 Check service logs
 
 ```bash
-journalctl -u xiaoo-rebuild.service -f
+journalctl -u xiaoo.service -f
 ```
 
 ### 14.6 Check nginx callback access (Webhook mode only)
@@ -1147,7 +1146,7 @@ nginx -t
 ### 14.8 Confirm the daemon process is actually running with the expected config
 
 ```bash
-systemctl status xiaoo-rebuild.service
+systemctl status xiaoo.service
 ```
 
 Look for:
@@ -1255,7 +1254,7 @@ For a clean production deployment, use this structure:
 /opt/xiaoo/config/config.toml
 /opt/xiaoo/config/xiaoo.env
 /opt/xiaoo/app
-/etc/systemd/system/xiaoo-rebuild.service
+/etc/systemd/system/xiaoo.service
 /etc/nginx/conf.d/xiaoo.conf
 ```
 
@@ -1285,16 +1284,16 @@ And keep the responsibility split like this:
 
 > **Inbound file parsing is hard-off (known gap).** Feishu's `"file"` message
 > type is never parsed. The daemon builder pins `parse_file_messages: false`
-> unconditionally (`apps/serverside/src/daemon_config.rs:812`, alongside
+> unconditionally (`apps/serverside/src/daemon_config.rs`, alongside
 > `max_file_download_bytes: 0` / `max_file_text_chars: 0`), and the ingress
 > match arm for `"file"` therefore falls to
 > `Ok((AdapterResponse::Accepted, None))` — the event is acknowledged and
-> silently dropped (`apps/serverside/src/channels/feishu/ingress.rs:118-121`).
+> silently dropped (`apps/serverside/src/channels/feishu/ingress.rs`).
 > The disabled branch just above it would return `UnsupportedCapability` even if
 > the flag were on, so this is unimplemented rather than misconfigured: there is
 > **no config option** that turns inbound file handling on today.
 > Normal session continuity (text) is unaffected. Outbound attachments work via
-> `send_attachment` (`apps/serverside/src/channels/feishu/channel.rs:111-127`).
+> `send_attachment` (`apps/serverside/src/channels/feishu/channel.rs`).
 
 ## 19. Final Deployment Checklist
 
