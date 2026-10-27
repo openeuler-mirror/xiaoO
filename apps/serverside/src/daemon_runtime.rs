@@ -704,18 +704,30 @@ fn resolve_local_workspace(
 }
 
 fn canonicalize_workspace_dir(path: &Path) -> Result<PathBuf, SessionRuntimeResolveError> {
-    let canonical =
-        path.canonicalize()
-            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
-                message: format!("invalid workspace {}: {error}", path.display()),
-            })?;
+    // These messages are the only hint a remote client gets when its workspace path
+    // is wrong; say which machine the path has to exist on so the user does not go
+    // looking on the client side (the path may well exist there).
+    let canonical = path.canonicalize().map_err(|error| {
+        let message = format!(
+            "workspace {} does not exist on the daemon host: {error}. Workspace paths must be \
+             valid directories on the machine running xiaoo-daemon.",
+            path.display()
+        );
+        SessionRuntimeResolveError::ResolveFailed { message }
+    })?;
     if !canonical.is_dir() {
         return Err(SessionRuntimeResolveError::ResolveFailed {
-            message: format!("workspace is not a directory: {}", canonical.display()),
+            message: format!(
+                "workspace {} on the daemon host is not a directory",
+                canonical.display()
+            ),
         });
     }
     fs::read_dir(&canonical).map_err(|error| SessionRuntimeResolveError::ResolveFailed {
-        message: format!("workspace is not readable {}: {error}", canonical.display()),
+        message: format!(
+            "workspace {} on the daemon host is not readable: {error}",
+            canonical.display()
+        ),
     })?;
     Ok(canonical)
 }
