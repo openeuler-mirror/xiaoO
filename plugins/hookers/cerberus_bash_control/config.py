@@ -45,12 +45,10 @@ def prompt_alert_log_path() -> str:
 
 def check_cerberus_installed() -> bool:
     """检查 cerberus 是否已安装"""
-    # 检查 ~/.cargo/bin/cerberus
     cerberus_path = os.path.expanduser("~/.cargo/bin/cerberus")
     if os.path.exists(cerberus_path):
         return True
 
-    # 检查 PATH 中是否有 cerberus
     import subprocess
     try:
         subprocess.run(
@@ -83,7 +81,6 @@ def do_install(script_dir: str):
 
     print("cerberus 已安装")
 
-    # 检查必要文件
     if not os.path.exists(plugin_json_template_path):
         print("错误: plugin.json.template 不存在")
         sys.exit(1)
@@ -97,14 +94,11 @@ def do_install(script_dir: str):
         print("错误: policy.toml 不存在")
         sys.exit(1)
 
-    # 询问告警日志路径
     alert_log_path = prompt_alert_log_path()
 
-    # 从 template 生成 plugin.json
     with open(plugin_json_template_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # 替换占位符
     content = content.replace("<wrap_bash_with_cerberus_script.py>", wrap_script_path)
     content = content.replace("<alert_on_cerberus_permission_script.py>", alert_script_path)
     content = content.replace("<policy_file_path>", policy_file_path)
@@ -131,14 +125,12 @@ def do_uninstall(script_dir: str):
 
     print(f"脚本目录: {script_dir}")
 
-    # 1. 删除生成的 plugin.json
     if os.path.exists(plugin_json_path):
         os.remove(plugin_json_path)
         print("已删除 plugin.json")
     else:
         print("plugin.json 不存在，跳过")
 
-    # 2. 从 config.toml 中移除插件路径
     install_helper.unregister_plugin_from_config(plugin_json_path)
 
     print("卸载完成!")

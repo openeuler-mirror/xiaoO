@@ -38,21 +38,18 @@ impl ToolExecutor for SkillToolExecutor {
             }
         })?;
 
-        // 1. Get skill registry from runtime
         let registry = runtime
             .skill_registry()
             .ok_or(ToolExecutionError::ExecutionFailed {
                 message: "skill registry not available".into(),
             })?;
 
-        // 2. Look up skill by name
         let spec = registry
             .get_skill(&input.skill)
             .ok_or(ToolExecutionError::ExecutionFailed {
                 message: format!("skill '{}' not found", input.skill),
             })?;
 
-        // 3. Check invocation permission
         if spec.disable_model_invocation() {
             return Ok(ToolExecutorOutput::Completed {
                 raw_outcome: RawToolOutcome::Error {
@@ -64,10 +61,8 @@ impl ToolExecutor for SkillToolExecutor {
             });
         }
 
-        // 4. Substitute arguments in prompt
         let prompt = substitute_arguments(spec.full_prompt(), &input.args, spec.arguments());
 
-        // 5. Execute based on context mode
         match spec.context() {
             SkillContext::Inline => Ok(ToolExecutorOutput::Completed {
                 raw_outcome: RawToolOutcome::Success { output: prompt },

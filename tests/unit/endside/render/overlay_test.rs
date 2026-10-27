@@ -165,13 +165,15 @@ fn diff_consecutive_newlines() {
     assert_matches_ratatui("a\n\nb", 4);
 }
 
-// ── provider / model 弹窗：渲染时量出的一屏行数 ─────────────────────────────
+// ── Provider/model dialog: page height measured at render time ─────────────
 
-/// 把整屏还原成文本，用来断言"当前可见的窗口"而不是内部状态。
+/// Flatten the whole screen back into text, to assert on the *visible*
+/// window rather than internal state.
 ///
-/// 宽字符（CJK）后面的那个 cell 是 ratatui `Buffer::set_stringn` 重置出来的
-/// 填充格（symbol 是空格），按真实终端那样跳过它，否则 "翻页" 会被读成
-/// "翻 页"、中文断言全部失效。
+/// The cell after a wide (CJK) character is the padding cell ratatui's
+/// `Buffer::set_stringn` resets (its symbol is a space); skip it like a
+/// real terminal does, otherwise a two-CJK-character word reads back with
+/// a spurious space in the middle and every CJK assertion would fail.
 fn screen_text(terminal: &Terminal<TestBackend>) -> String {
     let buffer = terminal.backend().buffer();
     let area = buffer.area;
@@ -190,7 +192,7 @@ fn screen_text(terminal: &Terminal<TestBackend>) -> String {
         .join("\n")
 }
 
-/// 弹窗里放一条 provider + `count` 个 `model-XX`。
+/// Put one provider + `count` `model-XX` entries into the dialog.
 fn app_with_models(count: usize) -> App {
     let mut config = Config::default();
     config.llm.provider = "openrouter".to_string();
@@ -201,8 +203,10 @@ fn app_with_models(count: usize) -> App {
         PathBuf::from("/tmp/endside-overlay-test-workspace"),
     )
     .expect("headless test app");
-    // 弹窗只在该模式下接收按键；本用例只渲染、不派发按键，这行是为了让状态
-    // 与真实使用时一致（后续实现翻页的那一层会在这里真的按键）。
+    // The dialog only receives keys in this mode; this case renders
+    // without dispatching keys, and this line exists purely to keep the
+    // state identical to real usage (the layer that later implements
+    // paging will press real keys here).
     app.state.input_mode = InputMode::ProviderSelection;
     app.state.provider_dialog = Some(ProviderDialog::new(vec![ProviderInfo {
         name: "openrouter".to_string(),
@@ -216,9 +220,10 @@ fn app_with_models(count: usize) -> App {
     app
 }
 
-/// 渲染时量出的可见行数必须等于弹窗里列表内容区的实际行数——这个值就是
-/// "一屏"的定义。这里的 14 = 弹窗高 20（42 行终端）− 2 边框 − 2（状态行/
-/// 快捷键行）− 2（左右两栏各自的边框）。
+/// The visible rows measured at render time must equal the dialog's list
+/// content area — that value *is* the definition of "one page". Here 14 =
+/// dialog height 20 (42-row terminal) − 2 dialog borders − 2 (status +
+/// hint rows) − 2 (the two column borders).
 #[tokio::test]
 async fn rendering_measures_the_list_viewport() {
     let mut app = app_with_models(40);

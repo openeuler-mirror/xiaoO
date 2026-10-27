@@ -1,23 +1,16 @@
 //! Input validation for FileWriteTool.
-//!
-//! Validates FileWriteInput before processing to ensure:
-//! - Input is valid for the selected backend
 
 use super::input::FileWriteInput;
 
 /// Result of input validation.
 #[derive(Debug, Clone)]
 pub struct ValidationResult {
-    /// Whether validation passed.
     pub result: bool,
-    /// Error message if validation failed.
     pub message: Option<String>,
-    /// Error code if validation failed.
     pub error_code: Option<u32>,
 }
 
 impl ValidationResult {
-    /// Create a successful validation result.
     pub fn ok() -> Self {
         Self {
             result: true,

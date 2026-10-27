@@ -20,7 +20,6 @@ pub(super) enum SkillCommands {
 }
 
 pub(super) fn resolve_skills_config_from_file(file_cfg: &FileConfig) -> SkillsConfig {
-    // Build complete skills_dirs with four levels
     let mut skills_dirs = Vec::new();
 
     // Priority 1: Project level (highest)
@@ -71,16 +70,15 @@ pub(super) fn resolve_skills_config_from_file(file_cfg: &FileConfig) -> SkillsCo
 fn resolve_all_skills_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    // Priority 1: Project level (highest)
+    // The four directory levels and their dedup conditions match
+    // `resolve_skills_config_from_file`; see the docs there.
     dirs.push(PathBuf::from(".xiaoo/skills"));
 
-    // Priority 2: Config file user dirs (medium)
     let file_cfg = FileConfig::load(None, false);
     if let Some(skills) = file_cfg.skills.as_ref() {
         if let Some(extra_dirs) = skills.dirs.as_ref() {
             for dir in extra_dirs {
                 let path = PathBuf::from(dir);
-                // Avoid duplicates with project/user/system dirs
                 let dir_str = path.to_string_lossy();
                 if dir_str != ".xiaoo/skills"
                     && !dir_str.ends_with("/.xiaoo/skills")
@@ -93,12 +91,10 @@ fn resolve_all_skills_dirs() -> Vec<PathBuf> {
         }
     }
 
-    // Priority 3: User level
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".xiaoo").join("skills"));
     }
 
-    // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
     dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
 
     dirs
@@ -107,7 +103,6 @@ fn resolve_all_skills_dirs() -> Vec<PathBuf> {
 fn build_skills_config() -> SkillsConfig {
     let skills_dirs = resolve_all_skills_dirs();
 
-    // Get allow_scripts from config file
     let file_cfg = FileConfig::load(None, false);
     let allow_scripts = file_cfg
         .skills
@@ -233,12 +228,10 @@ pub(super) fn handle_skill_command(command: SkillCommands) {
                 std::process::exit(1);
             }
 
-            // Check all skill directories for existing skill BEFORE cloning
             let project_dest = project_skills_dir().join(&skill_name);
             let user_dest = user_skills_dir().as_ref().map(|d| d.join(&skill_name));
             let system_dest = system_skills_dir().join(&skill_name);
 
-            // Check config file directories
             let config_dests = {
                 let file_cfg = FileConfig::load(None, false);
                 file_cfg
@@ -253,7 +246,6 @@ pub(super) fn handle_skill_command(command: SkillCommands) {
                     .unwrap_or_default()
             };
 
-            // Check project level first (highest priority)
             if project_dest.exists() {
                 eprintln!(
                     "Skill '{}' already installed at {} (project level, highest priority)",
@@ -263,7 +255,6 @@ pub(super) fn handle_skill_command(command: SkillCommands) {
                 std::process::exit(1);
             }
 
-            // Check config file directories (medium priority)
             for config_dest in &config_dests {
                 if config_dest.exists() {
                     eprintln!(
@@ -275,7 +266,6 @@ pub(super) fn handle_skill_command(command: SkillCommands) {
                 }
             }
 
-            // Check user level
             if let Some(ref user_d) = user_dest {
                 if user_d.exists() {
                     eprintln!(
@@ -287,7 +277,6 @@ pub(super) fn handle_skill_command(command: SkillCommands) {
                 }
             }
 
-            // Check system level (lowest priority, for built-in skills only)
             if system_dest.exists() {
                 eprintln!(
                     "Skill '{}' already installed at {} (system level, built-in skill)",
@@ -297,7 +286,6 @@ pub(super) fn handle_skill_command(command: SkillCommands) {
                 std::process::exit(1);
             }
 
-            // Now clone/copy the source
             let src_dir = if is_git {
                 let tmp = std::env::temp_dir().join(&skill_name);
                 let _ = std::fs::remove_dir_all(&tmp);

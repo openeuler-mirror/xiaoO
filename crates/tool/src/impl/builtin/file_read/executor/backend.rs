@@ -404,8 +404,7 @@ impl ToolExecutor for FileReadExecutor {
         let mtime = system_time_to_timestamp(stat.modified_at);
 
         // Short-circuit: return the cached "FileUnchanged" notice before
-        // paying for `read_bytes` (previously the dedup check ran after
-        // the full read).
+        // paying for `read_bytes`.
         if Self::dedup_applies(&ext) {
             if let Some(output) = self
                 .check_dedup_unchanged(&resolved_str, &input, mtime)

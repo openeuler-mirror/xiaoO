@@ -41,13 +41,18 @@ pub(crate) struct OpenAiFamilyProvider {
     cached_endpoint_url: Arc<RwLock<Option<String>>>,
 }
 
-/// `reasoning_effort` 取值的协议方言。
+/// Protocol dialect for `reasoning_effort` values.
 ///
-/// OpenAI 兼容端点普遍接受 `xhigh`；Zhipu 的 chat-completions API 只文档化
-/// 了 `low`/`high`/`max`（`xhigh` 会被拒），且新模型（glm-5.3+）无法禁用
-/// 思考——Off 只能不发参数、走服务端默认。由 provider 注册表以
-/// [`crate::provider_registry::ProviderProfile::reasoning_dialect`] 声明，
-/// 按端点而非模型名区分，新增 provider / GLM 模型无需改代码。
+/// OpenAI-compatible endpoints generally accept `xhigh`; Zhipu's
+/// chat-completions API only documents `low`/`high`/`max` (`xhigh` is
+/// rejected), and its newer models (glm-5.3+) cannot disable thinking — Off
+/// can only omit the parameter and take the server default. The dialect is
+/// declared per endpoint (not per model name) in the provider registry via
+/// [`crate::provider_registry::ProviderProfile::reasoning_dialect`]; adding
+/// a Zhipu-dialect endpoint to an OpenAI-compatible provider needs only a
+/// registry entry, not a change here. Note: the native Zhipu protocol
+/// (`ZhipuProvider`) bypasses the registry and hardcodes its dialect in
+/// `zhipu.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReasoningDialect {
     #[default]
@@ -90,7 +95,8 @@ impl OpenAiFamilyProvider {
         }
     }
 
-    /// 覆盖默认（OpenAI）方言；Zhipu 协议端点须传 [`ReasoningDialect::Zhipu`]。
+    /// Overrides the default (OpenAI) dialect; Zhipu-protocol endpoints must
+    /// pass [`ReasoningDialect::Zhipu`].
     pub(crate) fn with_reasoning_dialect(mut self, dialect: ReasoningDialect) -> Self {
         self.reasoning_dialect = dialect;
         self
@@ -594,8 +600,9 @@ enum EndpointCall<'a> {
     Stream(&'a (dyn Fn(StreamChunk) + Send + Sync)),
 }
 
-/// OpenAI 兼容端点上 `reasoning_effort` 取值存在已知差异的模型家族，
-/// 按 id 末段（去 vendor 前缀、大小写不敏感）判定。
+/// Model families with known `reasoning_effort` deviations on
+/// OpenAI-compatible endpoints, classified by the id's last segment (vendor
+/// prefix stripped, case-insensitive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelFamily {
     Gpt56,
@@ -622,23 +629,30 @@ fn classify_model(model: &str) -> ModelFamily {
     }
 }
 
-/// `reasoning_effort` 档位 → 请求体取值。High 一律 `high`；差异集中在
-/// Off（是否显式下发）与 Max（`xhigh` vs `max`）两端：
+/// `reasoning_effort` tier → request-body value. High is always `high`; the
+/// deviations sit at the Off end (send explicitly or omit) and the Max end
+/// (`xhigh` vs `max`):
 ///
-/// | 端点 / 模型            | Off    | Max     |
-/// |------------------------|--------|---------|
-/// | 通用 OpenAI 兼容端点    | 不发   | `xhigh` |
-/// | GPT-5.6                | `none` | `max`   |
-/// | Kimi K3 / GLM-5.2      | 不发   | `max`   |
-/// | Zhipu 方言（任意模型）  | 不发   | `max`   |
+/// | Endpoint / model                | Off     | Max     |
+/// |---------------------------------|---------|---------|
+/// | generic OpenAI-compatible       | omit    | `xhigh` |
+/// | GPT-5.6                         | `none`  | `max`   |
+/// | Kimi K3 / GLM-5.2               | omit    | `max`   |
+/// | Zhipu dialect (any model)       | omit    | `max`   |
+///
+/// The table covers only the `reasoning_effort` field; on Off, GLM-5.2's
+/// `build_body` additionally sends `thinking: {"type": "disabled"}`
+/// (`Glm52` is an exact `classify_model` match — new GLM families on
+/// generic endpoints must be registered there).
 fn reasoning_effort_for_model(
     dialect: ReasoningDialect,
     family: ModelFamily,
     effort: ReasoningEffort,
 ) -> Option<&'static str> {
     if dialect == ReasoningDialect::Zhipu {
-        // Zhipu 官方仅文档化 low/high/max：`xhigh` 会被拒绝；Off 不发参数，
-        // 由服务端默认接管（glm-5.3+ 不支持 thinking.type: disabled）。
+        // Zhipu officially documents only low/high/max: `xhigh` is rejected;
+        // Off omits the parameter and lets the server default take over
+        // (glm-5.3+ does not support thinking.type: disabled).
         return match effort {
             ReasoningEffort::Off => None,
             ReasoningEffort::High => Some("high"),
@@ -646,11 +660,13 @@ fn reasoning_effort_for_model(
         };
     }
     match (effort, family) {
-        // GPT-5.6 须显式发 `none` 关闭，其余模型不发参数。
+        // GPT-5.6 needs an explicit `none` to turn reasoning off; other
+        // models omit the parameter.
         (ReasoningEffort::Off, ModelFamily::Gpt56) => Some("none"),
         (ReasoningEffort::Off, _) => None,
         (ReasoningEffort::High, _) => Some("high"),
-        // 新模型家族只认 `max`；通用端点用 `xhigh`。
+        // The newer families only accept `max`; generic endpoints use
+        // `xhigh`.
         (ReasoningEffort::Max, ModelFamily::Standard) => Some("xhigh"),
         (ReasoningEffort::Max, _) => Some("max"),
     }

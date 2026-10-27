@@ -4,7 +4,7 @@
 //! `LlmResponse` / `StreamChunk` / `LlmError` 等底层词汇进入应用测试代码。
 //! 这些词汇仅在本模块内部使用，不向应用导出。
 //!
-//! （feature 门控在 `lib.rs` 的 `#[cfg]` mod 声明上，文件内不再重复。）
+//! （feature 门控在 `lib.rs` 的 `#[cfg]` mod 声明上，文件内不重复。）
 
 use std::sync::Arc;
 
@@ -16,8 +16,7 @@ use xiaoo_api::llm::LlmProviderWrapper;
 /// 现成的 `LlmProvider` 测试桩，capabilities 可参数化。
 ///
 /// `complete` / `complete_stream` 均 `unimplemented!`：桩仅用于探测上下文窗口
-/// 与 provider 包装层路径，不实际执行推理（与原 endside `cli/mod.rs` 测试
-/// 手搓的 `DummyProvider` 行为一致）。返回 `Arc<LlmProviderWrapper>`，可直接
+/// 与 provider 包装层路径，不实际执行推理。返回 `Arc<LlmProviderWrapper>`，可直接
 /// 注入需要该类型的装配路径。
 pub fn stub_llm_provider(model_name: &str, max_context_window: u32) -> Arc<LlmProviderWrapper> {
     Arc::new(LlmProviderWrapper::new(

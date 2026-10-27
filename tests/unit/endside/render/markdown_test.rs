@@ -48,7 +48,7 @@ fn table_separator_requires_three_dashes() {
 
 #[test]
 fn table_rendering_truncates_to_available_width() {
-    // A table wider than the viewport is no longer squeezed or ellipsised:
+    // A table wider than the viewport is never squeezed or ellipsised:
     // columns keep their natural width, every rendered line is windowed to
     // the viewport, the wide-table metadata is reported and a muted hint
     // row is appended so the table can be panned horizontally.

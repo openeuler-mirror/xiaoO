@@ -46,7 +46,8 @@ impl ValidationResult {
 /// - Link-local (169.254.0.0/16, fe80::/10)
 /// - Unspecified (0.0.0.0, ::)
 /// - IPv4-mapped IPv6 private addresses (::ffff:0:0/96 that map to private ranges)
-/// - AWS/GCP metadata endpoints
+/// - Shared address space (100.64.0.0/10), which covers cloud metadata endpoints
+/// - Broadcast, multicast, and documentation ranges
 fn is_ip_blocked(ip: IpAddr) -> bool {
     if ip.is_loopback() {
         return true;

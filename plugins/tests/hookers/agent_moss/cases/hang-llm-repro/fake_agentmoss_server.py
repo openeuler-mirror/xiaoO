@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
 """假 AgentMoss 服务 — 复现 agent_moss bridge 的 analyze 阶段永久阻塞。
 
-这是旧 audit_agent hang-llm-repro 用例的等价重写。
-
-背景（旧 audit_agent 场景，已废弃）：
-  旧 audit.py 用 ThreadPoolExecutor 跑 L3 call_llm，客户报告"http 超时失效"导致
-  call_llm 永不返回，worker 永久卡住，进程卡死。旧用例用 sitecustomize 注入把
-  call_llm patch 成永久阻塞，验证 audit.py 末尾 os._exit 自愈退出。
-
-agent_moss 新场景：
-  agent_moss 判定逻辑迁出为独立常驻 HTTP 服务，xiaoO 只装一个瘦 bridge.py 转发
-  到服务。bridge 进程不再跑判定逻辑，没有"卡住的 worker 线程"风险——但它必须保证
+场景：
+  agent_moss 判定逻辑在独立常驻 HTTP 服务里，xiaoO 只装一个瘦 bridge.py 转发
+  到服务。bridge 进程不跑判定逻辑，没有"卡住的 worker 线程"风险——但它必须保证
   "服务 analyze 阶段永久阻塞时，bridge 自己不卡死"。
 
   bridge.py 对 /api/v1/analyze 的 urlopen 带 timeout=AGENT_MOSS_HOOK_TIMEOUT，

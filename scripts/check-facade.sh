@@ -36,7 +36,7 @@ done
 
 # 缓存 cargo metadata 到临时文件，避免后续每个 crate 重复调用（N+1）。
 # stderr 单独捕获到 META_ERR：成功即删；失败时把 stderr 原样回显，便于排障
-# （之前 2>/dev/null 全吞，cargo 报错用户看不到根因）。
+# （全吞 stderr 会让 cargo 报错对用户不可见，丢失根因）。
 META_FILE="$(mktemp "${TMPDIR:-/tmp}/xiaoo-meta.XXXXXX.json")"
 META_ERR="$(mktemp "${TMPDIR:-/tmp}/xiaoo-meta-err.XXXXXX")"
 trap 'rm -f "$META_FILE" "$META_ERR"' EXIT
@@ -52,7 +52,7 @@ fi
 rm -f "$META_ERR"
 
 # 一次性把所有 crate 的 manifest_path 装进关联数组，后续 lookup 零 python3
-# 调用，消除 N+1 冷启动（旧实现每个 crate 各启一次 python3）。
+# 调用，消除 N+1 冷启动（每个 crate 各启一次 python3 的代价不可接受）。
 declare -A MANIFEST_PATHS=()
 while IFS=$'\t' read -r pkg_name pkg_manifest; do
     [ -n "$pkg_name" ] && MANIFEST_PATHS["$pkg_name"]="$pkg_manifest"
@@ -75,7 +75,7 @@ APPS="xiaoo-endside xiaoo-serverside"
 # 名单 = 工作区所有 path crate − 门面 − 应用 − vault（vault 仅被 shared 引用，
 # 属于 shared 的实现细节，不向应用暴露，但当前不是应用直依约束对象）。
 # 名单由缓存 metadata 动态生成，避免增删底层 crate 时名单滞后。
-# 复用上方 MANIFEST_PATHS 的键集合，不再二次调 python3。
+# 复用上方 MANIFEST_PATHS 的键集合，全程只调一次 python3。
 WORKSPACE_CRATES=("${!MANIFEST_PATHS[@]}")
 if [ "${#WORKSPACE_CRATES[@]}" -eq 0 ]; then
     log "FAIL [META]: 工作区 crate 名单为空（metadata 解析异常）"
@@ -164,8 +164,8 @@ if [ -n "$violations" ]; then
 fi
 
 # ---- [PUBLISH] 底层 crates 必须 publish=false ---------------------------------
-# xiaoo-api 作为门面允许发布；apps（shared/endside/serverside/vault）是 workspace
-# 内 path crate，同样不强求 publish=false（它们本就不对外发布路径）。
+# xiaoo-api 作为门面允许发布；workspace 内的 apps（endside/serverside）与
+# xiaoo-shared、vault 均 path 依赖、不对外发布路径，不强求 publish=false。
 # 唯独底层实现 crates 必须锁死 publish=false，杜绝仓库外直接依赖。
 #
 # PUBLISH_EXEMPT：白名单——这些 crate 当前未配 publish=false，跳过检查。
@@ -215,8 +215,8 @@ done
 #    只认 [dependencies] 表内的 path 依赖（dev/build 依赖不进对外 pub 面）。
 #    两步 grep：先选 inline-table 行（`= {`），再在其中找 path 键。
 #    这样 path 无论是否为 inline table 首键都能命中——例如 `{ version="1.0", path=".." }`
-#    （version 在前）旧正则 `={[[:space:]]*path` 漏掉，会被新增依赖绕过冻结；
-#    新正则 `[^[:alnum:]_-]path[[:space:]]*=` 用非标识符边界防止 `mypath` 之类子串误报。
+#    （version 在前）也会被逮住，新增依赖无法绕过冻结；
+#    正则 `[^[:alnum:]_-]path[[:space:]]*=` 用非标识符边界防止 `mypath` 之类子串误报。
 api_manifest="$(manifest_path_of xiaoo-api)"
 if [ -z "$api_manifest" ]; then
     log "FAIL [META]: 无法定位 xiaoo-api 的 manifest（metadata 解析异常）"

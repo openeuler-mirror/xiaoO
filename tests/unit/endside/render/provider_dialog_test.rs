@@ -35,8 +35,10 @@ fn providers() -> Vec<ProviderInfo> {
     ]
 }
 
-/// 连按向下必须停在最后一项。越界会让 `selected()` 返回 `None`，而应用选择的那
-/// 一支只在 `Some` 时生效，界面上看不出异常——所以这里钉住上下界。
+/// Pressing down repeatedly must stop at the last entry. Going out of
+/// bounds makes `selected()` return `None`, and the apply-selection arm only
+/// takes effect on `Some` — the UI shows nothing wrong, hence this test
+/// pins both ends.
 #[test]
 fn move_down_in_the_models_pane_stops_at_the_last_model() {
     let mut dialog = ProviderDialog::new(providers());
@@ -82,7 +84,7 @@ fn new_with_selection_falls_back_to_first_model_when_model_missing() {
     );
 }
 
-// ── 官方列表替换（replace_models） ─────────────────────────────────────────
+// ── Official-list replacement (replace_models) ──────────────────────────────
 
 fn model(id: &str) -> ModelInfo {
     ModelInfo {
@@ -104,14 +106,15 @@ fn selected_provider_name_returns_none_when_empty() {
     assert_eq!(dialog.selected_provider_name(), Some("deepseek"));
 }
 
-/// 官方列表顺序与内置表不同，因此选中项必须按 **id** 保持而不是按下标。
+/// The official list is ordered differently from the builtin table, so the
+/// selection must persist by **id**, never by index.
 #[test]
 fn replace_models_keeps_selection_by_id() {
     let mut dialog =
         ProviderDialog::new_with_selection(providers(), Some("openai"), Some("gpt-4-turbo"));
     assert_eq!(dialog.selected_model, 1);
 
-    // 官方列表把 gpt-4-turbo 挪到了最后一位。
+    // The official list moves gpt-4-turbo to the last position.
     assert!(dialog.replace_models(
         "openai",
         vec![model("gpt-4o"), model("o3"), model("gpt-4-turbo")],
@@ -143,7 +146,8 @@ fn replace_models_clamps_selection_when_id_disappears() {
     );
 }
 
-/// 结果到达时用户可能已经切到别的 provider：此时不得重算另一个 provider 上的选中项。
+/// By the time an outcome lands the user may have switched to another
+/// provider: the selection on the other provider must not be recalculated.
 #[test]
 fn replace_models_leaves_selection_alone_for_non_selected_provider() {
     let mut dialog =

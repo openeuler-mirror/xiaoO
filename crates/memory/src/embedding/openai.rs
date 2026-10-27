@@ -25,7 +25,8 @@ impl OpenAiEmbedding {
             dims,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
-                // 与 chat / 模型目录同源：自签名网关下 embedding 也要能过握手。
+                // Same source as chat / the model catalog: embeddings must
+                // also pass the handshake behind self-signed gateways.
                 .danger_accept_invalid_certs(llm_client::http::tls_verification_disabled())
                 .build()
                 .unwrap_or_else(llm_client::http::client_build_failed),

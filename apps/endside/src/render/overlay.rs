@@ -432,7 +432,6 @@ impl App {
         let inner_height = inner.height.max(1) as usize;
         let max_width = inner.width.max(1) as usize;
 
-        // Calculate visual cursor position considering line wrapping
         let (visual_row, visual_col) = calculate_visual_cursor_position(value, cursor, max_width);
         let scroll_y = visual_row.saturating_sub(inner_height.saturating_sub(1));
 
@@ -442,7 +441,6 @@ impl App {
             .add_modifier(Modifier::BOLD);
 
         let paragraph = if let Some(sel_range) = selection {
-            // Build a Text with selection highlighting.
             let text =
                 build_input_text_with_selection(value, &sel_range, input_style, selection_style);
             Paragraph::new(text)
@@ -490,13 +488,15 @@ impl App {
         }
     }
 
-    /// 快捷键行两档文案：`Length(1)` 的行放不下第二行，溢出的尾部会被直接
-    /// 截掉（`Wrap` 只在可视行内折行），所以窄弹窗降级成精简版。
+    /// Two tiers of hint-line text: a `Length(1)` row cannot hold a second
+    /// line — the overflow tail is simply cut (`Wrap` only folds within the
+    /// visible lines) — so narrow dialogs degrade to the compact variant.
     ///
-    /// 弹窗内宽 = `dialog_width` 减两侧边框，而 `dialog_width` 是
-    /// `width.clamp(60, 80)`，故内宽最窄 58、终端 ≥ 80 列时 78；完整版文案宽
-    /// 73 列，所以内宽 58..=72 走精简版、73..=78 走完整版。判定用
-    /// `Line::width()`（与渲染同一个宽度算法），不要改成字符数。
+    /// Inner width = `dialog_width` minus the borders, and `dialog_width`
+    /// is `width.clamp(60, 80)`: inner width is at least 58 and 78 on
+    /// ≥80-column terminals; the full text is 73 columns, so 58..=72 picks
+    /// compact and 73..=78 full. The decision uses `Line::width()` (the same
+    /// width algorithm as rendering) — do not switch to a character count.
     const PROVIDER_HINT_FULL: &str =
         "↑↓ select | PgUp/PgDn page | Home/End | Ctrl+R | Enter apply | Esc cancel";
     const PROVIDER_HINT_COMPACT: &str = "↑↓ select | PgUp/PgDn page | Ctrl+R refresh | Esc cancel";
@@ -527,8 +527,9 @@ impl App {
         let inner = dialog_block.inner(dialog_area);
         frame.render_widget(dialog_block, dialog_area);
 
-        // 底部固定两行：官方列表状态行 + 快捷键行。列表只占剩余空间，状态
-        // 文案不会挤压或盖住列表内容（对齐 sandbox / snapshot 弹窗的做法）。
+        // Two fixed rows at the bottom: official-list status line + hint
+        // line. The list takes the remaining space so the status text never
+        // squeezes or covers list rows (same as sandbox / snapshot dialogs).
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -541,8 +542,11 @@ impl App {
         let status_area = rows[1];
         let hint_area = rows[2];
 
-        // 翻页步长的唯一真相源：列表栏内容区行数（去掉上下边框）。量好写回
-        // 弹窗状态，PageUp/PageDown 的步长才等于一屏的行数（窗口记账见 `ProviderDialog::provider_window`）。
+        // Single source of truth for the page step: the list column's
+        // content rows (minus the top/bottom borders). Measured here and
+        // written back into the dialog state, PageUp/PageDn steps equal one
+        // full page (window bookkeeping in
+        // `ProviderDialog::provider_window`).
         dialog.page_height = usize::from(list_area.height.saturating_sub(2));
 
         let horizontal = Layout::default()
@@ -577,18 +581,22 @@ impl App {
                 .title(" Providers ")
                 .padding(Padding::horizontal(1)),
         );
-        // ListState 除了让选中项可见，还承担整屏对齐：官方列表可能远长于可视高度
-        // （openrouter 300+），无状态的 List 会永远停在列表头部。
-        // 逐行样式仍由上面的 Span 决定，不设 highlight_style。
-        // `offset` 由弹窗给出：翻页要整屏对齐，而 ListState 默认只会做最小滚动
-        // （见 `ProviderDialog::provider_window`）。
+        // ListState both keeps the selection visible and aligns whole
+        // pages: the official list can be far taller than the viewport
+        // (openrouter 300+), and a stateless List would stay pinned at the
+        // top. Per-row styling stays with the Spans above — no
+        // highlight_style. The `offset` comes from the dialog: paging needs
+        // page alignment, while ListState by itself only scrolls minimally
+        // (see `ProviderDialog::provider_window`).
         let mut provider_state = ListState::default()
             .with_offset(dialog.provider_window())
             .with_selected(Some(dialog.selected_provider));
         frame.render_stateful_widget(provider_list, left, &mut provider_state);
-        // ratatui 会把 offset 校正成"现在真正可见的第一项"（`List::render` 里的
-        // `state.offset = first_visible_index`）。记下来，下一次翻页才会从**看得见的**
-        // 窗口起算——列表刚被替换或预选到深处时尤其重要。
+        // ratatui corrects the offset to the first item actually visible
+        // now (`state.offset = first_visible_index` inside `List::render`).
+        // Recording it lets the next page step start from the **visible**
+        // window — especially important right after the list is replaced or
+        // preselected deep into it.
         let provider_visible = provider_state.offset();
 
         let provider_name = dialog.selected_provider_name().unwrap_or_default();
@@ -646,7 +654,8 @@ impl App {
         frame.render_stateful_widget(model_list, right, &mut model_state);
         let model_visible = model_state.offset();
 
-        // 状态行按拉取状态给一句话：成功报数量、失败报原因、缺 key 只提示。
+        // Status line, one sentence per fetch state: success reports the
+        // count, failure the reason, missing key just a hint.
         let (status_text, status_style) = match &status {
             ModelListState::Builtin => (String::new(), Style::default().fg(theme.muted)),
             ModelListState::Loading { .. } => (
@@ -678,7 +687,8 @@ impl App {
                 Style::default().fg(theme.muted),
             ),
         };
-        // `models` 借用 dialog 到上面为止，这里再把 ratatui 校正过的窗口收回去。
+        // The `models` borrow of dialog ends above; here we take back the
+        // ratatui-corrected windows.
         dialog.record_visible_windows(provider_visible, model_visible);
 
         frame.render_widget(

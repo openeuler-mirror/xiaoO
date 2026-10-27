@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
 # 测试：agent_moss bridge 在 /api/v1/analyze 永久阻塞时不卡死、自愈 fail-closed deny。
 #
-# 这是旧 audit_agent hang-llm-repro 用例的等价重写。
-#
-# 旧场景（已废弃）：audit.py 用 ThreadPoolExecutor 跑 L3 call_llm，客户"http 超时失效"
-# 导致 call_llm 永不返回、worker 永久卡住、进程卡死。旧用例 patch call_llm 为永久阻塞，
-# 验证 audit.py 末尾 os._exit 自愈退出。
-#
-# agent_moss 新场景：判定逻辑迁出为常驻 HTTP 服务，xiaoO 只装瘦 bridge.py 转发。
+# 场景：判定逻辑在常驻 HTTP 服务内，xiaoO 只装瘦 bridge.py 转发。
 # bridge 没有"卡住的 worker 线程"风险，但必须保证"服务 analyze 永久阻塞时 bridge 自己
 # 不卡死"——urlopen 对 /api/v1/analyze 带 timeout=AGENT_MOSS_HOOK_TIMEOUT，超时后
 # 抛 URLError → fail-closed deny + exit 0。
@@ -18,7 +12,7 @@
 #
 # 通过标准：exit 0（正常退出，非被外层 timeout 杀）、stdout 含 {"result": "deny"}、
 #           耗时 ≥ AGENT_MOSS_HOOK_TIMEOUT 且 < 外层 timeout（自愈而非卡死）。
-# 失败：exit 124（被外层 timeout 杀 = bridge 卡死，urlopen timeout 修复失效）。
+# 失败：exit 124（被外层 timeout 杀 = bridge 卡死，urlopen timeout 未生效）。
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

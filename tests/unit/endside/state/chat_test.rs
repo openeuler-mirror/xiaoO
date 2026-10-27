@@ -419,7 +419,7 @@ fn messages_from_chat_messages_marks_failed_tool_results() {
     assert_eq!(tool.tool, "file_edit");
 }
 
-// ── 官方 model list 状态 ───────────────────────────────────────────────────
+// ── Official model-list state ──────────────────────────────────────────────
 
 fn model(id: &str) -> ModelInfo {
     ModelInfo {
@@ -432,9 +432,10 @@ fn ids(models: &[ModelInfo]) -> Vec<&str> {
     models.iter().map(|model| model.id.as_str()).collect()
 }
 
-/// `needs_refresh` 是"按需刷新"的唯一判据（`Ctrl+R` 强制刷新绕过它），
-/// 五个状态的取值都要能被这条测试钉住——尤其是 `Unsupported` 永不重试与
-/// `Failed` 的退避窗口，它们决定了坏端点上会不会被反复打请求。
+/// `needs_refresh` is the sole on-demand-refresh criterion (`Ctrl+R`'s
+/// forced refresh bypasses it), so this test pins all five states —
+/// especially `Unsupported` never retrying and the `Failed` backoff window,
+/// which decide whether a broken endpoint gets hammered.
 #[test]
 fn model_list_state_needs_refresh_follows_ttl_and_failure_backoff() {
     let now = Instant::now();
@@ -474,7 +475,8 @@ fn model_list_state_needs_refresh_follows_ttl_and_failure_backoff() {
     );
     assert!(failed.needs_refresh(now + MODEL_LIST_FAILURE_BACKOFF));
 
-    // 记录时刻晚于 now（理论上不会发生）时按 0 处理，不 panic。
+    // A recorded instant later than `now` (theoretically impossible) is
+    // treated as 0 rather than panicking.
     let future = ModelListState::Ready {
         fetched_at: now + Duration::from_secs(60),
     };
@@ -503,10 +505,13 @@ fn model_list_state_defaults_to_builtin_and_tracks_loading_staleness() {
     );
     assert!(!state.model_list_state("openai").is_stale_loading(started));
 
-    // 陈旧兜底：任务若在回传前消失，Loading 必须在兜底窗口到期后重新可拉——窗口内
-    // `needs_refresh(Loading)` 为假、在飞名额也不释放，谁都拉不动。会话重建（`/new`）
-    // 不是逃生口：它把状态重置成 `Builtin`（`is_stale_loading` 由此恒假）却不清
-    // `model_fetch_inflight`，会把"60s 后自愈"变成"只能重启进程"。
+    // Stale backstop: if the task vanishes before reporting, `Loading` must
+    // become re-fetchable once the backstop window expires — inside it,
+    // `needs_refresh(Loading)` is false and the in-flight slot stays taken,
+    // so nothing can fetch. A session rebuild (`/new`) is no escape hatch:
+    // it resets the state to `Builtin` (making `is_stale_loading` always
+    // false) without clearing `model_fetch_inflight`, which would turn
+    // "self-heals after 60s" into "only a process restart helps".
     let later = started + crate::chat::MODEL_LIST_STALE_AFTER + Duration::from_secs(1);
     assert!(state.model_list_state("openai").is_stale_loading(later));
     assert!(

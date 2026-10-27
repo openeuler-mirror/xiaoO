@@ -180,7 +180,6 @@ fn allows_concurrent_pending_joins_from_same_waiter() {
     let mut state = SubagentSessionState::default();
     let parent_id = make_parent_agent_id();
 
-    // Spawn 3 subagents
     for i in 0..3 {
         let child_id = AgentId(format!("child-{}", i));
         let request = make_request(&parent_id, &format!("task-{}", i));
@@ -189,7 +188,6 @@ fn allows_concurrent_pending_joins_from_same_waiter() {
             .unwrap();
     }
 
-    // Parent can register multiple pending joins simultaneously
     for i in 0..3 {
         let child_id = AgentId(format!("child-{}", i));
         let join_request = JoinSubagentRequest {
@@ -213,7 +211,6 @@ fn allows_concurrent_pending_joins_from_same_waiter() {
         }
     }
 
-    // Verify all 3 joins are registered
     assert_eq!(state.joins.len(), 3);
     assert!(state
         .joins
@@ -227,7 +224,6 @@ fn multiple_joins_resolved_when_subagent_completes() {
     let mut state = SubagentSessionState::default();
     let parent_id = make_parent_agent_id();
 
-    // Spawn 2 subagents
     for i in 0..2 {
         let child_id = AgentId(format!("child-{}", i));
         let request = make_request(&parent_id, &format!("task-{}", i));
@@ -236,7 +232,6 @@ fn multiple_joins_resolved_when_subagent_completes() {
             .unwrap();
     }
 
-    // Register joins for both
     for i in 0..2 {
         let child_id = AgentId(format!("child-{}", i));
         let join_request = JoinSubagentRequest {
@@ -247,7 +242,6 @@ fn multiple_joins_resolved_when_subagent_completes() {
         coordinator.join(&mut state, &join_request, 2000).unwrap();
     }
 
-    // Complete first subagent
     let terminal = SubagentTerminalSnapshot {
         status: SubagentTerminalKind::Completed,
         reply: Some("child-0 done".to_string()),
@@ -258,15 +252,14 @@ fn multiple_joins_resolved_when_subagent_completes() {
         .on_terminal(&mut state, &AgentId("child-0".to_string()), terminal)
         .unwrap();
 
-    // Should have wake action for first join
-    assert_eq!(actions.len(), 2); // mailbox item + wake waiter
+    // 2 = mailbox item + wake waiter
+    assert_eq!(actions.len(), 2);
     let wake_actions = actions
         .iter()
         .filter(|a| matches!(a, HostAction::WakeWaiter { .. }))
         .count();
     assert_eq!(wake_actions, 1);
 
-    // First join should be satisfied, second still pending
     let satisfied_joins = state
         .joins
         .values()

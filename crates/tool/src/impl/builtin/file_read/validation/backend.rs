@@ -16,29 +16,25 @@ pub use super::constants::PDF_MAX_PAGES_PER_READ;
 
 /// Error codes for validation failures.
 pub mod error_code {
-    /// Invalid pages format (error_code = 7)
+    /// Invalid pages format
     pub const INVALID_PAGES_FORMAT: u32 = 7;
-    /// Pages range too large (error_code = 8)
+    /// Pages range too large
     pub const PAGES_RANGE_TOO_LARGE: u32 = 8;
-    /// Binary file rejected (error_code = 4)
+    /// Binary file rejected
     pub const BINARY_FILE_REJECTED: u32 = 4;
-    /// Device path blocked (error_code = 9)
+    /// Device path blocked
     pub const DEVICE_PATH_BLOCKED: u32 = 9;
 }
 
 /// Result of input validation.
 #[derive(Debug, Clone)]
 pub struct ValidationResult {
-    /// Whether validation passed.
     pub result: bool,
-    /// Error message if validation failed.
     pub message: Option<String>,
-    /// Error code if validation failed.
     pub error_code: Option<u32>,
 }
 
 impl ValidationResult {
-    /// Create a successful validation result.
     pub fn ok() -> Self {
         Self {
             result: true,
@@ -57,13 +53,11 @@ impl ValidationResult {
     }
 }
 
-/// Binary file extensions that are explicitly rejected.
+/// Checks whether the path's extension marks it as a binary (non-text) file.
 ///
-/// These extensions represent non-text, non-PDF, non-image binary files.
-/// Checks if a file extension indicates a binary file.
-///
-/// Binary files are those with extensions in BINARY_EXTENSIONS,
-/// excluding image and PDF extensions.
+/// Extensions in `REJECTED_BINARY_EXTENSIONS` are always rejected; any other
+/// 2–5 character extension that is neither a known text extension nor an
+/// image/PDF suffix is treated as binary as well.
 ///
 /// # Arguments
 /// * `path` - The file path to check
@@ -73,24 +67,21 @@ impl ValidationResult {
 fn is_binary_file_extension(path: &str) -> bool {
     let path_lower = path.to_lowercase();
 
-    // Check if it's a known binary extension
     for ext in REJECTED_BINARY_EXTENSIONS {
         if path_lower.ends_with(ext) {
             return true;
         }
     }
 
-    // If it has an extension but is not an image or PDF, treat as binary
-    // This catches extensions like .o, .obj, .class, etc.
+    // Fall back to a heuristic for unknown extensions: image and PDF suffixes
+    // are allowed, known text extensions are allowed, anything else looks
+    // binary (e.g. .o, .obj, .class).
     if let Some(pos) = path_lower.rfind('.') {
         let ext = &path_lower[pos..];
-        // Allow image and PDF extensions
         if ext == PDF_PATH_SUFFIX || IMAGE_PATH_SUFFIXES.contains(&ext) {
             return false;
         }
-        // Any other extension with length > 1 is likely a binary
         if ext.len() > 1 && ext.len() <= 5 {
-            // Check if it's a text-like extension
             if !TEXT_FILE_EXTENSIONS.contains(&ext) {
                 return true;
             }
@@ -116,7 +107,8 @@ fn is_binary_file_extension(path: &str) -> bool {
 fn parse_pages(pages: &str) -> Result<(u32, u32), &'static str> {
     let pages = pages.trim();
 
-    // Handle multiple ranges (take the first range for size validation)
+    // Only the first comma-separated segment is parsed; the size over the
+    // whole string is measured separately by `total_pages`.
     let first_range = if pages.contains(',') {
         pages.split(',').next().unwrap_or("")
     } else {

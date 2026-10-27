@@ -1002,8 +1002,9 @@ fn model_fetch_accounting_is_global_and_survives_session_rebuild() {
     state.finish_model_fetch("openai");
     assert!(state.begin_model_fetch("kimi"), "名额释放后应可再拉");
 
-    // 计数放在 AppState 就是为了不随会话重建清空：否则 `/new` 之后又会放进来两个，
-    // 实际在飞超过上限（旧任务仍在跑）。
+    // The counter lives on AppState precisely so a session rebuild does not
+    // clear it — otherwise two more fetches would be admitted after `/new`
+    // while the old tasks are still running, exceeding the real cap.
     let before = state.model_fetch_session;
     state.reset_for_new_session();
     assert_eq!(

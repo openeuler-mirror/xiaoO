@@ -37,29 +37,38 @@ pub(crate) fn session_taken_over_notice_plain() -> String {
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/tui_default_system_prompt.txt");
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 
-/// 静态回落值与否定结果的缓存有效期：动态探测不可用（如 API key 未设、
-/// 断网）时回落静态值并短期缓存，到期后自动重试动态链——用户补设 key 或
-/// 网络恢复后至多 5 分钟内自我纠正。动态探测成功的结果不过期。
+/// TTL for static fallback and negative results: when dynamic probing is
+/// unavailable (missing API key, offline) we fall back to the static value
+/// and cache it briefly; expiry automatically retries the dynamic chain, so
+/// the process self-corrects within 5 minutes of the key being set or the
+/// network returning. Successful dynamic results never expire.
 const STATIC_FALLBACK_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// turn 路径等待动态探测的总时限（在 spawned task 内等待，只决定派发
-/// 延迟，不阻塞事件循环；探测链 HTTP 超时之和可达 ~40s）。超限回落静态
-/// 值放行当前 turn，探测转后台自写缓存（见 [`resolve_total_token_budget`]）。
+/// How long the turn path waits for the dynamic probe (waited inside a
+/// spawned task, so it only delays dispatch and never blocks the event
+/// loop; the probe chain's HTTP timeouts sum to ~40s). Past the deadline the
+/// static value lets the current turn through while the probe continues in
+/// the background and writes the cache (see
+/// [`resolve_total_token_budget`]).
 const PROBE_INLINE_DEADLINE: Duration = Duration::from_secs(3);
 
-/// 进程级动态上下文窗口缓存，键为 `provider|model|api_base`：
-/// `build_runtime_config` 每个本地 turn 都执行且探测可能触网，缓存后
-/// 每个组合至多探测一次；切 provider / model / api_base 自动换键。
+/// Process-wide dynamic context-window cache keyed by
+/// `provider|model|api_base`: `build_runtime_config` runs on every local
+/// turn and probing can hit the network, so each combination is probed at
+/// most once; switching provider / model / api_base changes the key.
 fn dynamic_context_window_cache() -> &'static Mutex<HashMap<String, CachedWindow>> {
     static CACHE: OnceLock<Mutex<HashMap<String, CachedWindow>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 缓存条目：
-/// - `Dynamic`：动态探测成功，永不过期；
-/// - `Static`：静态回落值，按 [`STATIC_FALLBACK_CACHE_TTL`] 过期后重试动态链；
-/// - `Unresolved`：动态探测与静态估算均失败，同样按 TTL 过期——期间后续
-///   turn 快速失败不再触网，避免逐 turn 重复等待探测后报同一错误。
+/// Cache entries:
+/// - `Dynamic`: probe succeeded, never expires;
+/// - `Static`: static fallback, expires per [`STATIC_FALLBACK_CACHE_TTL`]
+///   and then the dynamic chain is retried;
+/// - `Unresolved`: both the probe and the static estimate failed; also
+///   expires per the TTL — while valid, subsequent turns fail fast without
+///   touching the network, instead of re-waiting on the probe and reporting
+///   the same error every turn.
 #[derive(Clone, Copy)]
 enum CachedWindow {
     Dynamic { window: usize },
@@ -77,7 +86,8 @@ impl CachedWindow {
         }
     }
 
-    /// 命中缓存时的解析结果；`Unresolved` 表示探测与静态估算均失败。
+    /// Resolved window on a cache hit; `Unresolved` means the probe and the
+    /// static estimate both failed.
     fn resolved_window(&self) -> Option<usize> {
         match self {
             Self::Dynamic { window } | Self::Static { window, .. } => Some(*window),
@@ -432,10 +442,13 @@ async fn build_runtime_config_from_inputs(
     })
 }
 
-/// 解析会话 token 总预算：动态探测优先（只等待 [`PROBE_INLINE_DEADLINE`]，
-/// 超时转后台自写缓存），失败/超时回落静态估算。结果按
-/// `provider|model|api_base` 缓存，静态/双失败短期缓存以便 key 补设或
-/// 网络恢复后重试（见 [`STATIC_FALLBACK_CACHE_TTL`]）。
+/// Resolve the session's total token budget: dynamic probing first (waiting
+/// only up to [`PROBE_INLINE_DEADLINE`]; past it the probe continues in the
+/// background and writes the cache itself), falling back to the static
+/// estimate on failure/timeout. Results are cached by
+/// `provider|model|api_base`; static and double-failure results are cached
+/// briefly so a key being set or the network returning is retried (see
+/// [`STATIC_FALLBACK_CACHE_TTL`]).
 async fn resolve_total_token_budget(agent_config: &Config) -> Option<usize> {
     resolve_window_with_shared_cache(
         &agent_config.llm,
@@ -445,10 +458,11 @@ async fn resolve_total_token_budget(agent_config: &Config) -> Option<usize> {
     .await
 }
 
-/// 进程级共享缓存窗口解析入口：turn 路径（[`resolve_total_token_budget`]）
-/// 与启动校验（main 的 `resolve_context_window_for_validation`）共用同一
-/// 缓存键、探测链与静态回落，启动探测直接写缓存，首个 turn 命中即免
-/// 重复等待。
+/// Shared process-wide cache entry point for window resolution: the turn
+/// path ([`resolve_total_token_budget`]) and startup validation (main's
+/// `resolve_context_window_for_validation`) share one cache key, probe chain
+/// and static fallback. The startup probe writes the cache directly, so the
+/// first turn hits it and skips the repeat wait.
 pub(crate) async fn resolve_window_with_shared_cache(
     llm: &crate::config::LlmConfig,
     static_window: Option<usize>,
@@ -567,9 +581,11 @@ pub(crate) fn llm_runtime_config_from_parts(
     }
 }
 
-/// 动态上下文窗口探测：构造 `ResolvedConfig` 并走共享解析链
-/// （provider catalog > OpenRouter > Ollama `/api/show`）。CLI 与 TUI 网关
-/// 共用，任一步失败仅记 warn 并返回 `None`，由调用方回落各自的静态估算。
+/// Dynamic context-window probing: builds a `ResolvedConfig` and goes
+/// through the shared resolution chain (provider catalog > OpenRouter >
+/// Ollama `/api/show`). Shared by the CLI and TUI gateways; any failure
+/// just logs a warn and returns `None`, leaving the caller to its own
+/// static estimate.
 pub(crate) async fn probe_dynamic_context_window(
     provider: &str,
     model: &str,
@@ -616,16 +632,23 @@ pub(crate) async fn probe_dynamic_context_window(
     }
 }
 
-/// [`resolve_total_token_budget`] 的状态机核心（提取为
-/// 自由函数以便单测：注入合成 probe 与短 deadline，不触网）：
+/// State-machine core of [`resolve_total_token_budget`] (extracted as a
+/// free function so unit tests can inject a synthetic probe and a short
+/// deadline without touching the network):
 ///
-/// 1. 缓存命中（`Dynamic` 永久，`Static`/`Unresolved` 在 TTL 内）直接返回；
-/// 2. 探测 spawn 到后台任务，任务成功时**自写** `Dynamic` 缓存——turn 侧
-///    超时放弃等待后任务仍在后台完成并纠正缓存，慢端点不损失动态精度；
-/// 3. turn 侧只内联等待 `inline_deadline`：期内完成即用动态值；
-/// 4. 超时/失败回落静态值：持锁写入前先检查后台任务是否已迟到写入
-///    `Dynamic`（让位，不得覆盖）；静态也失败则写 `Unresolved`，TTL 内
-///    后续 turn 快速失败不再触网。
+/// 1. A valid cache hit (`Dynamic` forever, `Static`/`Unresolved` within the
+///    TTL) returns immediately;
+/// 2. the probe is spawned into a background task that **writes the
+///    `Dynamic` cache itself on success** — after the turn side gives up
+///    waiting, the task still completes and corrects the cache, so slow
+///    endpoints lose no dynamic accuracy;
+/// 3. the turn side waits inline only up to `inline_deadline`: finishing
+///    within it uses the dynamic value;
+/// 4. timeout/failure falls back to the static value: before writing under
+///    the lock, check whether the background task has already written
+///    `Dynamic` (yield to it, never overwrite); if the static estimate also
+///    fails, write `Unresolved` so subsequent turns fail fast within the TTL
+///    without touching the network.
 async fn resolve_window_with_probe(
     cache_key: String,
     static_window: Option<usize>,
@@ -652,9 +675,12 @@ async fn resolve_window_with_probe(
         window
     });
 
-    // Ok(Ok(Some(..)))：期内完成，缓存已由任务写入；
-    // Ok(Ok(None)) / Ok(Err(_))：探测快速失败/任务 panic，无后台续跑；
-    // Err(_)：turn 侧超时——JoinHandle 被 drop，任务脱离后在后台自写缓存。
+    // Ok(Ok(Some(..))): finished within the deadline, cache already written
+    // by the task;
+    // Ok(Ok(None)) / Ok(Err(_)): probe failed fast / task panicked, nothing
+    // keeps running in the background;
+    // Err(_): the turn side timed out — the JoinHandle is dropped, the
+    // detached task keeps writing the cache in the background.
     match tokio::time::timeout(inline_deadline, probe).await {
         Ok(Ok(Some(window))) => return Some(window),
         Ok(Ok(None)) | Ok(Err(_)) => {}
@@ -668,10 +694,11 @@ async fn resolve_window_with_probe(
     }
 
     let Ok(mut guard) = dynamic_context_window_cache().lock() else {
-        // 锁中毒：放弃缓存，直接给静态结果。
+        // Poisoned lock: skip the cache, return the static value directly.
         return static_window;
     };
-    // 后台探测可能在超时后、取锁前迟到写入 Dynamic——让位。
+    // The background probe may write `Dynamic` between our timeout and this
+    // lock acquisition — yield to it, never overwrite.
     if let Some(CachedWindow::Dynamic { window }) = guard.get(&cache_key) {
         return Some(*window);
     }

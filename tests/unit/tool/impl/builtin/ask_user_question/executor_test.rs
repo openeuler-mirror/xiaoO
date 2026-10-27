@@ -11,8 +11,8 @@ use super::*;
 /// Runs a future on a minimal current-thread runtime; equivalent to
 /// `#[tokio::test]`, which needs tokio's `macros` feature (declared for
 /// this crate in its `[dev-dependencies]`, so `#[tokio::test]` never
-/// depends on a transitive dependency enabling it). Kept for the tests
-/// above that predate `#[tokio::test]` usage in this file.
+/// depends on a transitive dependency enabling it). Used by the tests
+/// above that drive futures directly with `block_on`.
 fn block_on<F: Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

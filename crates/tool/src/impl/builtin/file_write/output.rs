@@ -12,15 +12,10 @@ use crate::r#impl::lsp_hooks::LspDiagnosticsInfo;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hunk {
-    /// Starting line number in the old file.
     pub old_start: u32,
-    /// Number of old lines in this hunk.
     pub old_lines: u32,
-    /// Starting line number in the new file.
     pub new_start: u32,
-    /// Number of new lines in this hunk.
     pub new_lines: u32,
-    /// The lines in this hunk (diff text).
     pub lines: Vec<String>,
 }
 
@@ -28,7 +23,6 @@ pub struct Hunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredPatch {
-    /// Optional hunks in this patch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hunks: Option<Vec<Hunk>>,
 }
@@ -37,13 +31,9 @@ pub struct StructuredPatch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOutput {
-    /// The path to the file that was created.
     pub file_path: String,
-    /// Number of lines written to the new file (post-change diagnostic).
     pub new_lines: u32,
-    /// Structured patch representation (delta only).
     pub structured_patch: StructuredPatch,
-    /// LSP diagnostics for the file after the write (None if LSP unavailable or timed out).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
 }
@@ -52,13 +42,9 @@ pub struct CreateOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateOutput {
-    /// The path to the file that was updated.
     pub file_path: String,
-    /// Number of lines in the file after the write (post-change diagnostic).
     pub new_lines: u32,
-    /// Structured patch representation (delta only).
     pub structured_patch: StructuredPatch,
-    /// LSP diagnostics for the file after the write (None if LSP unavailable or timed out).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
 }

@@ -9,7 +9,7 @@
 #   bash tests/run.sh -- --list          # 仅列出测试不执行（基线核对）
 #
 # 透传约定：用户已自带目标选择参数（-p / --package / --workspace / --all /
-# --manifest-path）时不再强加 --workspace——cargo 会以并集处理，导致 -p 被
+# --manifest-path）时不强加 --workspace——cargo 会以并集处理，导致 -p 被
 # --workspace 吞掉而失去聚焦作用。
 #
 # 目录约定与命名规则见 tests/README.md。

@@ -49,7 +49,7 @@ pub use xiaoo_core::LoopSuspendReason;
 #[doc(inline)]
 pub use xiaoo_core::SuspendedToolCall;
 
-// ---- 构建默认件（RuntimeInput.runtime_view 的标准实现） ----
+// ---- Default components (the standard RuntimeInput.runtime_view impl) ----
 
 /// Runtime view contract referenced by
 /// `RuntimeInput.runtime_view: Option<Arc<dyn RuntimeView>>`; both
@@ -128,9 +128,9 @@ impl Runtime {
     ///
     /// The tool visibility set is decided entirely by `input.visible_tools`:
     /// an empty set means "no tools this turn" (a legal, intentionally-used
-    /// semantic in the core loop).  The runtime no longer rewrites an empty
-    /// list back to the full registry.  Callers that want the registry's full
-    /// tool set must inject it explicitly via [`Runtime::visible_tools`].
+    /// semantic in the core loop) and is passed through as-is.  Callers that
+    /// want the registry's full tool set must inject it explicitly via
+    /// [`Runtime::visible_tools`].
     pub async fn run(
         &self,
         state: &mut RuntimeState,

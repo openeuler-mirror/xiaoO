@@ -198,8 +198,8 @@ fn osc52_supported_by_terminal_rejects_unknown_terminals() {
 #[test]
 fn osc52_supported_by_terminal_inside_tmux_requires_outer_signal() {
     // A default tmux pane — TERM masked, no known-outer signal propagated —
-    // is NOT confirmed (the conservative flip from the previous "any tmux
-    // counts as supported" behaviour).
+    // is NOT confirmed: any tmux without a known outer signal counts as
+    // unsupported (conservative default).
     for term in ["screen", "screen-256color", "tmux-256color"] {
         assert!(
             !osc52_supported_by_terminal(Some(term), None, false, false),
@@ -254,7 +254,7 @@ fn clipboard_outcome_osc52_delivery_follows_terminal_heuristic() {
     );
 }
 
-// ── 官方 model list 拉取 ───────────────────────────────────────────────────
+// ── Official model-list fetching ────────────────────────────────────────────
 
 fn model(id: &str) -> ModelInfo {
     ModelInfo {
@@ -324,8 +324,9 @@ fn model_fetch_request_reads_api_key_from_env() {
     agent_config.llm.provider = "openai".to_string();
     agent_config.llm.api_key_env = Some(ENV.to_string());
 
-    // Edition 2021: std::env mutation is not yet `unsafe`。变量名是本测试专用的，
-    // 不会与并行运行的其他测试相互干扰。
+    // Edition 2021: std::env mutation is not yet `unsafe`. The variable
+    // name is test-local and cannot collide with other tests running in
+    // parallel.
     std::env::set_var(ENV, "  sk-test-key  ");
     assert_eq!(
         model_fetch_request(&state.agent_config, "openai")
@@ -403,8 +404,8 @@ fn pin_configured_model_keeps_list_untouched_when_present_or_blank() {
     );
 }
 
-/// OpenAI 兼容协议族：`GET {base}/models` + Bearer，解析 `data[].id`。
-/// 打的是 mockito 起的本地假端点，不出网。
+/// OpenAI-compatible protocol family: `GET {base}/models` + Bearer,
+/// parsing `data[].id`. Hits a local mockito endpoint; no network.
 #[tokio::test]
 async fn fetch_provider_models_parses_openai_style_model_list() {
     let mut server = mockito::Server::new_async().await;
@@ -435,9 +436,11 @@ async fn fetch_provider_models_parses_openai_style_model_list() {
     );
 }
 
-/// Anthropic 协议族走的是专属适配器（x-api-key + anthropic-version），
-/// 且 display_name / 上下文长度来自响应体——这条用例同时覆盖协议分派与
-/// 显示名映射，避免"所有 provider 都当 OpenAI 兼容"的想当然。
+/// The Anthropic family goes through a dedicated adapter (x-api-key +
+/// anthropic-version), and display_name / context length come from the
+/// response body — this case covers protocol dispatch and display-name
+/// mapping together, guarding against "treat every provider as
+/// OpenAI-compatible" assumptions.
 #[tokio::test]
 async fn fetch_provider_models_uses_anthropic_protocol_shape() {
     let mut server = mockito::Server::new_async().await;
@@ -516,12 +519,13 @@ async fn fetch_provider_models_reports_empty_list_as_ok_empty() {
     .await;
 
     mock.assert_async().await;
-    // 空列表不是传输错误：由调用方（App）决定"不清空列表 + 记失败"。
+    // An empty list is not a transport error: "keep the list + record
+    // failure" is the caller's (App's) decision.
     assert!(outcome.result.expect("空列表本身解析成功").is_empty());
 }
 
-/// 缺 key 必须在**发请求之前**失败：`expect(0)` + `assert_async()` 断言这个
-/// 假端点一次都没被访问过。
+/// A missing key must fail **before any request is sent**: `expect(0)` +
+/// `assert_async()` pin that the fake endpoint is never touched.
 #[tokio::test]
 async fn fetch_provider_models_reports_missing_api_key_env_without_http() {
     const ENV: &str = "XIAOO_TEST_UNSET_MODEL_KEY";
@@ -550,10 +554,12 @@ async fn fetch_provider_models_reports_missing_api_key_env_without_http() {
     }
 }
 
-/// 无官方 catalog 的 provider 必须优先报 `Unsupported`，而不是"缺 key"：
-/// minimax / gitcode 即使配好 key 也拉不到官方列表，提示"去配 key"是误导
-/// （门面会先解析 key 再判 catalog，所以在 TUI 侧前置这道判据）。
-/// `expect(0)` 同时证明这条路径一个请求都不发。
+/// A provider without an official catalog must report `Unsupported`
+/// before "missing key": minimax / gitcode cannot fetch an official list
+/// even with a key configured, so a "go configure the key" hint is
+/// misleading (the facade resolves the key before checking catalog
+/// support, hence the TUI-side pre-check). `expect(0)` also proves this
+/// path sends no request at all.
 #[tokio::test]
 async fn fetch_provider_models_reports_unsupported_before_missing_api_key() {
     const ENV: &str = "XIAOO_TEST_UNSET_MINIMAX_KEY";
@@ -662,10 +668,11 @@ fn externally_sourced_labels_are_length_capped() {
 
 #[tokio::test]
 async fn a_panicking_fetch_task_still_reports_a_failure() {
-    // 任务 panic 若不回传，provider 会停在 Loading，直到陈旧兜底窗口
-    // （MODEL_LIST_STALE_AFTER）到期：窗口内 needs_refresh(Loading) 为假、在飞名额
-    // 也不释放，谁都拉不动。本测试钉住 "panic 也必须折成 Failed"，即不让用户等满
-    // 这个兜底窗口。
+    // If a panicking task never reports back, the provider sits in Loading
+    // until the stale backstop window (MODEL_LIST_STALE_AFTER) expires:
+    // inside it needs_refresh(Loading) is false and the in-flight slot stays
+    // taken, so nothing can fetch. This test pins "a panic must also fold
+    // into Failed" — the user must not wait out the backstop window.
     let handle: tokio::task::JoinHandle<ProviderModelFetchOutcome> =
         tokio::spawn(async move { panic!("boom") });
 
@@ -685,8 +692,10 @@ async fn a_panicking_fetch_task_still_reports_a_failure() {
 
 #[test]
 fn invisible_format_characters_are_stripped_from_model_labels() {
-    // Cf（格式字符）能穿过 ratatui 基于 `is_control` 的字素过滤：bidi 覆盖（U+202E）
-    // 可以让模型名以完全不同的顺序渲染，零宽字符能让两个不同名字看起来一样。
+    // Cf (format characters) slip through ratatui's `is_control`-based
+    // grapheme filter: a bidi override (U+202E) can render a model name in a
+    // completely different order, and zero-width characters can make two
+    // distinct names look identical.
     let infos = model_infos_from_summaries(vec![
         summary("evil\u{202e}model", None),
         summary("zero\u{200b}width", Some("soft\u{00ad}hyphen")),
@@ -699,8 +708,9 @@ fn invisible_format_characters_are_stripped_from_model_labels() {
 
 #[test]
 fn fetch_failure_messages_redact_bare_key_fields_and_bearer_tokens() {
-    // gemini 的 403 body 会原样拼进错误串，且 URL 可能被空白拆开——只按 `://` 判断会
-    // 把 `key=...` 片段留在屏幕上。
+    // Gemini's 403 body gets spliced verbatim into the error string, and
+    // whitespace may split the URL — matching on `://` alone would leave
+    // `key=...` fragments on screen.
     let message = match map_model_fetch_error(
         crate::gateway::llm_assembly::LlmAssemblyError::ModelCatalog(
             "403 Forbidden key=sk-live-SECRET\nAuthorization: Bearer sk-live-SECRET".to_string(),
@@ -731,7 +741,8 @@ fn huge_model_lists_are_capped() {
 
 #[test]
 fn redacted_urls_keep_the_host_so_tls_failures_stay_diagnosable() {
-    // 自签名网关场景：整条 URL 全抹掉会让"哪个端点握手失败"无从判断，所以只抹路径/query。
+    // Self-signed-gateway case: redacting the whole URL would hide "which
+    // endpoint failed the handshake", so only path/query go.
     let message = match map_model_fetch_error(
         crate::gateway::llm_assembly::LlmAssemblyError::ModelCatalog(
             "error sending request for url (https://gw.example.com/v1/models?key=sk-live-SECRET)"
@@ -755,8 +766,9 @@ fn redacted_urls_keep_the_host_so_tls_failures_stay_diagnosable() {
 
 #[test]
 fn error_urls_without_a_path_do_not_leak_query_or_userinfo() {
-    // 只按首个 `/` 截断时，`https://host?key=…` 这种**没有路径**的 URL 会把整个
-    // authority（含 query）留在屏幕上；`user:pw@` 的 userinfo 同理。
+    // Truncating at the first `/` alone would leave the whole authority
+    // (query included) of a path-less URL like `https://host?key=…` on
+    // screen; same for `user:pw@` userinfo.
     let message = sanitize_external_message(
         "request failed for https://gw.example.com?key=sk-live-NOPATH \
          and https://user:pw@host.example.com/v1/models?key=sk-live-PATH \
@@ -783,9 +795,12 @@ fn error_urls_without_a_path_do_not_leak_query_or_userinfo() {
     );
 }
 
-/// 实现把 Cf / Zl / Zp 写成 22 个区间（独立复核已用 `unicodedata` 15.1.0 逐码位
-/// 核对过：172 个码位、0 漏 0 多）。这里按**区间驱动**抽样：每个区间的首 / 次 / 中 /
-/// 末前 / 末都要被拒——只测一个代表字符的话，区间被收缩一个码位不会被发现。
+/// The implementation encodes Cf / Zl / Zp as 22 ranges (independently
+/// cross-checked codepoint by codepoint against `unicodedata` 15.1.0: 172
+/// codepoints, 0 missed, 0 extra). This samples **per range**: the first,
+/// second, middle, penultimate and last codepoint of every range must be
+/// rejected — testing one representative character would not notice a range
+/// shrunk by a single codepoint.
 const INVISIBLE_RANGES: &[(u32, u32)] = &[
     (0x00AD, 0x00AD), // 软连字符
     (0x0600, 0x0605), // 阿拉伯数字标记等
@@ -815,7 +830,8 @@ const INVISIBLE_RANGES: &[(u32, u32)] = &[
 fn invisible_format_character_ranges_are_rejected_at_their_ends_and_middle() {
     for &(start, end) in INVISIBLE_RANGES {
         let middle = (start + end) / 2;
-        // 取样点必须落在区间内：单码位区间的 start+1 会跑到区间外（U+00AD → U+00AE）。
+        // Sample points must stay inside the range: for a one-codepoint
+        // range, start+1 falls outside (U+00AD → U+00AE).
         let samples = [
             start,
             (start + 1).min(end),
@@ -833,13 +849,18 @@ fn invisible_format_character_ranges_are_rejected_at_their_ends_and_middle() {
         }
     }
 
-    // 不得误伤正常字符：CJK、emoji、组合附加符号（Mn，不属于 Cf）都要原样保留。
+    // Legitimate characters must survive: CJK, emoji, and combining marks
+    // (Mn, not part of Cf) all stay as-is.
     let normal = "模型-🚀-e\u{0301}";
     assert_eq!(sanitize_external_label(normal), normal);
 
-    // "0 多"同样要钉住：每个区间外紧邻的码位不得被误伤（跳过控制字符与相邻区间的边界）。
-    // 独立复核用 `unicodedata` 逐码位核过实现与 Cf∪Zl∪Zp 精确相等；这条断言让"不越界"
-    // 在 CI 里长期成立——注意它只依赖上面的区间表（规格），不调用实现里的判定函数。
+    // "0 extra" needs pinning too: codepoints immediately outside each
+    // range must not be caught (skipping control characters and adjacent
+    // ranges' boundaries). The independent audit already verified the
+    // implementation equals Cf∪Zl∪Zp exactly, codepoint by codepoint, via
+    // `unicodedata`; this assertion keeps "no overreach" true in CI — note
+    // it depends only on the range table above (the spec), never on the
+    // implementation's classifier.
     let in_table = |codepoint: u32| {
         INVISIBLE_RANGES
             .iter()

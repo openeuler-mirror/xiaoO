@@ -45,7 +45,6 @@ def do_install(script_dir: str):
         print("错误: plugin.json.template 不存在")
         sys.exit(1)
 
-    # 1. 从 template 生成 plugin.json
     with open(plugin_json_template_path, "r", encoding="utf-8") as f:
         plugins = json.load(f)
 
@@ -59,7 +58,6 @@ def do_install(script_dir: str):
 
     print(f"已从模板生成 plugin.json: {python_script_path}")
 
-    # 2. 注册进 config.toml 的 [hooker] 段
     install_helper.register_plugin_in_config(plugin_json_path)
 
     print("安装完成!")
@@ -71,14 +69,12 @@ def do_uninstall(script_dir: str):
 
     print(f"脚本目录: {script_dir}")
 
-    # 1. 删除生成的 plugin.json
     if os.path.exists(plugin_json_path):
         os.remove(plugin_json_path)
         print("已删除 plugin.json")
     else:
         print("plugin.json 不存在，跳过")
 
-    # 2. 从 config.toml 中移除插件路径
     install_helper.unregister_plugin_from_config(plugin_json_path)
 
     print("卸载完成!")

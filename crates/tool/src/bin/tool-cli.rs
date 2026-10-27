@@ -179,7 +179,8 @@ fn build_tool_cli_registry_config(
         .flat_map(|source| source.discover())
         .map(|tool| ToolName(tool.spec.name().0.clone()))
         .collect();
-    // 当前，tool-cli 允许访问所有从 sources 发现的工具。未来可以改成通过命令行参数指定一个子集。
+    // tool-cli currently allows access to every tool discovered from the
+    // sources; a CLI flag could later restrict this to a subset.
     let mut per_agent_allowed_tools = std::collections::HashMap::new();
     per_agent_allowed_tools.insert(agent_id.clone(), allowed_tool_names);
 

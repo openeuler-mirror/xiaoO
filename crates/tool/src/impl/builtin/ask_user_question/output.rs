@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 
 /// Answer to a confirm question, serialized as "yes" / "no" / "unanswered".
 ///
-/// The previous shape (`kind: "confirmed"` + `allowed: bool`) read like a
-/// permission verdict: for prompts that describe two courses of action
-/// (选「是」→X / 选「否」→Y) some models mapped `allowed: false` to the
-/// opposite branch of what the user actually chose. A literal "yes"/"no"
-/// answer carries no such ambiguity.
+/// The answer is a literal "yes"/"no" rather than an `allowed: bool`:
+/// a boolean reads like a permission verdict, and for prompts that
+/// describe two courses of action (answer "yes" → X, answer "no" → Y)
+/// some models map a `false` value to the opposite branch of what the
+/// user actually chose. A literal answer carries no such ambiguity.
 ///
 /// `Unanswered` means no answer was received (cancelled / closed /
 /// timeout); it is not a denial.
@@ -35,7 +35,7 @@ impl From<bool> for ConfirmAnswer {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AnswerItem {
     /// Response to Confirm request: `answer` mirrors the question's own
-    /// yes/no proposition ("yes" = 是, "no" = 否, "unanswered" = 用户未作答).
+    /// yes/no proposition ("unanswered" = cancelled / closed / timeout).
     Confirm {
         prompt: String,
         answer: ConfirmAnswer,

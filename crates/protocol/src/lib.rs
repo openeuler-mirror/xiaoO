@@ -13,7 +13,8 @@
 //! change (rename, type change, added/removed field, default flip) must stay
 //! byte-for-byte compatible with the daemon's serialization and is treated as
 //! a protocol change coordinated with the daemon repository.  The frozen JSON
-//! baselines under `sse/tests.rs` and `wire/tests.rs` are the regression
+//! baselines mounted via `#[path]` from `tests/unit/protocol/sse_test.rs`
+//! and `tests/unit/protocol/wire_test.rs` are the regression
 //! guardrail: they pin the exact serialized shape and must stay green.  When
 //! the daemon legitimately evolves the protocol, update the samples through a
 //! dedicated protocol-change review, never as a drive-by.

@@ -17,7 +17,7 @@ AM_VERSION="0.15.1"
 # 的 instance=opendesk）当成自己的 agentmoss 误停/误连。
 AM_INSTANCE="xiaoo"
 
-# venv 路径（sudo 模式用 /opt/agent_moss/venv/，非 sudo 模式 fallback 到用户目录）
+# venv 路径（systemd 与 nohup 两种模式统一用 /opt/agent_moss/venv）。
 # 如果 venv 已存在，优先使用已有的，避免重复创建
 VENV_DIR="/opt/agent_moss/venv"
 AM_BIN="$VENV_DIR/bin/agent-moss"
@@ -64,7 +64,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --help, -h      显示此帮助"
             echo ""
             echo "环境变量:"
-            echo "  VENV_DIR        自定义 venv 路径（默认 /opt/agent_moss/venv）"
+            echo "  AM_ENABLE_LLM   设置 LLM 分析偏好（1=启用，0=禁用；未设置则不修改）"
             exit 0
             ;;
         *)

@@ -152,9 +152,9 @@ pub enum ClipboardOutcome {
     /// (wl-copy / xclip / xsel / arboard). Delivery is confirmed.
     Native,
     /// An OSC 52 escape sequence was emitted to the terminal. Delivery is
-    /// fire-and-forget: there is no acknowledgement, so the terminal may
-    /// silently ignore it (PuTTY, MobaXterm, FinalShell, Xshell and
-    /// VTE-based terminals do not implement OSC 52 by default).
+    /// fire-and-forget: terminals are free to silently ignore the sequence
+    /// (which ones implement it — and which report themselves misleadingly —
+    /// see [`osc52_likely_supported`]).
     Osc52,
 }
 
@@ -315,12 +315,10 @@ pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
     }
 
     // OSC 52 fallback: works in most modern terminals including Windows
-    // Terminal, iTerm2, kitty, Alacritty, and over SSH. There is no
-    // acknowledgement mechanism, so delivery is *not* confirmed — callers
-    // must check `ClipboardOutcome::delivered()` before claiming success,
-    // otherwise PuTTY/MobaXterm/FinalShell-style terminals (which ignore the
-    // sequence) keep the previous clipboard contents while the UI had shown
-    // "Copied to clipboard".
+    // Terminal, iTerm2, kitty, Alacritty, and over SSH. Delivery is
+    // fire-and-forget — callers must check `ClipboardOutcome::delivered()`
+    // before claiming success; the terminal blacklist and detection
+    // heuristic live in [`osc52_likely_supported`].
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     // Write directly to stdout while still in raw mode.
@@ -330,9 +328,10 @@ pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
     //   - The raw sequence: tmux intercepts it and forwards to the outer
     //     terminal (and its own paste buffer) when `set-clipboard` is `on`.
     //   - The DCS `tmux;` passthrough wrap: bypasses tmux and reaches the
-    //     outer terminal directly when `allow-passthrough` is `on` (the
-    //     tmux >= 3.3 default is off, which silently drops the wrap — the
-    //     trap opencode fell into, see anomalyco/opencode#19982).
+    //     outer terminal directly when `allow-passthrough` is `on` (off by
+    //     default since tmux 3.3, silently dropping the wrap — see
+    //     anomalyco/opencode#19982; detection-side implications are covered
+    //     in [`osc52_likely_supported`]).
     // When both options are on the outer terminal receives the same payload
     // twice, which is harmless; when neither is on nothing is delivered and
     // `delivered()` already reports tmux copies as unconfirmed unless a
@@ -348,10 +347,11 @@ pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
 }
 
 // ---------------------------------------------------------------------------
-// 官方 model list 拉取
+// Official model-list fetching
 // ---------------------------------------------------------------------------
 
-/// 一次官方 model list 拉取所需的全部参数（纯数据，从 TUI 配置推导）。
+/// Everything one official model-list fetch needs (plain data, derived
+/// from the TUI config).
 #[derive(Debug, Clone)]
 pub struct ProviderModelFetchRequest {
     pub provider: String,
@@ -360,34 +360,41 @@ pub struct ProviderModelFetchRequest {
     pub api_key: Option<String>,
 }
 
-/// 拉取失败的分类：UI 需要区分"只是没配 key"这类提示与真正的失败。
+/// Failure classification: the UI needs to tell hints like "no key
+/// configured" apart from real failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelFetchError {
-    /// 缺少环境变量（变量名）。属于配置提示，按 muted 渲染而非错误色。
+    /// Missing environment variable (its name). A configuration hint,
+    /// rendered muted instead of as an error.
     MissingApiKey(String),
-    /// provider profile 声明 `supports_model_catalog = false`：不发请求、不重试。
+    /// The provider profile declares `supports_model_catalog = false`: no
+    /// request, no retry.
     Unsupported,
-    /// 其它失败：网络、HTTP 状态、解析、超时、base_url 缺失等。
+    /// Any other failure: network, HTTP status, parsing, timeout, missing
+    /// base_url, …
     Failed(String),
 }
 
-/// 拉取结果。`provider` 随结果一起回传，调用方按名字应用——不依赖下标，
-/// 因为弹窗可能已经关闭，或用户已经切到别的 provider。
+/// Fetch outcome. The `provider` travels with the result and the caller
+/// applies it by name — never by index, since the dialog may already be
+/// closed or the user may have switched providers.
 #[derive(Debug, Clone)]
 pub struct ProviderModelFetchOutcome {
     pub provider: String,
     pub result: Result<Vec<ModelInfo>, ModelFetchError>,
 }
 
-/// 由 TUI 配置推导拉取参数。
+/// Derive fetch parameters from the TUI config.
 ///
-/// 复用 `persisted_selection_settings`：目标 provider 就是当前激活 provider 时
-/// 用配置里的 `api_base` / `api_key_env`（空串回落到默认表），否则用该 provider
-/// 的默认值——与用户在该 provider 上按 Enter 时应用的设置完全一致。
+/// Reuses `persisted_selection_settings`: when the target provider is the
+/// active one, the config's `api_base` / `api_key_env` apply (empty strings
+/// fall back to the default table), otherwise that provider's defaults —
+/// exactly the settings applied when the user presses Enter on it.
 ///
-/// `api_key` 从 `api_key_env` 指向的环境变量读取：TUI 启动时已调用
-/// `inject_llm_secrets_into_env`，API key 弹窗也会 `set_var`，因此 secret store
-/// 里保存的 key 能被读到。
+/// `api_key` is read from the environment variable named by `api_key_env`:
+/// the TUI already called `inject_llm_secrets_into_env` at startup and the
+/// API-key dialog also `set_var`s, so keys stored in the secret store are
+/// visible here.
 pub fn model_fetch_request(config: &Config, provider: &str) -> ProviderModelFetchRequest {
     let (api_key_env, api_base) = persisted_selection_settings(config, provider);
     let api_key = api_key_env
@@ -403,18 +410,17 @@ pub fn model_fetch_request(config: &Config, provider: &str) -> ProviderModelFetc
     }
 }
 
-/// 等待拉取任务结束，并把"任务没能正常返回"（panic / 被取消）也转成一个失败结果。
+/// Await the fetch task and turn "the task never returned normally"
+/// (panic / cancellation) into a failure outcome too.
 ///
-/// 任务回传的结果是**首选**能把状态从 `Loading` 推走的输入（见
-/// `App::apply_model_fetch_outcome`）。若任务 panic 而没有回传，该 provider 会停在
-/// `Loading` 直到陈旧兜底窗口（`MODEL_LIST_STALE_AFTER`）到期：窗口内
-/// `needs_refresh(Loading)` 为假（非强制刷新在这一步就被拦下），而在飞名额也不释放，
-/// 因此连 `Ctrl+R` 也救不回来——force 只跳过 `needs_refresh`（连同 TTL、失败退避与
-/// “无 catalog” 的短路判定），在飞去重与全局上限照旧生效，请求会在 `begin_model_fetch`
-/// 处被挡回；窗口到期后的下一次触发会让
-/// `start_model_fetch` 先清掉陈旧登记再重拉。
-/// 所以这里保证：无论任务以何种方式结束，都必须有一个结果回传给 UI，
-/// 不让用户白等满这个兜底窗口。
+/// The task's report-back is the preferred input for leaving `Loading` (see
+/// `App::apply_model_fetch_outcome`). If the task vanishes without
+/// reporting: the in-flight slot stays taken, force cannot bypass
+/// `begin_model_fetch`'s dedup and global cap, and the provider must wait
+/// out the full `MODEL_LIST_STALE_AFTER` backstop window before a re-fetch
+/// (state-machine details in `ChatState::needs_refresh` and
+/// `App::start_model_fetch`). Hence the guarantee here: however the task
+/// ends, one outcome must reach the UI so the user never waits in vain.
 pub async fn join_fetch_outcome(
     provider: String,
     handle: tokio::task::JoinHandle<ProviderModelFetchOutcome>,
@@ -436,15 +442,16 @@ pub async fn join_fetch_outcome(
     }
 }
 
-/// 调官方 model list 接口。
+/// Call the official model-list endpoint.
 ///
-/// 经门面 `list_llm_models`（按 protocol family 分派到 OpenAI 兼容 / Anthropic /
-/// Gemini / Ollama / Zhipu），endside 不直接依赖 `llm-client`、也不自己发 HTTP。
+/// Goes through the `list_llm_models` facade (dispatched per protocol
+/// family to OpenAI-compatible / Anthropic / Gemini / Ollama / Zhipu);
+/// endside neither depends on `llm-client` directly nor issues its own HTTP.
 ///
-/// 本函数永不返回 `Err`：任何失败都收敛成 [`ProviderModelFetchOutcome`] 里的
-/// `Err`，这样每个 spawn 出去的拉取任务必定回传一个结果，调用方的 `Loading`
-/// 状态不会永远挂着。
-/// 兜底见 `join_fetch_outcome`：陈旧 `Loading` 会在兜底窗口后重新可拉。
+/// Never returns `Err`: every failure collapses into the `Err` inside
+/// [`ProviderModelFetchOutcome`], so every spawned fetch task is guaranteed
+/// to report one outcome and the caller's `Loading` state can never hang
+/// forever (backstop: `join_fetch_outcome`).
 pub async fn fetch_provider_models(
     request: ProviderModelFetchRequest,
 ) -> ProviderModelFetchOutcome {
@@ -454,9 +461,11 @@ pub async fn fetch_provider_models(
         api_key_env,
         api_key,
     } = request;
-    // profile 静态声明没有官方接口时直接短路：门面会**先**解析 API key 再判断
-    // catalog 支持，若不前置，缺 key 的无 catalog provider（minimax / gitcode）
-    // 会得到"需要配置 XXX_API_KEY"——用户配了 key 也依然拉不到，属误导。
+    // Short-circuit when the profile statically declares no catalog: the
+    // facade resolves the API key **before** checking catalog support, so
+    // without this check a keyless catalog-less provider (minimax / gitcode)
+    // would report "configure XXX_API_KEY" — misleading, since even with the
+    // key configured there is nothing to fetch.
     if catalog_declared_unsupported(&provider) {
         return ProviderModelFetchOutcome {
             provider,
@@ -475,8 +484,9 @@ pub async fn fetch_provider_models(
     .await
     .map(model_infos_from_summaries)
     .map_err(map_model_fetch_error);
-    // 失败必须留痕：这条路径过去既没有日志、UI 也没有提示，等于静默降级回内置列表。
-    // 文案走与屏幕相同的消毒（key 不会进日志）。
+    // Failures must leave a trace: silently degrading to the builtin list
+    // would make users believe the official list is complete. The message
+    // goes through the same sanitizing as the screen (no keys in logs).
     match &result {
         Err(ModelFetchError::Failed(message)) => {
             tracing::warn!(provider = %provider, error = %message, "model list fetch failed");
@@ -489,61 +499,72 @@ pub async fn fetch_provider_models(
     ProviderModelFetchOutcome { provider, result }
 }
 
-/// provider profile 是否明确声明"没有官方模型列表接口"。
+/// Whether the provider profile explicitly declares "no official
+/// model-list endpoint".
 ///
-/// 未知 provider（registry 里没有）返回 `false`：那种情况交给门面报
-/// `unknown provider: …`，比这里伪造一个 `Unsupported` 更有信息量。
+/// Unknown providers (absent from the registry) return `false`: the facade
+/// then reports `unknown provider: …`, which is more informative than a
+/// fabricated `Unsupported` here.
 fn catalog_declared_unsupported(provider: &str) -> bool {
     xiaoo_api::llm::resolve_provider_profile(provider)
         .map(|profile| !profile.supports_model_catalog)
         .unwrap_or(false)
 }
 
-/// 外部端点文本的显示上限：模型 id / 错误文案都该是一句话，超长只可能是异常
-/// 返回或攻击载荷。
+/// Display cap for externally sourced text: model ids and error messages
+/// are one-liners; anything longer can only be an abnormal response or an
+/// attack payload.
 const MAX_EXTERNAL_TEXT_CHARS: usize = 200;
 
-/// 单个 provider 最多接受的模型条数。官方目录的正常量级是几十到几百条
-/// （openrouter 300+），几万条只可能是异常端点或攻击载荷——而列表每帧都要建行，
-/// 必须有上限兜住渲染与内存。超出即**静默截断**：标题与状态行显示的是截断后的条数，
-/// 不额外提示。
+/// Maximum accepted model entries per provider. Official catalogs
+/// normally run to tens or hundreds of entries (openrouter 300+); tens of
+/// thousands can only be an abnormal endpoint or an attack payload — and
+/// the list rebuilds its rows every frame, so rendering and memory need a
+/// hard cap. Overflow is **silently truncated**: the header and status line
+/// show the post-truncation count, with no extra hint.
 const MAX_MODELS_PER_PROVIDER: usize = 2_000;
 
-/// 会被终端"吃掉"或用于视觉欺骗的不可见字符。`char::is_control()` 只覆盖 Cc；
-/// 这里覆盖 Unicode 15 的全部 Cf（格式字符）与 Zl / Zp（行 / 段分隔符）：bidi 覆盖
-/// （U+202E）可以把模型名渲染成完全不同的字符顺序，零宽字符能让两个不同的名字
-/// 看起来一模一样，而此前漏掉的 Cf（U+0600 / U+070F / U+1D173 等）同样不可见——现已一并列入。
+/// Invisible characters terminals "eat" or abuse for visual spoofing.
+/// `char::is_control()` only covers Cc; this covers all of Unicode 15's Cf
+/// (format) plus Zl / Zp (line / paragraph separators): a bidi override
+/// (U+202E) can render a model name in a completely different character
+/// order, and zero-width characters can make two distinct names look
+/// identical.
 fn is_invisible_or_directional(ch: char) -> bool {
     matches!(ch,
-        '\u{00AD}'                      // 软连字符
-        | '\u{0600}'..='\u{0605}'       // 阿拉伯数字标记等
-        | '\u{061C}'                    // 阿拉伯字母标记
-        | '\u{06DD}' | '\u{070F}'       // 阿拉伯 / 叙利亚格式标记
+        '\u{00AD}'                      // soft hyphen
+        | '\u{0600}'..='\u{0605}'       // Arabic number signs, etc.
+        | '\u{061C}'                    // Arabic letter mark
+        | '\u{06DD}' | '\u{070F}'       // Arabic / Syriac format marks
         | '\u{0890}'..='\u{0891}' | '\u{08E2}'
         | '\u{180E}'
-        | '\u{200B}'..='\u{200F}'       // 零宽 + bidi 标记
-        | '\u{2028}' | '\u{2029}'       // 行 / 段分隔符（Zl / Zp）
-        | '\u{202A}'..='\u{202E}'       // bidi 嵌入 / 覆盖
+        | '\u{200B}'..='\u{200F}'       // zero-width + bidi marks
+        | '\u{2028}' | '\u{2029}'       // line / paragraph separators (Zl / Zp)
+        | '\u{202A}'..='\u{202E}'       // bidi embedding / override
         | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{206F}'       // bidi 隔离 + 已弃用格式字符
+        | '\u{2066}'..='\u{206F}'       // bidi isolates + deprecated format chars
         | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
         | '\u{110BD}' | '\u{110CD}'
-        | '\u{13430}'..='\u{1343F}'     // 埃及圣书体格式控制
-        | '\u{1BCA0}'..='\u{1BCA3}'     // 速记格式控制
-        | '\u{1D173}'..='\u{1D17A}'     // 乐谱格式控制
-        | '\u{E0001}' | '\u{E0020}'..='\u{E007F}' // tag 字符
+        | '\u{13430}'..='\u{1343F}'     // Egyptian hieroglyph format controls
+        | '\u{1BCA0}'..='\u{1BCA3}'     // shorthand format controls
+        | '\u{1D173}'..='\u{1D17A}'     // musical notation format controls
+        | '\u{E0001}' | '\u{E0020}'..='\u{E007F}' // tag characters
     )
 }
 
-/// URL 只保留 `scheme://` 之后的主机部分（含端口与 IPv6 方括号）：路径、query、
-/// fragment 与 userinfo 全部抹掉。
+/// Keep only the host part after `scheme://` (with port and IPv6 brackets):
+/// path, query, fragment and userinfo are all stripped.
 ///
-/// 抹 query 是因为 provider 的 key 可能在 query 里（gemini 的 `?key=`）；保留主机名
-/// 是因为"哪个端点失败"是排查 TLS / 网关问题的关键信息——全抹成 `<url>` 会让自签名
-/// 网关这类问题无从下手。userinfo（`user:pw@`）同理要丢：密码不该上屏。
+/// The query goes because provider keys may live there (gemini's `?key=`);
+/// the host stays because "which endpoint failed" is the key fact when
+/// debugging TLS / gateway issues — flattening everything to `<url>` would
+/// make self-signed-gateway problems undebuggable. Userinfo (`user:pw@`) is
+/// stripped for the same reason: passwords do not belong on screen.
 ///
-/// 顺序：先按 `/` 划出 authority 并剥掉 userinfo，再抹路径 / query / fragment——这样
-/// 畸形 URL（userinfo 里带未编码的 `?`）也不会把用户名与部分口令当成主机留在屏幕上。
+/// Order: split the authority at `/` and strip userinfo first, then drop
+/// path / query / fragment — so even a malformed URL (an unencoded `?`
+/// inside userinfo) cannot leave a username or partial password on screen
+/// masquerading as the host.
 fn redact_url(token: &str) -> String {
     let Some((scheme, rest)) = token.split_once("://") else {
         return "<redacted>".to_string();
@@ -555,7 +576,7 @@ fn redact_url(token: &str) -> String {
     format!("{scheme}://{}/<redacted>", &after[..end])
 }
 
-/// 形如 `key=…` / `api_key: …` / `token=…` 的字段（大小写不敏感）。
+/// Fields shaped like `key=…` / `api_key: …` / `token=…` (case-insensitive).
 fn looks_like_secret_field(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
     [
@@ -572,11 +593,14 @@ fn looks_like_secret_field(token: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-/// 外部端点返回的**标签类**文本（模型 id、显示名、环境变量名）进入 TUI 前的消毒：
-/// 这些字符串会被渲染到弹窗（`overlay.rs`）、状态行与会话消息里，恶意或异常端点
-/// 可以借此注入控制序列（经典 TUI 注入面：`\x1b` 能清屏、改标题、伪造按键），
-/// 因此只保留非控制字符、且不属于 Cf / Zl / Zp 的字符（见 `is_invisible_or_directional`），
-/// 并限制长度。
+/// Sanitizes **label-type** text from external endpoints (model ids,
+/// display names, environment variable names) before it enters the TUI:
+/// these strings get rendered into dialogs (`overlay.rs`), the status line
+/// and session messages, and a malicious or broken endpoint could inject
+/// control sequences through them (the classic TUI injection surface:
+/// `\x1b` can clear the screen, retitle the terminal, forge keystrokes).
+/// Keep only non-control characters outside Cf / Zl / Zp (see
+/// `is_invisible_or_directional`), and cap the length.
 fn sanitize_external_label(raw: &str) -> String {
     raw.chars()
         .filter(|ch| !ch.is_control() && !is_invisible_or_directional(*ch))
@@ -584,15 +608,19 @@ fn sanitize_external_label(raw: &str) -> String {
         .collect()
 }
 
-/// 外部端点返回的**说明类**文本（错误文案）消毒：除控制字符外还要抹掉 URL——底层
-/// 客户端的错误串会带请求 URL，而 provider 的 URL query 可能含 API key（例如
-/// gemini 的 `?key=`），这段文案是要显示在屏幕上的。
+/// Sanitizes **explanatory** text from external endpoints (error messages):
+/// beyond control characters it also strips URLs — low-level client error
+/// strings carry the request URL, and a provider URL's query may contain the
+/// API key (rationale in [`redact_url`]), while this text is displayed on
+/// screen.
 ///
-/// 除 URL 外还抹掉：`key=` / `key:` / `token=` / `token:` / `secret=` / `secret:` /
-/// `password=` / `password:` 的整段 token，以及 `Bearer` / `Basic` 之后紧跟的那个 token。
+/// Besides URLs it redacts whole `key=` / `key:` / `token=` / `token:` /
+/// `secret=` / `secret:` / `password=` / `password:` tokens, and the single
+/// token immediately following `Bearer` / `Basic`.
 fn sanitize_external_message(raw: &str) -> String {
-    // 控制字符与不可见字符换成空格而不是删掉：`...\nkey=xxx` 若直接删掉换行，会粘成
-    // 一个新 token，下面的 token 规则就失效了。
+    // Replace control/invisible characters with spaces rather than deleting
+    // them: deleting the newline in `...\nkey=xxx` would glue the pieces
+    // into a single new token and defeat the token rules below.
     let cleaned: String = raw
         .chars()
         .map(|ch| {
@@ -607,8 +635,9 @@ fn sanitize_external_message(raw: &str) -> String {
     cleaned
         .split_whitespace()
         .map(|token| {
-            // 顺序重要：带 scheme 的整串先按 URL 处理（保留"在哪失败"的信息），再看
-            // 是否是裸露的密钥字段。
+            // Order matters: a full string with a scheme is treated as a
+            // URL first (preserving "where it failed"), then as a bare
+            // secret field.
             if token.contains("://") {
                 redact_url(token)
             } else if redact_next {
@@ -630,10 +659,12 @@ fn sanitize_external_message(raw: &str) -> String {
         .collect()
 }
 
-/// `LlmModelSummary` → TUI 的 `ModelInfo`：显示名优先官方 `display_name`，
-/// 按 id 去重并跳过空 id，顺序保持官方返回顺序（不排序、不加工）。
+/// `LlmModelSummary` → the TUI's `ModelInfo`: display name prefers the
+/// official `display_name`, deduplicates by id, skips empty ids, and keeps
+/// the official ordering (no sorting, no reshaping).
 ///
-/// id 与显示名来自外部端点，先经 [`sanitize_external_label`] 消毒再进入渲染层。
+/// Both id and display name come from an external endpoint, so they pass
+/// through [`sanitize_external_label`] before reaching the render layer.
 pub fn model_infos_from_summaries(summaries: Vec<LlmModelSummary>) -> Vec<ModelInfo> {
     let mut seen = BTreeSet::new();
     summaries
@@ -654,12 +685,15 @@ pub fn model_infos_from_summaries(summaries: Vec<LlmModelSummary>) -> Vec<ModelI
         .collect()
 }
 
-/// 官方列表不含"当前激活模型"时，把它补到首位（标注来源），避免该模型
-/// 在弹窗里变成不可选、进而在用户随手 Enter 时被动切走。
+/// When the official list lacks the currently active model, prepend it
+/// (with a source annotation) — otherwise that model becomes unselectable
+/// in the dialog and a casual Enter passively switches away from it.
 ///
-/// `configured` 为空（未配置 / 全空白）或已在列表里（忽略大小写）时原样返回，
-/// 因此对"官方列表就是全量"的常见情形没有任何副作用。弹窗副本与
-/// `ChatState::available_providers` 必须用同一个结果，保证两处一致。
+/// Returns the list unchanged when `configured` is empty (unset / blank) or
+/// already present (case-insensitive), so the common "the official list is
+/// the whole truth" case is unaffected. The dialog copy and
+/// `ChatState::available_providers` must use the same result to stay
+/// consistent.
 pub fn pin_configured_model(
     mut models: Vec<ModelInfo>,
     configured: Option<&str>,
@@ -693,7 +727,8 @@ fn map_model_fetch_error(error: LlmAssemblyError) -> ModelFetchError {
     }
 }
 
-/// 空串 / 全空白 → `None`，让门面回落到 provider profile 的默认 base_url。
+/// Empty / all-whitespace → `None`, letting the facade fall back to the
+/// provider profile's default base_url.
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim().to_string();
     if trimmed.is_empty() {

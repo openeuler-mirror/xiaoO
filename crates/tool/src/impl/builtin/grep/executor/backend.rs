@@ -90,10 +90,7 @@ impl GrepExecutor {
         }
 
         let output_mode = input.output_mode.unwrap_or(OutputMode::FilesWithMatches);
-        // Effective head_limit — resolves `0` (unlimited) and values
-        // above `ABSOLUTE_HARD_CAP` down to the cap. Same helper is used
-        // by `build_grep_args` and `call_inner` so all three code paths
-        // agree on what "N lines" means downstream.
+        // Effective head_limit — remap semantics live in `resolve_head_limit`.
         let head_limit = resolve_head_limit(input);
         let offset = input.offset.unwrap_or(0);
         match output_mode {
@@ -112,22 +109,17 @@ impl GrepExecutor {
                 // kill, which terminates rg as soon as
                 // `head_limit + offset + 1` lines have been collected
                 // across all files (no stream-level `offset` skip — see
-                // `BoundedLineCollector`). We pass `head_limit + offset + 1`
-                // (not `head_limit + 1`) so:
-                //   (a) the +1 sentinel lets `apply_head_limit` detect
-                //       truncation via "more items than limit", and
-                //   (b) `offset` is included so a single file with many
-                //       matches still produces enough lines for
-                //       `apply_head_limit` to `skip(offset).take(limit)`
-                //       in one pass on the collected buffer. Without
-                //       `offset` in the per-file cap, paging with
-                //       `offset > 0` through a file with many matches
-                //       would silently return matches from later files
-                //       instead of the desired range.
+                // `BoundedLineCollector`). The per-file cap uses the same
+                // `head_limit + offset + 1` value; the +1-sentinel and
+                // offset-inclusion rationale lives on
+                // `BoundedLineCollector::for_head_limit`. Including
+                // `offset` per-file matters here for a different reason:
+                // without it, paging with `offset > 0` through a file
+                // with many matches would silently return matches from
+                // later files instead of the desired range.
                 // `resolve_head_limit` already mapped `0` / above-cap
                 // values to `ABSOLUTE_HARD_CAP`, so this branch always
-                // passes a finite, sane value here. `saturating_add`
-                // guards against u32 overflow when `offset` is large.
+                // passes a finite, sane value here.
                 if head_limit > 0 {
                     let per_file_cap = head_limit.saturating_add(offset).saturating_add(1);
                     args.push("--max-count".to_string());
@@ -259,12 +251,14 @@ impl GrepExecutor {
         output_mode: OutputMode,
     ) -> Result<(Vec<String>, bool), String> {
         // Stream rg's stdout line-by-line through a BoundedLineCollector.
-        // The collector stops asking for more after `head_limit + 1` lines
-        // (after skipping `offset`), at which point the backend kills the
-        // rg process group. This bounds both memory (we never hold more
-        // than `head_limit + 1` lines) and CPU (rg stops producing once
-        // we've collected enough), which is the upstream throttle the old
-        // fully-buffered `output.stdout` path lacked.
+        // The collector stops asking for more after `head_limit + offset + 1`
+        // lines — it never pre-skips `offset` at the stream level (the skip
+        // is applied exactly once, downstream in `apply_head_limit`) — at
+        // which point the backend kills the rg
+        // process group. This bounds both memory (we never hold more than
+        // `head_limit + offset + 1` lines) and CPU (rg stops producing
+        // once we've collected enough), the upstream throttle a
+        // fully-buffered `output.stdout` path lacks.
         //
         // For `FilesWithMatches` the cap is widened to
         // `ABSOLUTE_HARD_CAP + 1` (and stream-level `offset` skip is
@@ -379,10 +373,11 @@ impl GrepExecutor {
                 // included in the per-file cap so paging with
                 // `offset > 0` through a file with many matches returns
                 // the correct range rather than silently falling through to
-                // later files. Note: the grep fallback path doesn't
-                // currently stream — it buffers full stdout via
-                // `backend.exec().exec()` — so `-m` here is the only
-                // per-file bound on the fallback path.
+                // later files. The grep fallback path streams through the
+                // same `BoundedLineCollector` (see `run_grep`), so the
+                // global sink cap applies there too; `-m` additionally
+                // bounds the per-file work before lines even reach the
+                // sink.
                 if head_limit > 0 {
                     let per_file_cap = head_limit.saturating_add(offset).saturating_add(1);
                     args.push("-m".to_string());
@@ -526,14 +521,9 @@ impl GrepExecutor {
         backend: &std::sync::Arc<dyn agent_contracts::backend::OperationBackend>,
     ) -> Result<GrepOutput, String> {
         let output_mode = input.output_mode.unwrap_or(OutputMode::FilesWithMatches);
-        // Use the resolved head_limit (0 → ABSOLUTE_HARD_CAP, above-cap →
-        // ABSOLUTE_HARD_CAP) consistently for the streaming sink cap,
-        // `apply_head_limit`, and the truncation flag. This is what
-        // makes the silent remap of `head_limit: 0` transparent to the
-        // user: if the cap is hit, apply_head_limit will set
-        // `applied_limit = Some(ABSOLUTE_HARD_CAP)` in the output
-        // metadata, signalling "you were capped at 2000; use offset
-        // to page through more".
+        // One resolved value feeds the streaming sink cap, `apply_head_limit`,
+        // and the truncation flag — see `resolve_head_limit` for the remap
+        // semantics (`0` / above-cap → `ABSOLUTE_HARD_CAP`).
         let head_limit = resolve_head_limit(input);
         let offset = input.offset.unwrap_or(0);
         let timeout_ms = input.timeout.unwrap_or_else(default_timeout_ms);
@@ -545,14 +535,9 @@ impl GrepExecutor {
         // exhausted it (e.g. a timed-out `rg` would just time out `grep` too,
         // slower, for no benefit).
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        // `collector_capped` is true when the streaming sink hit its
-        // cap and asked the backend to kill rg early — i.e. there are
-        // more matches than the collector's `max_keep`. Used by the
-        // `FilesWithMatches` branch to fix truncation detection when
-        // `want_k > max_keep` (the `total_matches > want_k` check
-        // alone would miss this case). The `run_grep` fallback path
-        // never caps (it buffers everything via `exec()`), so it
-        // returns `false`.
+        // `collector_capped` — cap semantics and the `FilesWithMatches`
+        // truncation-detection use are documented on `run_rg`'s return
+        // value; the `run_grep` fallback reports the same flag.
         let (lines, collector_capped) = match Self::run_rg(
             backend.as_ref(),
             rg_args,
@@ -694,8 +679,10 @@ impl GrepExecutor {
 
                 // Bounded top-K via a min-heap of size `head_limit + offset`.
                 // O(N log K) vs. O(N log N) for a full sort, and the
-                // intermediate Vec is bounded to K. `head_limit == 0` means
-                // "no limit" (heap unbounded).
+                // intermediate Vec is bounded to K. `head_limit == 0` is
+                // unreachable here (`resolve_head_limit` remaps it to
+                // `ABSOLUTE_HARD_CAP` before `call_inner` dispatches); the
+                // branch is defensive only.
                 let total_matches = files_with_mtime.len();
                 let want_k = if head_limit == 0 {
                     total_matches
@@ -785,7 +772,9 @@ impl GrepExecutor {
     /// Truncation detection for FilesWithMatches: true when
     /// `total_matches > want_k` OR the collector capped (actual
     /// matches exceed `ABSOLUTE_HARD_CAP` but `total_matches == cap`).
-    /// Returns false when `head_limit == 0` (unlimited).
+    /// `head_limit == 0` is unreachable via `call_inner` (remapped to
+    /// `ABSOLUTE_HARD_CAP` by `resolve_head_limit`); the guard is
+    /// defensive only.
     fn files_with_matches_truncated(
         head_limit: u32,
         total_matches: usize,
@@ -878,7 +867,8 @@ struct BoundedCollectorState {
 /// [`LineSink`] that bounds collected stdout to a fixed number of lines.
 /// `max_keep` is `head_limit + offset + 1` for Content/Count, or
 /// `ABSOLUTE_HARD_CAP + 1` for FilesWithMatches. Never pre-skips `offset`
-/// at the stream level — that caused a double-skip regression.
+/// at the stream level — pagination is applied downstream by
+/// `apply_head_limit`, so skipping here too would double-skip.
 struct BoundedLineCollector {
     max_keep: usize,
     inner: Mutex<BoundedCollectorState>,
@@ -895,7 +885,7 @@ impl BoundedLineCollector {
     /// `max_keep = head_limit + offset + 1`. The +1 sentinel lets
     /// `apply_head_limit` detect truncation; `offset` is included so
     /// downstream `skip(offset).take(limit)` works in one pass.
-    /// `saturating_add` guards against u32 overflow on huge `offset`.
+    /// `saturating_add` guards against overflow on huge `offset`.
     fn for_head_limit(head_limit: u32, offset: u32) -> Self {
         let effective_head_limit = if head_limit == 0 {
             // Defensive: `call_inner` resolves `head_limit: 0` to
@@ -906,9 +896,6 @@ impl BoundedLineCollector {
         } else {
             head_limit
         };
-        // head_limit + offset + 1: the +1 sentinel lets
-        // `apply_head_limit` detect truncation via "more items than
-        // limit" after it skips `offset`.
         let max_keep = (effective_head_limit as usize)
             .saturating_add(offset as usize)
             .saturating_add(1);
@@ -948,9 +935,9 @@ impl LineSink for BoundedLineCollector {
         if guard.kept.len() >= self.max_keep {
             return false;
         }
-        // Strip `\r` to match the old `String::from_utf8_lossy.lines().replace('\r', "")`
-        // behavior. Do NOT pre-skip `offset` here — pagination is applied
-        // downstream by `apply_head_limit`.
+        // Strip `\r` so CRLF sources yield clean lines. Do NOT pre-skip
+        // `offset` here — pagination is applied downstream by
+        // `apply_head_limit`.
         guard.kept.push(line.replace('\r', ""));
         true
     }

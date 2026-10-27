@@ -2,24 +2,19 @@
 //!
 //! This module provides the strongly-typed [`RuntimeSseEvent`] model — the
 //! client-side protocol surface used to consume the daemon's SSE stream.
-//! Field names and structure align field-by-field with the daemon's
-//! `SseStreamEvent` serialization (alignment baseline:
-//! `apps/serverside/src/httpserver/sse_sink.rs:20-129` from before the
-//! daemon moved out of this repository). The daemon (server/producer side)
-//! now lives in a separate repository; only the deserializing consumer
-//! remains here.
+//! The daemon serializes this exact type: `apps/serverside` re-exports it
+//! through `xiaoo_shared::daemon_protocol::sse` (as `SseStreamEvent`), so
+//! there is no separate producer-side model to keep field-by-field in sync —
+//! this type is the single source of the wire contract.
 //!
-//! A second consumer-side mirror of the same wire format exists in the
-//! endside TUI: `RemoteSseEvent` in
-//! `apps/endside/src/gateway_api/remote.rs`. Any field/event change must be
-//! synchronized across all three models (this one, the TUI mirror, and the
-//! daemon's serializer).
+//! The one genuine consumer-side mirror lives in the endside TUI:
+//! `RemoteSseEvent` in `apps/endside/src/gateway_api/remote.rs`. Any
+//! field/event change must be synchronized with that mapping.
 //!
 //! How the event vocabulary is consumed is up to the client — remote
 //! session implementations map `RuntimeSseEvent` to their own
-//! application-level event models (the former `TurnEvent` facade was
-//! removed with the pure-runtime refactor, so the protocol surface no
-//! longer couples to any specific client type).
+//! application-level event models, keeping the protocol surface decoupled
+//! from any specific client type.
 //!
 //! ## Compatibility discipline
 //!
@@ -50,11 +45,9 @@ use crate::plan::TodoSnapshotItem;
 /// A single event in the SSE stream. `agent_id` distinguishes the main
 /// agent lane from subagent lanes.
 ///
-/// Field names and structure align field-by-field with the daemon's
-/// `SseStreamEvent` — this type deserializes exactly what the daemon
-/// serializes. It also implements `Serialize` so the daemon repository can
-/// later reuse this module for serialization, making the protocol
-/// single-sourced.
+/// Single source of the SSE wire contract: the daemon (`apps/serverside`)
+/// serializes this exact type via the `xiaoo_shared::daemon_protocol::sse`
+/// re-export, and clients deserialize the same shape.
 //
 // Fields carry no per-field rustdoc: each variant's doc already explains
 // the semantics, and field names mirror the daemon wire contract
@@ -162,8 +155,8 @@ pub enum RuntimeSseEvent {
     },
     /// Error termination.
     Error { error: String },
-    /// Cancellation event (serde renames `session_id` → `runtime_id`,
-    /// mirroring the daemon).
+    /// Cancellation event (serde renames `session_id` → `runtime_id` on
+    /// the wire).
     Cancelled {
         #[serde(rename = "runtime_id")]
         session_id: String,
@@ -176,8 +169,10 @@ pub enum RuntimeSseEvent {
     Unknown,
 }
 
-/// Wire-format mirror of `agent_types::tool::ToolExecutionStatus`, aligned
-/// with the `ToolCallStatus` in the daemon's `sse_sink.rs:135-144`.
+/// Wire-format mirror of `agent_types::tool::ToolExecutionStatus`. The
+/// daemon re-exports this exact type through
+/// `xiaoo_shared::daemon_protocol::sse`, so there is no separate
+/// serializer-side copy to align with.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallStatus {

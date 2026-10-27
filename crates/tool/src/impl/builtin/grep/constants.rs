@@ -14,14 +14,9 @@
 pub const DEFAULT_HEAD_LIMIT: u32 = 250;
 
 /// Absolute upper bound on collected grep output, regardless of the
-/// `head_limit` value the caller passes. Applies in two cases:
-///
-/// 1. Caller passes `head_limit: 0` (documented as "unlimited"). The
-///    framework silently caps collection at this value so a wide pattern
-///    on a large repo cannot push hundreds of MB through stdout and
-///    into the truncation directory before the daily cleanup runs.
-/// 2. Caller passes `head_limit` greater than this value. Same
-///    rationale — bound the worst case.
+/// `head_limit` value the caller passes — including `head_limit: 0`
+/// (documented as "unlimited"). See the module docs for the
+/// defense-in-depth rationale.
 ///
 /// Matches opencode's `MAX_LINES = 2000`. Callers needing more should
 /// narrow `path`/`glob` or page via `offset`.

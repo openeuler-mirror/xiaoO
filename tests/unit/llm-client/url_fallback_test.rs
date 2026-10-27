@@ -218,10 +218,7 @@ fn http_404_with_invalid_keyword_is_endpoint_error() {
     let error_msg = "API error: HTTP 404 Not Found: {\"error\": \"Invalid URL (POST /v1)\"}";
     let error = LlmError::ApiError(error_msg.to_string());
 
-    // Should be classified as endpoint path error
     assert!(is_endpoint_path_error(&error));
-
-    // Should NOT be classified as configuration error
     assert!(!is_configuration_error(&error));
 
     // Should try next candidate

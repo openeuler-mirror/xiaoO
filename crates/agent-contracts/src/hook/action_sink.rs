@@ -24,7 +24,7 @@ pub const MAX_ACTION_DEPTH: usize = 3;
 ///   `CreateSession`/`SwitchSession`) and then returns the surviving actions
 ///   so the caller can forward them to the TUI via the SSE `Done` event.
 ///   Actions that failed daemon-side execution are filtered out.
-/// - **Depth limiting**: the host enforces [`MAX_ACTION_DEPTH`] (3) to
+/// - **Depth limiting**: the host enforces [`MAX_ACTION_DEPTH`] to
 ///   prevent recursive `hook→action→hook` loops; batches longer than the
 ///   limit are truncated (extras logged and dropped).
 #[async_trait]

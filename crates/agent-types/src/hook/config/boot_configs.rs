@@ -41,12 +41,8 @@ pub struct HookerRegistryConfig {
     pub policies: HashMap<HookerId, serde_json::Value>,
     #[serde(default)]
     pub plugins: Vec<String>,
-    /// Cross-turn `send_prompt` chain depth cap (exclusive upper bound on
-    /// `chain_depth`). The daemon drops a `SendPrompt` action when the
-    /// next-turn depth would **reach** this value
-    /// (`next_depth >= max_prompt_chain_depth`); `N` permits N turns total
-    /// in a chain (depths `0..=N-1`). See
-    /// [`DEFAULT_MAX_PROMPT_CHAIN_DEPTH`].
+    /// See [`DEFAULT_MAX_PROMPT_CHAIN_DEPTH`] for the drop semantics and
+    /// what N turns means.
     #[serde(default = "default_max_prompt_chain_depth")]
     pub max_prompt_chain_depth: usize,
 }

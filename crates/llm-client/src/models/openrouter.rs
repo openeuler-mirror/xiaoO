@@ -83,10 +83,8 @@ impl OpenRouterCatalog {
         match_model(&entries, model)
     }
 
-    /// 加载条目：新鲜内存缓存 → 新鲜磁盘缓存 → HTTP → 过期磁盘缓存 →
-    /// 过期内存缓存。新鲜磁盘缓存优先于 HTTP——进程冷启动（内存为空）
-    /// 时命中未过期的磁盘缓存即零网络返回；过期缓存仍比裸协议族静态兜底
-    /// 值更接近真实窗口，作为离线兜底。
+    /// 加载条目——回落链见模块 `//!`。过期缓存保留的原因：它仍比裸协议族
+    /// 静态兜底值更接近真实窗口，可作离线兜底。
     async fn load_entries(&self) -> Option<Vec<CatalogEntry>> {
         if let Some(cached) = self.memory.read().ok().and_then(|guard| guard.clone()) {
             if cached.fresh() {

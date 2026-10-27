@@ -626,7 +626,7 @@ async fn compress(
     // it keeps history lean between full compression events, which is exactly
     // what stops the expensive LLM collapse from firing every turn on active
     // sessions. Its 120s staleness + tail-window protection make it a no-op
-    // during rapid turns, so history stays effectively append-only here.
+    // during rapid turns.
     let now_ms = now_ms();
     {
         let messages = ctx.state.messages.read().clone();
@@ -656,7 +656,6 @@ async fn compress(
         .map(|id| id.0.clone())
         .unwrap_or_default();
 
-    // begin span — record baseline metadata at start
     let compression_span = if let Some(rv) = ctx.input.runtime_view.clone() {
         Some(
             rv.trace_recorder()
@@ -695,7 +694,6 @@ async fn compress(
         "compression analysis"
     );
 
-    // update span — record analysis results
     if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span.as_ref()) {
         rv.trace_recorder()
             .update_span(
@@ -713,7 +711,6 @@ async fn compress(
     }
 
     if !trigger.is_forced() && !analysis.needs_compression() {
-        // end span — no compression needed, normal end
         if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
             rv.trace_recorder()
                 .end_span(span, TraceOutcome::Ok, json!({ "skipped": true }))
@@ -761,7 +758,6 @@ async fn compress(
                 "context compression triggered"
             );
 
-            // end span — compression succeeded, record output info
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
                 rv.trace_recorder()
                     .end_span(
@@ -794,7 +790,6 @@ async fn compress(
             Ok(())
         }
         Err(e) => {
-            // end span — compression failed, record error info
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
                 rv.trace_recorder()
                     .end_span(span, TraceOutcome::Error, json!({ "error": e.to_string() }))
@@ -903,7 +898,6 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         .map(|id| id.0.clone())
         .unwrap_or_default();
 
-    // begin span — record baseline metadata at start
     let prompt_build_span = if let Some(rv) = ctx.input.runtime_view.clone() {
         Some(
             rv.trace_recorder()
@@ -953,7 +947,6 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         budget: ctx.snapshot.token_budget_config.clone(),
     };
 
-    // update span — record input dimension info after build completion
     if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span.as_ref()) {
         rv.trace_recorder()
             .update_span(
@@ -982,7 +975,6 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
             // system.transform — fires on un-merged system parts.
             run_chat_system_transform_sequence(ctx, &mut result).await;
 
-            // end span — success, record estimated token count and other output info
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span) {
                 rv.trace_recorder()
                     .end_span(
@@ -1000,7 +992,6 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
             Ok(())
         }
         Err(e) => {
-            // end span — failure, record error info
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span) {
                 rv.trace_recorder()
                     .end_span(
@@ -1074,8 +1065,8 @@ fn chat_agent_segment(agent_id: Option<&AgentId>) -> String {
 static ANON_AGENT_ID: std::sync::OnceLock<AgentId> = std::sync::OnceLock::new();
 
 /// Returns the loop's agent id, or a shared `"anonymous"` fallback when none
-/// is configured. Consolidates the 7× `default_agent_id + unwrap_or` pattern
-/// previously inlined at every event-sink emission site.
+/// is configured. Single source of truth for the agent-id fallback used by
+/// every event-sink emission site (`agent_loop.rs`, `tool_exec.rs`).
 fn agent_id_or_anonymous(agent_id: Option<&AgentId>) -> &AgentId {
     agent_id.unwrap_or_else(|| ANON_AGENT_ID.get_or_init(|| AgentId("anonymous".to_string())))
 }
@@ -1359,10 +1350,8 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let first_token_at = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let event_sink = ctx.input.event_sink.clone();
-    // Accumulators + emit throttle state for this one assistant stream. The
-    // throttle state (`last_emit_len`, `last_emit_at`) exists because without
-    // it every chunk forces an O(history) clone + filter, making streaming
-    // O(N²) in the response length.
+    // Accumulators + emit throttle state for this one assistant stream —
+    // throttle rationale lives on the `STREAM_EMIT_*` constants.
     let stream = AssistantStreamState::default();
 
     // Extract secrets under the read guard — no clone of the whole message
@@ -1785,11 +1774,9 @@ fn stream_assistant_chunk(
     chunk: StreamChunk,
     secrets: &[String],
 ) {
-    // Always accumulate into the streamed_* buffers, even without a sink:
-    // the cancel branch of `llm_call` (Esc racing the in-flight stream)
-    // synthesizes the partial assistant message from them. The emits below
-    // are individually guarded on `sink`, so a sinkless call only pays the
-    // accumulation; the post-stream flush still reads
+    // Buffers fill unconditionally (see `AssistantStreamState` doc). The
+    // emits below are individually guarded on `sink`, so a sinkless call
+    // only pays the accumulation; the post-stream flush still reads
     // `response.message.text` / `reasoning_content` directly.
 
     #[cfg(debug_assertions)]

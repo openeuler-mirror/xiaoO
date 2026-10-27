@@ -390,8 +390,9 @@ pub struct ChatState {
     pub scrollbar_state: ScrollbarState,
     pub is_loading: bool,
     pub available_providers: Vec<ProviderInfo>,
-    /// 每个 provider 的官方 model list 拉取状态（缺省视为 `Builtin`）。
-    /// 与 `available_providers` 一样由 `build_chat_state` 在会话/工作区切换时复位。
+    /// Per-provider official model-list fetch state (absent = `Builtin`).
+    /// Reset by `build_chat_state` on session/workspace switch, like
+    /// `available_providers`.
     pub provider_model_status: BTreeMap<String, ModelListState>,
     /// When true, view stays at bottom when new content arrives (e.g. streaming).
     pub stick_to_bottom: bool,
@@ -504,16 +505,14 @@ impl SubagentLaneState {
         self.sync_scrollbar_state();
     }
 
-    /// Scroll up by `lines` lines in one step (mouse wheel notch),
-    /// clamped at the top so offset never underflows.
+    /// Same semantics as the same-named `ChatState` method (clamping and
+    /// stick-to-bottom included); documented there.
     pub fn scroll_up_by(&mut self, lines: usize) {
         self.stick_to_bottom = false;
         self.scroll_offset = self.scroll_offset.saturating_sub(lines);
         self.sync_scrollbar_state();
     }
 
-    /// Scroll down by `lines` lines in one step (mouse wheel notch),
-    /// clamped at the bottom so the last line stays visible.
     pub fn scroll_down_by(&mut self, lines: usize) {
         let max = self.max_scroll_offset();
         self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
@@ -541,39 +540,47 @@ pub struct ModelInfo {
     pub name: String,
 }
 
-/// 某个 provider 的官方 model list 拉取状态，按 provider 名索引在
-/// [`ChatState::provider_model_status`] 中。
+/// Official model-list fetch state for one provider, keyed by provider name
+/// in [`ChatState::provider_model_status`].
 ///
-/// 状态与列表本身分离：`models` 只在拉取成功时被替换，失败永远不动它，
-/// 因此"官方列表成功一次后永久替换内置列表"是数据结构保证的语义，
-/// 不需要额外的 `replaced` 标志位。
+/// State and list are deliberately separate: the stored models are only
+/// ever replaced on a successful fetch, so "one success permanently
+/// replaces the builtin list" is guaranteed by the data structure — no
+/// `replaced` flag needed.
 #[derive(Debug, Clone, Default)]
 pub enum ModelListState {
-    /// 从未成功拉取过：显示内置列表（[`default_provider_list`]）。
+    /// Never fetched successfully; the builtin list
+    /// ([`default_provider_list`]) is shown.
     #[default]
     Builtin,
-    /// 拉取进行中；`since` 用于判定"陈旧"（见 [`Self::is_stale_loading`]）。
+    /// Fetch in flight; `since` drives the staleness check
+    /// ([`Self::is_stale_loading`]).
     Loading { since: Instant },
-    /// 官方列表已替换内置列表；`fetched_at` 用于 TTL 判定。
+    /// Official list has replaced the builtin one; `fetched_at` drives the
+    /// TTL decision.
     Ready { fetched_at: Instant },
-    /// 最近一次拉取失败：列表保持不变（可能是内置，也可能是上次成功结果）。
-    /// `hint_only` 表示这只是配置提示（例如缺 API key），渲染用 muted 而非错误色。
+    /// Last fetch failed; the list is left untouched (builtin or the last
+    /// successful result). `hint_only` marks a configuration hint (e.g.
+    /// missing API key) rendered muted instead of as an error.
     Failed {
         message: String,
         failed_at: Instant,
         hint_only: bool,
     },
-    /// provider profile 未声明官方 catalog 接口（`supports_model_catalog=false`），
-    /// 不发起请求、也不重试。
+    /// The provider profile declares no official catalog endpoint
+    /// (`supports_model_catalog=false`): no request, no retry.
     Unsupported,
 }
 
-/// `Loading` 超过这个时长就视为"结果不会再回来了"，允许重新拉取。
+/// A `Loading` state older than this is treated as "the result will never
+/// arrive" and may be re-fetched.
 pub const MODEL_LIST_STALE_AFTER: Duration = Duration::from_secs(60);
 
-/// `Ready` 之后的正常刷新间隔：打开弹窗 / 切换 provider 时超过它才重新拉取。
+/// Normal refresh interval after `Ready`: reopening the dialog / switching
+/// providers re-fetches only past this interval.
 pub const MODEL_LIST_TTL: Duration = Duration::from_secs(300);
-/// `Failed` 之后的最小重试间隔，避免在坏端点上反复打请求。
+/// Minimum retry interval after `Failed`, so a broken endpoint is not
+/// hammered repeatedly.
 pub const MODEL_LIST_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
 impl ModelListState {
@@ -581,12 +588,16 @@ impl ModelListState {
         matches!(self, Self::Loading { .. })
     }
 
-    /// `Loading` 已经等了太久：视为"结果永远不会回来了"。
+    /// `Loading` has waited too long: the result is presumed lost.
     ///
-    /// 回传的结果是**首选**能把状态推走 `Loading` 的输入；任务若在回传前消失，状态会停在
-    /// `Loading` 直到本窗口到期——窗口内 `needs_refresh` 为假、在飞名额也不释放，谁都拉不动；
-    /// 到期后的下一次触发（打开弹窗 / 切换高亮）会让 `start_model_fetch` 先清掉陈旧登记再重拉。
-    /// 阈值取 facade 超时（20s）的 3 倍，正常慢请求不会误判。
+    /// The task's report-back is the preferred input for leaving `Loading`;
+    /// if the task vanishes before reporting, the state sits in `Loading`
+    /// until this window expires — while inside it, `needs_refresh` is
+    /// false and the in-flight slot stays taken, so nothing can fetch. The
+    /// next trigger after expiry (dialog open / highlight change) makes
+    /// `start_model_fetch` clear the stale registration and re-fetch. The
+    /// threshold is 3x the facade timeout (20s) so normally slow requests
+    /// are not misjudged.
     pub fn is_stale_loading(&self, now: Instant) -> bool {
         match self {
             Self::Loading { since } => {
@@ -596,19 +607,20 @@ impl ModelListState {
         }
     }
 
-    /// 是否应当在"按需刷新"路径上重新拉取。
+    /// Whether the on-demand refresh path should re-fetch.
     ///
-    /// - `Builtin`：从未成功 → 要拉；
-    /// - `Loading`：已在飞 → 不重复拉；
-    /// - `Unsupported`：profile 静态声明没有 catalog → 永不重试；
-    /// - `Ready` / `Failed`：超过各自间隔才拉。
+    /// - `Builtin`: never succeeded → fetch;
+    /// - `Loading`: already in flight → no duplicate fetch;
+    /// - `Unsupported`: profile statically declares no catalog → never;
+    /// - `Ready` / `Failed`: only past their respective intervals.
     ///
-    /// 用 `saturating_duration_since`：`now` 若早于记录时刻（理论上不会发生）
-    /// 按 0 处理，不 panic。
+    /// `saturating_duration_since` treats a `now` earlier than the recorded
+    /// instant (theoretically impossible) as 0 instead of panicking.
     pub fn needs_refresh(&self, now: Instant) -> bool {
         match self {
             Self::Builtin => true,
-            // 陈旧的 `Loading` 视为可重拉（结果已经不可能回来了）。
+            // A stale `Loading` counts as re-fetchable (the result can no
+            // longer arrive).
             Self::Loading { since } => {
                 now.saturating_duration_since(*since) >= MODEL_LIST_STALE_AFTER
             }
@@ -701,7 +713,7 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
                 },
             ],
         },
-        // 智谱 AI (Zhipu / BigModel) — open.bigmodel.cn
+        // Zhipu AI (Zhipu / BigModel) — open.bigmodel.cn
         // Aliases resolved by core: zai, zai-cn, zai-china, zai-global, z-ai, z.ai, bigmodel, glm-cn
         ProviderInfo {
             name: "zhipu".to_string(),
@@ -1009,8 +1021,8 @@ impl ChatState {
         Self::default()
     }
 
-    /// 该 provider 的官方 model list 拉取状态；未记录过时视为 `Builtin`
-    /// （即"只显示内置列表"）。
+    /// This provider's model-list fetch state; absent = `Builtin` (builtin
+    /// list only).
     pub fn model_list_state(&self, provider: &str) -> ModelListState {
         self.provider_model_status
             .get(provider)
@@ -1023,10 +1035,12 @@ impl ChatState {
             .insert(provider.to_string(), state);
     }
 
-    /// 用官方列表替换某 provider 的模型（按名精确匹配，未命中返回 `false`）。
+    /// Replace a provider's models with the official list (exact name
+    /// match; `false` if not found).
     ///
-    /// 这是唯一写入官方结果的路径——失败路径不经过这里，列表因此不会被
-    /// 回退覆盖，`Unsupported` / 网络失败都只是"不写"。
+    /// The only path that writes official results — failure paths never
+    /// reach it, so the list is never clobbered by a fallback:
+    /// `Unsupported` / network failure simply leave it untouched.
     pub fn replace_provider_models(&mut self, provider: &str, models: Vec<ModelInfo>) -> bool {
         let Some(entry) = self
             .available_providers

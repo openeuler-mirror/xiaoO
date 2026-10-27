@@ -3,7 +3,7 @@ pub const MAX_TIMEOUT_ENV_VAR: &str = "WEBFETCH_MAX_TIMEOUT_MS";
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
-pub const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024; // 5MB
+pub const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
 fn read_positive_env_u64(name: &str) -> Option<u64> {
     std::env::var(name)

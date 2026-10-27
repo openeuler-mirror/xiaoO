@@ -16,8 +16,9 @@ use serde_json::{json, Value};
 use super::super::core::{serialize_workspace_root, PluginHookerCore};
 use crate::{resolve_hook_point_category, HookPointCategory};
 
-/// plugin hooker 子进程最长执行时间(10 分钟)。超时后由 `kill_on_drop` 自动兜底杀掉子进程,
-/// 防止卡死命令长期阻塞 tokio worker。
+/// Maximum runtime of a plugin hooker subprocess (10 minutes). On timeout,
+/// `kill_on_drop` reaps the child as a backstop so a wedged command cannot
+/// pin a tokio worker indefinitely.
 const PLUGIN_HOOKER_TIMEOUT_MS: u64 = 600_000;
 
 pub(crate) struct PluginToolHookerAdaptor {
@@ -236,10 +237,9 @@ impl PluginToolHookerAdaptor {
         // Build the interleaved history prompt (prompt_history): iterate
         // messages in time order, open a new turn on each User message, and
         // assign subsequent ToolResults to that turn's actions until the
-        // next User message. This fixes L2 intent-consistency misses where
-        // a "continue" overwrites the initial read/search intent in
-        // multi-turn sessions. Matches section 4 of the AgentMoss interface
-        // contract (docs/INTEGRATION_GUIDE.md).
+        // next User message. This preserves L2 intent consistency: a
+        // "continue" must not overwrite the initial read/search intent in
+        // multi-turn sessions.
         let mut prompt_history: Vec<Value> = Vec::new();
         for m in recent_messages.iter() {
             if m.role == MessageRole::User {

@@ -75,9 +75,7 @@ impl GrepOutput {
 
     pub fn with_limit(mut self, limit: u32) -> Self {
         self.applied_limit = Some(limit);
-        // A non-None `applied_limit` means the result was capped, so the
-        // aggregate fields reflect only the shown subset — flag it so
-        // callers don't mistake `num_matches`/`num_files` for totals.
+        // Setting `applied_limit` implies capping — see the `partial` field doc.
         self.partial = true;
         self
     }

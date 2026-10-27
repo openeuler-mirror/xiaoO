@@ -211,9 +211,7 @@ impl ToolCallImpl {
         hookers.retain(|hooker| runtime.hookers().is_enabled(hooker.id()));
         hookers.sort_by(|left, right| left.id().0.cmp(&right.id().0));
 
-        // Same criterion as the pre-hook sequence: the escaped hook point is
-        // always well formed, so an empty match means no enabled hooker is
-        // attached to this tool phase and the phase is skipped.
+        // Empty-match criterion: see the pre-hook sequence comment above.
         if hookers.is_empty() {
             return Ok(Vec::new());
         }
@@ -348,9 +346,7 @@ impl ToolCallImpl {
         hookers.retain(|hooker| runtime.hookers().is_enabled(hooker.id()));
         hookers.sort_by(|left, right| left.id().0.cmp(&right.id().0));
 
-        // Same criterion as the pre-hook sequence: the escaped hook point is
-        // always well formed, so an empty match means no enabled hooker is
-        // attached to this tool phase and the phase is skipped.
+        // Empty-match criterion: see the pre-hook sequence comment above.
         if hookers.is_empty() {
             return Ok(Vec::new());
         }

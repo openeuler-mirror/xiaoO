@@ -8,14 +8,12 @@ use super::executor::DeclarativeToolExecutor;
 use super::manifest::LoadedDeclarativeTool;
 use super::spec::DeclarativeToolSpec;
 
-/// A plugin tool source.
 pub struct PluginToolSource {
     workspace_root: Option<PathBuf>,
     home_dir: Option<PathBuf>,
 }
 
 impl PluginToolSource {
-    /// Creates a new plugin tool source.
     pub fn new(workspace_root: Option<PathBuf>) -> Self {
         Self::with_home(workspace_root, std::env::var_os("HOME").map(PathBuf::from))
     }

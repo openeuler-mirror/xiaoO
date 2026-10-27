@@ -387,15 +387,11 @@ async fn resolve_honors_agent_id_override_for_subagent_lanes() {
         .await
         .expect("resolve should succeed for subagent lane");
 
-    // `descriptor.agent_id` MUST equal the override so
-    // `SharedToolEventSink` scopes lifecycle events correctly.
     assert_eq!(
         resolved.descriptor.agent_id, subagent_agent_id,
         "descriptor.agent_id must honor agent_id_override for subagent lanes"
     );
 
-    // The tool registry MUST expose visible tools for the
-    // subagent's agent_id.
     let registry = resolved
         .tool_registry
         .as_ref()

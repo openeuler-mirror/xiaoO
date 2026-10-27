@@ -1,17 +1,21 @@
-//! LLM provider 装配门面。
+//! LLM provider assembly facade.
 //!
-//! serverside 的 provider 装配链（解析配置 + api-key 回退 + 建 provider +
-//! 定上下文窗口）下沉为一个入口 [`build_llm_provider`]，与 shared resolver
-//! 内已有调用（`hosted_runtime_resolver`）合并。
+//! [`build_llm_provider`] is the single entry point for the provider
+//! assembly chain (resolve config + api-key fallback + build provider +
+//! context window); the shared resolver (`hosted_runtime_resolver`) and
+//! serverside both route through it so the two assembly paths cannot drift.
 //!
-//! 两条硬约束：
-//! - 入参出参不出现底层细粒度类型：`ResolveInput` / `ResolvedConfig` /
-//!   `create_llm_provider_from_resolved` / `resolve_provider_profile` /
-//!   `resolve_model_context_length` 一律在本模块内部使用，不暴露。
-//! - 新增 pub 项必须有应用消费者：serverside `daemon_runtime` 启动装配与
-//!   resolver 缓存未命中路径都改调它，`llm-client` 随之从 serverside 消失。
+//! Two hard constraints:
+//! - No fine-grained llm-client types in the API surface:
+//!   `ResolveInput` / `ResolvedConfig` / `create_llm_provider_from_resolved`
+//!   / `resolve_provider_profile` / `resolve_model_context_length` stay
+//!   internal to this module.
+//! - Every pub item must have an app consumer (currently the serverside
+//!   `daemon_runtime` startup assembly and the resolver cache-miss path);
+//!   `llm-client` never leaks out of this module.
 //!
-//! 返回类型用 `xiaoo_api::llm` 既有导出（`LlmProviderWrapper`）。
+//! The return type is the existing `xiaoo_api::llm` export
+//! (`LlmProviderWrapper`).
 
 use std::env;
 use std::sync::Arc;
@@ -25,7 +29,8 @@ use serde::Serialize;
 use xiaoo_api::chat::AgentId;
 use xiaoo_api::llm::{resolve_config, resolve_model_context_length, ResolveInput};
 
-/// LLM provider 装配输入。字段只用基本类型与 shared 已导出的句柄。
+/// LLM provider assembly input. Fields are plain types plus already-exported
+/// shared handles.
 #[derive(Clone, Debug)]
 pub struct LlmAssemblyInput {
     pub provider: String,
@@ -33,12 +38,13 @@ pub struct LlmAssemblyInput {
     pub api_base: Option<String>,
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
-    /// 显式上下文窗口覆盖；`None` 或 `0` 触发动态探测 + 静态回退。
+    /// Explicit context-window override; `None` or `0` falls back to dynamic
+    /// probing + static capabilities.
     pub context_window_override: Option<u32>,
     pub agent_id: Option<AgentId>,
 }
 
-/// LLM provider 装配错误。
+/// Errors from the LLM provider assembly chain.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmAssemblyError {
     #[error("failed to resolve llm provider config: {0}")]
@@ -73,14 +79,16 @@ pub struct LlmModelSummary {
     pub max_output_tokens: Option<u64>,
 }
 
-/// 解析 api-key：显式 > 环境变量 > provider profile 默认 env。
+/// Resolve the api-key: explicit > environment variable > provider profile
+/// default env.
 ///
-/// 与原 serverside `resolve_llm_api_key` / `resolve_api_key_env` 等价：
-/// - `api_key` 直接给 → 用它。
-/// - `api_key_env` 给了 → 查进程环境；缺失则报错
-///   （应用装配时 api_key_env 是强约束）。
-/// - 都没给 → 回退到 provider profile 的 `default_api_key_env`（如有），此时
-///   缺失不报错（profile 可能允许匿名）。
+/// - `api_key` set → use it.
+/// - `api_key_env` set → look it up in the process environment; a missing
+///   variable is an error (app assembly treats api_key_env as a hard
+///   requirement).
+/// - Neither set → fall back to the provider profile's
+///   `default_api_key_env` (if any); a missing variable is tolerated there
+///   (the profile may allow anonymous access).
 fn resolve_api_key(input: &LlmAssemblyInput) -> Result<Option<String>, LlmAssemblyError> {
     if let Some(api_key) = input.api_key.as_ref() {
         return Ok(Some(api_key.clone()));
@@ -115,12 +123,11 @@ fn resolve_api_key_env(
     }
 }
 
-/// 解析配置 → 建 provider → 定上下文窗口，一步到位。
+/// Resolve config → build provider → pin the context window, in one step.
 ///
-/// serverside 两处调用点（启动装配、resolver 缓存未命中路径）都改调它。
-/// 返回 `(provider, effective_context_window)`：上下文窗口
-/// 优先级与原 `resolve_effective_context_window` 一致——显式覆盖 > 动态探测
-/// > provider capabilities 静态回退（≥ 1）。
+/// Returns `(provider, effective_context_window)`: window precedence is
+/// explicit override > dynamic probing > provider capabilities static
+/// fallback (≥ 1), matching [`resolve_model_context_length`].
 pub async fn build_llm_provider(
     input: LlmAssemblyInput,
 ) -> Result<(Arc<LlmProviderWrapper>, u32), LlmAssemblyError> {
@@ -150,8 +157,9 @@ pub async fn build_llm_provider(
     )
     .await;
 
-    // usize → u32：上下文窗口理论可达 u64，但实际模型均远小于 u32::MAX；
-    // 越界时饱和到 u32::MAX 而非截断，避免误导调用方。
+    // Saturate rather than truncate on the usize → u32 conversion: real
+    // model windows sit far below u32::MAX, and a truncated value would
+    // silently mislead callers.
     let context_window = u32::try_from(effective_context_window).unwrap_or(u32::MAX);
 
     Ok((provider, context_window))
@@ -240,7 +248,8 @@ pub async fn list_llm_models(
         .collect())
 }
 
-/// 与原 serverside `resolve_effective_context_window` 等价的内部实现。
+/// Context-window resolution used by [`build_llm_provider`]: explicit
+/// override > dynamic probing > capabilities fallback.
 async fn resolve_effective_context_window(
     resolved: &llm_client::ResolvedConfig,
     model: &str,

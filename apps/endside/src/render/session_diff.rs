@@ -279,7 +279,7 @@ fn plan_panel_height(plan: &TodoMessageState, sidebar_width: u16, available_heig
     }
     // Borders take 2 columns, so the panel's text area is 2 narrower than
     // the sidebar. Guard against degenerate widths (>= 3 keeps a >= 1 wide
-    // text area, matching the old clamp floor of 7 rows incl. borders).
+    // text area, i.e. a 7-row panel incl. borders).
     let inner_width = sidebar_width.saturating_sub(2);
     if inner_width == 0 {
         return 7.min(available_height);

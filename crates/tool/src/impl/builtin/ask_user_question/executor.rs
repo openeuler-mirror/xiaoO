@@ -38,7 +38,6 @@ impl ToolExecutor for AskUserQuestionExecutor {
                 message: format!("Failed to parse input: {}", e),
             })?;
 
-        // Validate input
         let validation_result = validation::validate_input(&input);
         if !validation_result.result {
             let message = validation_result

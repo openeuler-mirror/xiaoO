@@ -84,7 +84,7 @@ fn chars_per_token_for_extension(extension: &str) -> f64 {
             return *ratio;
         }
     }
-    4.0 // Default ratio
+    4.0
 }
 
 /// Extract file extension from a file path.

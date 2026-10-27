@@ -607,11 +607,11 @@ fn mouse_in_rect(column: u16, row: u16, rect: Rect) -> bool {
 /// the `visual_lines` produced by `wrap_line_to_visual_lines`).
 /// `cache` is the `TranscriptRenderCache` built during the last `render_chat`
 /// frame — it carries the actual word-wrapped `visual_lines` and the
-/// `logical_line_visual_starts` index, so the mouse→text mapping always agrees
-/// with what's drawn on screen (previously this function recomputed wrapping
-/// via `div_ceil(display_width, content_width)`, which diverged from textwrap's
-/// word-aware wrapping for long paths/URLs and caused clicks to land on the
-/// wrong character or the wrong line).
+/// `logical_line_visual_starts` index, so the mouse→text mapping always
+/// agrees with what's drawn on screen instead of recomputing wrapping via
+/// `div_ceil(display_width, content_width)`, which diverges from textwrap's
+/// word-aware wrapping for long paths/URLs and lands clicks on the wrong
+/// character or the wrong line.
 pub(crate) fn mouse_to_line_col(
     column: u16,
     row: u16,

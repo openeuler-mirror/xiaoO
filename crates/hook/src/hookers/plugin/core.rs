@@ -19,10 +19,9 @@ use super::interaction::{
 /// command subprocess, the common payload skeleton, result-field reading,
 /// and the `ask_user` interaction round-trip — to it, supplying only the
 /// error constructors (`Fn(String) -> E`, plus a timeout variant)
-/// appropriate to its domain. This removes the byte-identical
-/// `serialize_*` / `run_plugin_command` / `build_*_payload` /
-/// `read_required_*` / interaction-flow bodies that were previously
-/// copy-pasted across every adaptor.
+/// appropriate to its domain, so every adaptor shares one implementation
+/// instead of carrying byte-identical `serialize_*` / `run_plugin_command`
+/// / `build_*_payload` / `read_required_*` / interaction-flow copies.
 pub(crate) struct PluginHookerCore {
     id: HookerId,
     hook_point: HookPointId,
@@ -80,23 +79,11 @@ impl PluginHookerCore {
     }
 
     /// Run the configured plugin command, feeding `payload` to its stdin and
-    /// parsing the stdout as JSON. `make_err` lifts a human-readable message
-    /// into the adaptor's own error type, so the subprocess/IO/JSON failure
-    /// path is shared verbatim across all four plugin hookers;
-    /// `make_timeout_err` additionally receives the preformatted timeout
-    /// message and the cap in milliseconds, because some domains map
-    /// timeouts onto a dedicated variant (`LlmError::Timeout`,
-    /// `ToolExecutionError::Timeout`) instead of a message error.
-    /// `timeout_ms` controls the hard cap on subprocess runtime: `Some(ms)`
-    /// kills the child after `ms` milliseconds. Chat and session hooker
-    /// commands are short observers and pass
-    /// `Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS)`; the llm and tool adaptors
-    /// keep their own longer 10-minute cap because their plugins may proxy
-    /// slow LLM/tool work. Every adaptor passes `Some(...)` so a hung
-    /// script cannot leak the driving task indefinitely — even the
-    /// fire-and-forget session state hook, whose background task would
-    /// otherwise linger forever. Delegates to the shared
-    /// [`run_plugin_subprocess`] driver.
+    /// parsing the stdout as JSON. Delegates to [`run_plugin_subprocess`];
+    /// the `make_err` / `make_timeout_err` contracts and the
+    /// why-every-caller-passes-a-cap rationale live there, and the
+    /// per-domain cap choices (short observers vs. the 10-minute
+    /// llm/tool cap) on [`PLUGIN_HOOK_COMMAND_TIMEOUT_MS`].
     pub(crate) async fn run_plugin_command<E>(
         &self,
         payload: &Value,
@@ -274,11 +261,11 @@ pub(crate) const PLUGIN_HOOK_COMMAND_TIMEOUT_MS: u64 = 30_000;
 /// the chat / session / llm / tool plugin hookers; `make_timeout_err`
 /// receives the preformatted timeout message plus the cap in milliseconds
 /// so domains with a dedicated timeout variant can map it faithfully.
-/// `timeout_ms` is `Some(ms)` for all callers; a `None` value would wait
-/// indefinitely, which is never desirable — even the fire-and-forget
-/// session state hook passes a cap to avoid leaking its background task.
-/// This is `async` so it never blocks the async executor thread driving the
-/// agent loop regardless of the timeout choice.
+/// `timeout_ms` is `Some(ms)` for all callers — a `None` value would wait
+/// indefinitely, leaking the driving task (see
+/// [`PLUGIN_HOOK_COMMAND_TIMEOUT_MS`] for the session-hook case). This is
+/// `async` so it never blocks the async executor thread driving the agent
+/// loop regardless of the timeout choice.
 pub(crate) async fn run_plugin_subprocess<E>(
     id: &HookerId,
     command: &str,
@@ -313,9 +300,9 @@ pub(crate) async fn run_plugin_subprocess<E>(
     // as a single future so one `timeout` covers both phases. The stdin
     // write alone (when the plugin ignores stdin and the payload exceeds the
     // pipe buffer, ~64KB) would otherwise block the async task forever:
-    // `write_all` cannot complete until the child drains the pipe, and the
-    // previous implementation only wrapped `wait_with_output`, which runs
-    // after the write. `kill_on_drop(true)` on the `Child` ensures the
+    // `write_all` cannot complete until the child drains the pipe, and only
+    // the stdout wait would remain to be covered by a timeout if the write
+    // were driven outside it. `kill_on_drop(true)` on the `Child` ensures the
     // subprocess is reaped when this future is dropped on timeout, whether
     // the timeout fires during the stdin write or while awaiting stdout.
     let run = async {

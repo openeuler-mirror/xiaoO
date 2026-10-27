@@ -1,6 +1,5 @@
 mod backends;
 mod builder;
-pub mod grep_command;
 pub mod process_group;
 
 pub use backends::local::{

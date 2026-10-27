@@ -52,7 +52,7 @@ ci_result() {
 # 找不到 FAIL 行则回退首条非空行。
 #
 # 单次遍历：边读边记录首个非空行作为回退，遇到 FAIL 行立即返回。
-# （旧实现先扫 FAIL 再单独扫非空行，第二段循环因 stdin 已被消费而永远进不去。）
+# （两段式扫描不可行：第二段循环会因 stdin 已被第一段消费而读不到内容。）
 extract_reason() {
     local line stripped first_nonempty=""
     while IFS= read -r line || [ -n "$line" ]; do

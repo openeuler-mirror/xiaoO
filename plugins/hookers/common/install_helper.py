@@ -34,7 +34,6 @@ def prompt_default_mode() -> str:
 
 def ensure_hooker_fields(lines: list, hooker_idx: int) -> list:
     """确保 [hooker] 段包含所有必要字段"""
-    # 找到 [hooker] 段的结束位置（下一个 [section] 或文件末尾）
     next_section_idx = len(lines)
     for i in range(hooker_idx + 1, len(lines)):
         stripped = lines[i].strip()
@@ -42,7 +41,6 @@ def ensure_hooker_fields(lines: list, hooker_idx: int) -> list:
             next_section_idx = i
             break
 
-    # 解析 [hooker] 段已有的字段
     existing_fields = {}
     for i in range(hooker_idx + 1, next_section_idx):
         line = lines[i].strip()
@@ -59,13 +57,11 @@ def ensure_hooker_fields(lines: list, hooker_idx: int) -> list:
         "policies": lambda: "policies = {}\n",
     }
 
-    # 检查 default 字段
     default_val_str = None
     if "default" not in existing_fields:
         default_value = prompt_default_mode()
         default_val_str = f'default = "{default_value}"\n'
 
-    # 确定插入位置
     insert_idx = next_section_idx
     new_lines = []
 
@@ -107,12 +103,10 @@ def find_next_section(lines: list, start_idx: int) -> int:
 
 def parse_plugins_from_lines(lines: list, plugins_line_idx: int) -> tuple[list[str], int]:
     """从 lines 中解析 plugins 数组，返回 (路径列表, 数组结束行索引)"""
-    # 找到 [ 所在行
     first_line = lines[plugins_line_idx]
     if "[" not in first_line:
         return [], plugins_line_idx
 
-    # 收集从 [ 到 ] 的所有内容
     raw = first_line[first_line.find("[") + 1 :]
     end_line = plugins_line_idx
     while "]" not in raw:
@@ -121,13 +115,11 @@ def parse_plugins_from_lines(lines: list, plugins_line_idx: int) -> tuple[list[s
             break
         raw += lines[end_line]
 
-    # 提取 ] 之前的内容
     if "]" in raw:
         raw = raw[: raw.find("]")]
     else:
         raw = ""
 
-    # 解析字符串
     strings = re.findall(r'["\']([^"\']*)["\']', raw)
     return strings, end_line
 
@@ -175,7 +167,6 @@ def register_plugin_in_config(plugin_json_path: str) -> None:
 
     lines = _read_config_lines(config_toml_path)
 
-    # 查找 [hooker] 段
     hooker_section_idx = find_hooker_section(lines)
 
     if hooker_section_idx is None:
@@ -202,7 +193,6 @@ def register_plugin_in_config(plugin_json_path: str) -> None:
                 plugins_line_idx = i
                 break
 
-        # 检查路径是否已存在
         content = "".join(lines)
         if plugin_json_path in content:
             print("plugin.json 路径已存在于 config.toml 中")
@@ -243,7 +233,6 @@ def unregister_plugin_from_config(plugin_json_path: str) -> None:
 
     lines = content.splitlines(keepends=True)
 
-    # 查找 [hooker] 段
     hooker_section_idx = find_hooker_section(lines)
     if hooker_section_idx is None:
         print("config.toml 中未找到 [hooker] 段，无需清理")
@@ -262,7 +251,6 @@ def unregister_plugin_from_config(plugin_json_path: str) -> None:
         print("config.toml 中未找到 plugins 行，无需清理")
         return
 
-    # 从 plugins 数组中移除路径
     existing_paths, end_line = parse_plugins_from_lines(lines, plugins_line_idx)
     remaining_paths = [p for p in existing_paths if p != plugin_json_path]
 

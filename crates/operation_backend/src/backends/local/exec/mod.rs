@@ -153,10 +153,9 @@ impl OperationExec for LocalExec {
         // On timeout, the group kill ensures lingering background processes
         // release the pipe, so EOF arrives quickly. On a normal exit where a
         // background process still holds the pipe, the grace bounds the wait so
-        // we never hang forever; whatever was captured into the shared buffers
-        // is returned as partial output. Previously the reader `.await`s here
-        // were unbounded, which deadlocked in the lingering-background-process
-        // case described above.
+        // we never hang forever — an unbounded reader `.await` here would
+        // deadlock in exactly that case. Whatever was captured into the
+        // shared buffers is returned as partial output.
         let _ = timeout(DRAIN_GRACE, async {
             let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
         })
@@ -350,12 +349,17 @@ impl LocalExec {
             &self._state.policy,
             command_cwd.as_deref(),
         );
-        // daemon 在启动时把密钥库里的全部明文凭据 `set_var` 进了自己的环境
-        // （`inject_llm_secrets_into_env`），而这条后端默认继承父进程环境 ——
-        // 两者叠加，一次 `env` 就能把整台部署的 provider / 渠道凭据打印出来。
-        // 这里从空环境起，再放回运行本身需要的少数几个变量，以及请求显式指定的那些。
-        // 放在调用点而不是 `command_from_spec` 里，是因为那里有四条分支
-        // （sandbox-exec / dyn-sandbox / bwrap / 裸执行），逐个 return 加容易漏。
+        // At startup the daemon `set_var`s every plaintext credential from
+        // the secret store into its own environment
+        // (`inject_llm_secrets_into_env`), and this backend inherits the
+        // parent environment by default — combined, a single `env` would
+        // print the whole deployment's provider / channel credentials.
+        // So start from an empty environment, then put back the few
+        // variables the run itself needs plus whatever the request
+        // explicitly specifies. Done here rather than inside
+        // `command_from_spec` because that helper has four return paths
+        // (sandbox-exec / dyn-sandbox / bwrap / bare) — adding it per branch
+        // invites misses.
         crate::backends::local::spawn_env::scrub_child_environment(&mut command);
         if let Some(env_vars) = &request.env {
             for (k, v) in env_vars {

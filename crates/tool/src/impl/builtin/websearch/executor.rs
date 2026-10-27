@@ -18,7 +18,6 @@ use super::output::WebSearchOutput;
 use super::spec::WebSearchToolSpec;
 use super::validation;
 
-// JSON-RPC request types
 #[derive(Debug, Serialize)]
 struct McpSearchArguments {
     query: String,
@@ -48,7 +47,6 @@ struct McpSearchRequest {
     params: McpSearchParams,
 }
 
-// JSON-RPC response types
 #[derive(Debug, Deserialize)]
 struct McpContentItem {
     #[serde(rename = "type")]

@@ -42,8 +42,8 @@ pub(crate) const REAPER_INTERVAL: tokio::time::Duration = tokio::time::Duration:
 /// Daemon principals don't acquire leases — they're cooperative background
 /// callers trusted not to race user turns. The prefix lets
 /// `assert_lease_holder` and the actor's pop-time guard recognise them and
-/// bypass the holder check explicitly (rather than the old implicit
-/// `client_id = None` bypass that was unauditable).
+/// bypass the holder check explicitly (an implicit `client_id = None`
+/// bypass would be unauditable).
 pub(crate) const DAEMON_PRINCIPAL_PREFIX: &str = "daemon:";
 
 /// Whether `client_id` is a daemon-internal principal. Daemon principals

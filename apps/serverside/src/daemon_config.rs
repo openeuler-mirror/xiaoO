@@ -985,7 +985,6 @@ impl DaemonConfig {
         let mut jobs = Vec::with_capacity(raw.job.len());
         let mut seen_names = HashSet::new();
         for raw_job in raw.job {
-            // Check for duplicate job names
             if !seen_names.insert(raw_job.name.clone()) {
                 bail!("duplicate cron job name: '{}'", raw_job.name);
             }

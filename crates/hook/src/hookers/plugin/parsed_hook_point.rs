@@ -10,7 +10,6 @@ pub(crate) struct PluginHookAction(pub(crate) String);
 
 pub(crate) struct PluginHookStage(pub(crate) String);
 
-// Splits hook_point into agent/action/detail/stage for routing.
 pub(crate) fn parse_plugin_hook_point(
     hook_point: &HookPointId,
 ) -> Result<ParsedPluginHookPoint, BuildError> {

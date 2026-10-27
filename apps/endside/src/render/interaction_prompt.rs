@@ -1,10 +1,11 @@
 //! Interactive options + optional supplementary input (above TUI input area).
 //!
 //! ## Backend wiring (pre-built)
-//! - **Inbound**: Any thread constructs [`PromptRequest`] and calls `App::open_interaction_prompt` (see `app.rs`).
+//! - **Inbound**: Any thread constructs [`PromptRequest`] and calls
+//!   `App::open_interaction_prompt` (see `state/app_state.rs`).
 //! - **Outbound**: Pass user selection back via `UnboundedSender<UserPromptResult>` passed during opening;
 //!   upper layer can write to session, HTTP POST, or merge into next `ChatMessage`.
-//! - Inbound: `SessionTurnUpdate::InteractionPrompt` opens this panel via `poll_stream_updates`.
+//! - **Inbound (event path)**: `SessionTurnUpdate::InteractionPrompt` opens this panel via `poll_stream_updates`.
 
 use crate::input::Input;
 use ratatui::{

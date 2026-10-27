@@ -8,7 +8,6 @@ pub(crate) struct PluginHookerDefinition {
     pub(crate) definition: serde_json::Value,
 }
 
-// Shared JSON declaration parser for plugin hookers.
 pub(crate) fn parse_plugin_hooker_definition_from_json(
     json: &str,
 ) -> Result<PluginHookerDefinition, BuildError> {

@@ -123,7 +123,7 @@ pub trait OperationExec: Send + Sync {
 ///
 /// Used by `LocalExec::exec_streaming` when the dyn-sandbox AUTH stdin
 /// channel makes line-streaming of stdout impossible — see
-/// `crates/operation_backend/src/backends/local/exec.rs`.
+/// `crates/operation_backend/src/backends/local/exec/mod.rs`.
 pub async fn exec_streaming_via_exec<E: OperationExec + ?Sized>(
     backend: &E,
     request: ExecRequest,

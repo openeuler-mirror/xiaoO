@@ -1137,12 +1137,12 @@ fn build_compression_pipeline(
     compact: Option<&CompactConfig>,
     llm_provider: &Arc<LlmProviderWrapper>,
 ) -> Result<Arc<dyn CompressionPipeline>> {
-    // A missing `[compact]` section MUST NOT silently disable compression.
-    // Previously this fell back to `PassthroughCompressionPipeline` (a no-op),
-    // which left the agent loop emitting `Pre-check failed` / `context
-    // compression triggered` with `removed=0` forever. Now `None` simply
-    // means "use the shared defaults", producing a real `ContextManager`
-    // — exactly what the local CLI path does.
+    // A missing `[compact]` section MUST NOT silently disable compression:
+    // `None` here means "use the shared defaults", producing a real
+    // `ContextManager` — exactly what the local CLI path does. A no-op
+    // passthrough fallback would leave the agent loop emitting
+    // `Pre-check failed` / `context compression triggered` with `removed=0`
+    // forever.
     let overrides = compact.map(|c| CompactOverrides {
         warning_ratio: c.warning_ratio,
         auto_compact_ratio: c.auto_compact_ratio,

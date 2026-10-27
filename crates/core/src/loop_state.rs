@@ -86,7 +86,6 @@ impl LoopState {
         }
     }
 
-    /// Get a clone of the shared message storage Arc.
     pub fn messages_arc(&self) -> Arc<RwLock<Vec<ChatMessage>>> {
         Arc::clone(&self.messages)
     }

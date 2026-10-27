@@ -1643,8 +1643,8 @@ async fn force_close_session_cascades_to_descendants() {
 /// Build a `StubRuntimeResolver` whose `backend_options` points
 /// `temp_root` at `workspace`, so the stub backend writes into the
 /// test's tempdir instead of the real workspace. Centralises the
-/// `{ workspace_root, backend_options, llm_provider }` triple that was
-/// copy-pasted across every reaper / checkpoint / fork test.
+/// `{ workspace_root, backend_options, llm_provider }` triple shared
+/// by the reaper / checkpoint / fork tests.
 fn make_stub_resolver(workspace: &std::path::Path) -> Arc<StubRuntimeResolver> {
     Arc::new(StubRuntimeResolver {
         workspace_root: workspace.to_path_buf(),
