@@ -13,6 +13,7 @@ pub mod plan;
 pub mod runtime_checkpoint;
 pub mod session_diff;
 pub mod skills_support;
+pub mod text_bounds;
 
 pub mod trace_support {
     pub use trace::{

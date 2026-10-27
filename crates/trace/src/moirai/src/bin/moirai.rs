@@ -312,15 +312,6 @@ fn format_time_range(start: i64, end: Option<i64>) -> String {
     }
 }
 
-fn truncate_json(json: &serde_json::Value, max_len: usize) -> String {
-    let s = json.to_string();
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len - 3])
-    } else {
-        s
-    }
-}
-
 fn print_log(spans: &[Span]) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{:<18} {:<10} {:<30} {:<40}",
@@ -332,7 +323,7 @@ fn print_log(spans: &[Span]) -> Result<(), Box<dyn std::error::Error>> {
         let span_id_short = &span.span_id[..std::cmp::min(8, span.span_id.len())];
         let span_type = &span.span_type;
         let timing = format_time_range(span.start_time, span.end_time);
-        let extras = truncate_json(&span.extras, 40);
+        let extras = moirai::text::truncate_json_for_display(&span.extras, 40);
 
         println!(
             "{:<18} {:<10} {:<30} {:<40}",
@@ -578,7 +569,7 @@ fn print_span_markdown(span: &Span, depth: usize) {
     );
 
     if !span.extras.is_null() {
-        let extras_str = truncate_json(&span.extras, 80);
+        let extras_str = moirai::text::truncate_json_for_display(&span.extras, 80);
         println!("{}  *Extras*: {}", indent, extras_str);
     }
 }

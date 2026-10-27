@@ -11,6 +11,11 @@ use crate::channels::{
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
 
+/// Byte budget for the response-body preview embedded in error messages.
+/// Kept as a byte budget (not a char count) so error strings stay short no
+/// matter which script the API answers in.
+const ERROR_BODY_PREVIEW_BYTES: usize = 256;
+
 #[derive(Debug, Clone)]
 pub struct FeishuClient {
     config: FeishuConfig,
@@ -639,15 +644,27 @@ fn escape_lark_md(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Largest ERROR_BODY_PREVIEW_BYTES-byte prefix of a response body, for error
+/// messages.
+///
+/// The cut is clamped to a UTF-8 char boundary: Feishu error bodies routinely
+/// carry Chinese `msg` text, and slicing at a raw byte index lands inside a
+/// 3-byte character and panics. This used to be `&summary[..256]`.
 fn summarize_response_body(body: &str) -> String {
     let summary = body.trim().replace('\n', " ");
     if summary.is_empty() {
         return "empty response body".to_string();
     }
-    if summary.len() <= 256 {
+    if summary.len() <= ERROR_BODY_PREVIEW_BYTES {
         summary
     } else {
-        format!("{}...", &summary[..256])
+        format!(
+            "{}...",
+            xiaoo_shared::text_bounds::truncate_to_char_boundary(
+                &summary,
+                ERROR_BODY_PREVIEW_BYTES
+            )
+        )
     }
 }
 

@@ -34,6 +34,7 @@ pub mod context;
 pub mod error;
 pub mod span;
 pub mod storage;
+pub mod text;
 
 pub use context::{AgentContext, ContextConfig, SpawnResult};
 pub use error::MoiraiError;

@@ -186,6 +186,14 @@ fn line_char_bounds(s: &str, cursor: usize) -> (usize, usize) {
     (line_start, line_end)
 }
 
+/// Longest byte-wise common prefix of `strs`, clamped to a UTF-8 char
+/// boundary.
+///
+/// The byte-wise comparison is intentional (it is what bash does), but the
+/// resulting length can land inside a multi-byte character when command names
+/// are non-ASCII (e.g. `测一分享` / `测二分享` share `/测` plus one continuation
+/// byte) — slicing there used to panic. Equal bytes always imply equal chars
+/// up to the boundary, so clamping preserves the prefix semantics.
 fn longest_common_prefix(strs: &[&str]) -> String {
     if strs.is_empty() {
         return String::new();
@@ -202,7 +210,8 @@ fn longest_common_prefix(strs: &[&str]) -> String {
                 .count(),
         );
     }
-    strs[0][..len].to_string()
+    let boundary = xiaoo_shared::text_bounds::floor_char_boundary(strs[0], len);
+    strs[0][..boundary].to_string()
 }
 
 #[cfg(test)]

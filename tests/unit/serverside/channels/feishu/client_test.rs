@@ -1,4 +1,7 @@
-use super::{build_progress_card_content, parse_chat_info_payload, parse_member_list_payload};
+use super::{
+    build_progress_card_content, parse_chat_info_payload, parse_member_list_payload,
+    summarize_response_body,
+};
 use crate::channels::{ChannelProgressSection, ChannelProgressState, ChannelProgressUpdate};
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -72,4 +75,62 @@ fn parses_chat_info_payload() {
     assert_eq!(info.chat_type.as_deref(), Some("group"));
     assert_eq!(info.user_manager_ids, vec!["ou_mgr".to_string()]);
     assert_eq!(info.bot_manager_ids, vec!["cli_bot".to_string()]);
+}
+
+#[test]
+fn summarizes_long_ascii_body_within_budget() {
+    let body = format!("{{\"code\":1,\"msg\":\"{}\"}}", "invalid param ".repeat(30));
+    assert!(body.len() > 256);
+    let summary = summarize_response_body(&body);
+    assert!(summary.ends_with("..."));
+    // 256-byte budget plus the three dots; unchanged from the pre-fix behavior.
+    assert_eq!(summary.len(), 259);
+}
+
+/// Regression: `&summary[..256]` panicked with
+/// `end byte index 256 is not a char boundary; it is inside '误'`.
+#[test]
+fn summarizes_long_chinese_body_without_panicking() {
+    let body = format!(
+        "{{\"code\":99991663,\"msg\":\"{}\"}}",
+        "请求参数错误".repeat(30)
+    );
+    assert!(body.len() > 256);
+
+    let summary = summarize_response_body(&body);
+    assert!(summary.ends_with("..."));
+    assert!(summary.len() <= 259);
+    assert!(summary.len() < body.len());
+    // The preview must be a real prefix of the body, not a byte-mangled slice.
+    let preview = summary.trim_end_matches("...");
+    assert!(body.starts_with(preview));
+    assert_eq!(
+        preview,
+        xiaoo_shared::text_bounds::truncate_to_char_boundary(&body, 256)
+    );
+}
+
+#[test]
+fn multibyte_bodies_never_panic_at_any_cut_point() {
+    // Walk the message length so the 256-byte cut sweeps every char offset.
+    for padding in 0..40 {
+        let body = format!(
+            "{{\"code\":1,\"msg\":\"{}{}\"}}",
+            "请求参数错误".repeat(30),
+            "补".repeat(padding)
+        );
+        let summary = summarize_response_body(&body);
+        assert!(
+            summary.ends_with("..."),
+            "padding {padding} should truncate"
+        );
+        assert!(summary.len() <= 259, "padding {padding}: {}", summary.len());
+        assert!(body.starts_with(summary.trim_end_matches("...")));
+    }
+}
+
+#[test]
+fn short_and_empty_bodies_keep_the_existing_messages() {
+    assert_eq!(summarize_response_body("  "), "empty response body");
+    assert_eq!(summarize_response_body("{\"code\":0}\n"), "{\"code\":0}");
 }

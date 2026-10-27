@@ -114,3 +114,61 @@ fn summaries_external() {
         Some("Start an agent project".to_string())
     );
 }
+
+fn chinese_external(name: &str) -> ExternalCommand {
+    ExternalCommand {
+        name: name.to_string(),
+        description: String::new(),
+        body: String::new(),
+    }
+}
+
+/// Regression: 一 (E4 B8 80) 与 二 (E4 BA 8C) 共享首字节，逐字节求公共前缀会停在
+/// 字符中间（`end byte index 5 is not a char boundary` -> panic）。
+#[test]
+fn longest_common_prefix_stops_on_a_char_boundary() {
+    assert_eq!(longest_common_prefix(&["/测一分享", "/测二分享"]), "/测");
+    assert_eq!(
+        longest_common_prefix(&["/测试甲分享", "/测试乙分享"]),
+        "/测试"
+    );
+    assert_eq!(longest_common_prefix(&["😀a", "😀b"]), "😀");
+    assert_eq!(longest_common_prefix(&["中文", "中英"]), "中");
+}
+
+#[test]
+fn longest_common_prefix_keeps_ascii_semantics() {
+    assert_eq!(longest_common_prefix(&["abc", "abd"]), "ab");
+    assert_eq!(longest_common_prefix(&["abc", "abcd"]), "abc");
+    assert_eq!(longest_common_prefix(&["abc", "xyz"]), "");
+    assert_eq!(longest_common_prefix(&["solo"]), "solo");
+    assert_eq!(longest_common_prefix(&[]), "");
+}
+
+/// Regression: 输入 `/测` 后按 Tab，两个非 ASCII 命令名的补全曾直接 panic。
+#[test]
+fn tab_completion_with_chinese_command_names_does_not_panic() {
+    let external = vec![chinese_external("测一分享"), chinese_external("测二分享")];
+    let mut input = Input::default()
+        .with_value("/测".to_string())
+        .with_cursor(2);
+
+    // 公共前缀与已输入内容相同，因此不产生改动——关键是绝不能 panic。
+    let changed = apply_slash_tab(&mut input, &external);
+    assert!(!changed);
+    assert_eq!(input.value(), "/测");
+}
+
+#[test]
+fn tab_completion_still_expands_a_chinese_prefix() {
+    let external = vec![
+        chinese_external("测试甲分享"),
+        chinese_external("测试乙分享"),
+    ];
+    let mut input = Input::default()
+        .with_value("/测".to_string())
+        .with_cursor(2);
+
+    assert!(apply_slash_tab(&mut input, &external));
+    assert_eq!(input.value(), "/测试");
+}
