@@ -76,9 +76,9 @@ def do_install(script_dir: str):
     # 检查 cerberus 是否已安装
     if not check_cerberus_installed():
         print("错误: cerberus 未安装")
-        print("请先安装 cerberus:")
-        print("  cargo install --path crates/cerberus/cerberus-cli")
-        print("或参考 README.md 中的安装说明")
+        print("请先按外部 Cerberus 项目的说明安装兼容的 CLI")
+        print("确保 cerberus 在 PATH 中或位于 ~/.cargo/bin/cerberus")
+        print("详情参考 README.md 中的安装说明")
         sys.exit(1)
 
     print("cerberus 已安装")

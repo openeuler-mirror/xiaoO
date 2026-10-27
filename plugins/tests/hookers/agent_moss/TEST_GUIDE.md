@@ -193,26 +193,16 @@ bash repro_hang.sh
 
 ### 2.5 Cerberus 测试（需要额外安装）
 
-Cerberus 使用 Landlock LSM 做内核级保护，需要先安装：
+Cerberus 使用 Landlock LSM 做内核级保护。先按外部 Cerberus 项目的说明安装兼容的 CLI；本仓库仅保留插件及集成测试，不再提供 Cerberus 源码构建入口。
 
 ```bash
-# 1. 安装 Rust nightly + bpf-linker
-rustup install nightly
-rustup component add rust-src --toolchain nightly
-cargo install bpf-linker
+# 1. 验证外部 CLI 已安装
+cerberus --version
 
-# 2. 取消注释 Cargo.toml 中的 cerberus crates
-sed -i 's|# "crates/cerberus/cerberus-core",|"crates/cerberus/cerberus-core",|' Cargo.toml
-sed -i 's|# "crates/cerberus/cerberus-cli",|"crates/cerberus/cerberus-cli",|' Cargo.toml
-sed -i 's|# "crates/cerberus/cerberus-core/bpf",|"crates/cerberus/cerberus-core/bpf",|' Cargo.toml
+# 2. 安装 hooker 插件（从仓库根目录运行）
+(cd plugins/hookers/cerberus_bash_control && python3 config.py install)
 
-# 3. 编译安装
-cargo install --path crates/cerberus/cerberus-cli --features cerberus-core/ebpf
-
-# 4. 安装 hooker 插件
-cd plugins/hookers/cerberus_bash_control && python3 config.py install
-
-# 5. 无 root 时禁用 eBPF 网络策略
+# 3. 无 root 时禁用 eBPF 网络策略
 sed -i 's/^enabled = true/enabled = false/' plugins/hookers/cerberus_bash_control/policy.toml
 ```
 

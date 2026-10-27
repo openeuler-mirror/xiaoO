@@ -9,17 +9,13 @@
 
 ## 前提条件
 
-**必须先安装 Cerberus CLI**：
+**必须先从外部项目安装兼容的 Cerberus CLI**。本仓库保留 hooker 插件，不再包含 Cerberus 核心库和 CLI 源码；安装方式请遵循所使用的 Cerberus 发行版说明。启用 eBPF 网络策略时，外部 CLI 还需支持相应功能。
+
+确保 `cerberus` 在 PATH 中，或位于 `~/.cargo/bin/cerberus`，并在生成的 `plugin.json` 中将 `cerberus_path` 配置为实际可执行文件路径。可用以下命令验证安装：
 
 ```bash
-# 安装（需要 eBPF toolchain）
-cargo install --path crates/cerberus/cerberus-cli
-
-# 或不带 eBPF 支持
-cargo install --path crates/cerberus/cerberus-cli --no-default-features -p cerberus-core
+/path/to/cerberus --version
 ```
-
-确保 `cerberus` 在 PATH 中，或位于 `~/.cargo/bin/cerberus`。
 
 ## 安装
 
@@ -76,7 +72,7 @@ whitelist = ["PATH", "LANG", "HOME", "TERM"]
 
 顶层字段为 `landlock_optional` / `mount_isolation_fallback`；路径访问由 `[path_groups]` 预定义开关 + `[[custom_paths]]`（`path` / `permission`，取值 `readonly` / `readwrite` / `readexecute` / `readwriteexecute`）表达；细粒度网络管控用 `[network_policy]`（需要 eBPF backend，默认构建下启用会 fail-closed）。
 
-完整 schema 与内置 profile 说明参考 `crates/cerberus/docs/configuration.md`，完整示例参考本目录的 `policy.toml`。
+完整 schema 与内置 profile 说明请参考所安装 Cerberus 版本的文档；本目录的 `policy.toml` 为插件策略示例，需与外部 CLI 版本兼容。
 
 ### hooker default 模式
 

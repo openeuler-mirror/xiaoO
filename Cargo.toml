@@ -23,10 +23,6 @@ members = [
     "crates/mcp",
     "crates/xiaoo-api",
     "crates/protocol",
-    # Cerberus - secure execution (optional, requires eBPF toolchain)
-    # "crates/cerberus/cerberus-core",
-    # "crates/cerberus/cerberus-cli",
-    # "crates/cerberus/cerberus-core/bpf",
 ]
 resolver = "2"
 
@@ -76,8 +72,6 @@ rand = "0.8"
 hex = "0.4"
 url = "2.5"
 unicode-width = "0.1.14"
-# Cerberus dependencies (disabled by default)
-# cerberus-core = { path = "crates/cerberus/cerberus-core" }
 
 [profile.release]
 opt-level = 3
