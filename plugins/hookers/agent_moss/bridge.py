@@ -319,7 +319,19 @@ def _normalize_history_item(h: dict) -> dict:
     if raw_detail == "":
         raw_detail = h.get("input", "")
     action_detail = _extract_action_detail(tool_name, raw_detail)
-    return {"action_type": tool_name, "action_detail": action_detail}
+    item = {"action_type": tool_name, "action_detail": action_detail}
+    # 工具返回内容：ask_user_question 的 output 是用户回答，AgentMoss 的授权类
+    # 规则（改密码 / 删用户）靠它判断"用户是否已确认"。不传就会被判成未授权。
+    output = h.get("output", h.get("result", ""))
+    if output == "" or output is None:
+        output = h.get("tool_result", "")
+    if isinstance(output, (dict, list)):
+        try:
+            output = json.dumps(output, ensure_ascii=False)
+        except (TypeError, ValueError):
+            output = str(output)
+    item["output"] = str(output or "")
+    return item
 
 
 def _handle_hook_payload(data: dict) -> int:
