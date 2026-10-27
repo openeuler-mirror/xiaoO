@@ -335,13 +335,14 @@ impl LocalExec {
             self._state.policy.check_exec_cwd(cwd.as_path())?;
             self._state.ensure_directory(cwd.as_path())?;
             Some(cwd)
-        } else if self._state.policy.requires_exec_cwd() {
+        } else {
+            // Fall back to the workspace root when no cwd is supplied: otherwise the
+            // child inherits the host process (TUI / daemon) startup directory, which
+            // disagrees with the "current directory" the file tools use (#165).
             let cwd = self._state.workspace_root_host.clone();
             self._state.policy.check_exec_cwd(cwd.as_path())?;
             self._state.ensure_directory(cwd.as_path())?;
             Some(cwd)
-        } else {
-            None
         };
         let mut command = command_from_spec(
             request,

@@ -370,13 +370,6 @@ impl LocalBackendPolicy {
         }
     }
 
-    pub(crate) fn requires_exec_cwd(&self) -> bool {
-        matches!(
-            self.isolation,
-            LocalIsolationConfig::LinuxBubblewrap(_) | LocalIsolationConfig::LinuxDynsandbox(_)
-        )
-    }
-
     pub(crate) fn grant(
         &self,
         request: SandboxPermissionGrantRequest,
