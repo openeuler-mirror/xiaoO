@@ -9,8 +9,7 @@
 | `unit/` | 单元测试，按 crate 镜像 src 结构 | 源文件尾部一行 `#[cfg(test)] #[path = "…"] mod …;` 声明 |
 | `system/` | 系统测试（Cargo 集成测试） | crate 内 `[[test]]` 显式 `path` 指向包外路径 |
 
-`plugins/` 目录（含 `plugins/tests/`）不参与本约定，维持原位不动；
-`cerberus/` 未入 workspace 暂缓处理，加入后按本约定同步整改。
+`plugins/` 目录（含 `plugins/tests/`）不参与本约定，维持原位不动。
 
 ## 命名规则
 

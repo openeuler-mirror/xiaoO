@@ -2,7 +2,11 @@
 
 ## Cerberus Plugin (Optional)
 
-Cerberus provides secure command execution with policy-based sandboxing. The Cerberus crates live in the repository but are **commented out** of the workspace (root `Cargo.toml`): they are not workspace members and are not built by default, so `cargo build`/`cargo install` on the workspace never compiles them. Building them requires the eBPF toolchain (Linux only), and since they sit outside the workspace and have no `[workspace]` of their own, you must first make them workspace members (uncomment the entries in the root `Cargo.toml`) or add a `[workspace]` table under `crates/cerberus/`. See `crates/cerberus/README.md` for details.
+The optional `plugins/hookers/cerberus_bash_control/` plugin wraps Bash commands
+with an external `cerberus` executable. Cerberus core and CLI source code are
+maintained outside this repository and are not built by the xiaoO workspace.
+Install a compatible Cerberus CLI separately before enabling the plugin; see
+[the plugin README](../plugins/hookers/cerberus_bash_control/README.md) for setup.
 
 ## Plugins
 

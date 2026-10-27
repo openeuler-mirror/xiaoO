@@ -48,14 +48,11 @@ The workspace declares 23 members (`Cargo.toml`). The workspace version is `0.1.
 | SDK and wire | `crates/xiaoo-api`, `crates/protocol` |
 | Applications | `apps/shared`, `apps/endside`, `apps/serverside`, `apps/vault` |
 
-### Cerberus is out of the workspace
+### External Cerberus integration
 
-The Cerberus crates are **commented out** of the workspace
-(`Cargo.toml`), together with their path dependencies (`Cargo.toml`). They
-require an eBPF toolchain and are not built by default. A consequence worth knowing
-before following `crates/cerberus/README.md`: because the crates are outside the
-workspace and have no `[workspace]` of their own, `cargo install --path
-crates/cerberus/cerberus-cli` cannot resolve a workspace root.
+Cerberus core and CLI source code are maintained outside this repository.
+The `plugins/hookers/cerberus_bash_control/` plugin invokes a separately installed
+`cerberus` executable; it is not a Rust workspace dependency.
 
 ## 3. Runtime Layering
 

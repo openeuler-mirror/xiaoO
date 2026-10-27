@@ -29,8 +29,8 @@
 #
 # 设计取舍：只做"存在性 + 覆盖率"静态判定，不解析 Dockerfile 语义（stage
 # 依赖、RUN 顺序等）；JSON 数组形态的 COPY 本仓不使用，出现即报无法解析，
-# 促使改回空格分隔形态。反向覆盖（COPY 了非 workspace 成员的 manifest，
-# 如为重新启用 cerberus 预留）不算违规，避免误报。
+# 促使改回空格分隔形态。反向覆盖（COPY 了非 workspace 成员的 manifest）
+# 不算违规，避免误报。
 
 set -euo pipefail
 
@@ -103,7 +103,7 @@ for entry in ${copy_srcs[@]+"${copy_srcs[@]}"}; do
 done
 
 # ---- [MEMBER] workspace 成员全覆盖 ------------------------------------------
-# members 块内先剥注释再取引号串，天然跳过注释掉的成员（如 cerberus 三件套）。
+# members 块内先剥注释再取引号串，天然跳过注释掉的成员。
 members_block="$(sed -n '/^[[:space:]]*members[[:space:]]*=/,/]/p' "$MANIFEST")"
 if [ -z "$members_block" ]; then
     fail "[MEMBER]: $MANIFEST 中未找到 [workspace] members 数组"

@@ -21,8 +21,6 @@
 #   - SRC-TEST / SRC-CFG / SRC-PATH：各 member 的 src/；
 #   - TEST-NAME：各 member 的 tests/（存在时）+ 仓库根 tests/。
 # plugins/ 不是 workspace member，天然不在扫描范围（不参与本约定，零改动）。
-# cerberus/ 未入 workspace，同样天然不被扫描；未来加入 workspace 即自动纳入覆盖，
-# 无需改本脚本（也不硬编码排除它）。
 #
 # test 门控判定：cfg 属性谓词中出现裸词 test——覆盖 cfg(test) / cfg(all(test, …)) /
 # cfg(any(…, test)) / cfg(not(test)) 等一切变体，不写死 `#[cfg(test)]` 字面量；
