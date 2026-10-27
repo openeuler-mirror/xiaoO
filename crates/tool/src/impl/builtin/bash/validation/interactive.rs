@@ -23,9 +23,7 @@ struct InteractiveCommandRule {
     needs_hostkey_check: Option<fn(&str) -> bool>,
 }
 
-// Lazy-static regex patterns for better performance
 lazy_static! {
-    // SSH patterns
     static ref SSH_PATTERN: Regex = Regex::new(r"^ssh\b").unwrap();
     static ref SCP_PATTERN: Regex = Regex::new(r"^scp\b").unwrap();
     static ref RSYNC_SSH_PATTERN: Regex = Regex::new(r"^rsync\b.*ssh").unwrap();
@@ -37,34 +35,28 @@ lazy_static! {
     static ref SSH_STRICT_HOSTKEY_ACCEPT_NEW: Regex =
         Regex::new(r"-o\s+StrictHostKeyChecking=accept-new").unwrap();
 
-    // Sudo patterns
     static ref SUDO_PATTERN: Regex = Regex::new(r"^sudo\b").unwrap();
     static ref SUDO_NO_PASSWORD: Regex = Regex::new(r"\s+-n\b").unwrap();
 
-    // Passwd patterns
     static ref PASSWD_PATTERN: Regex = Regex::new(r"^passwd\b").unwrap();
     static ref CHPASSWD_PATTERN: Regex = Regex::new(r"^chpasswd\b").unwrap();
 
-    // Su patterns
     static ref SU_PATTERN: Regex = Regex::new(r"^su\b").unwrap();
     static ref SU_NO_INTERACTIVE: Regex = Regex::new(r"\s+-\s+").unwrap();
 
-    // MySQL patterns
     static ref MYSQL_PATTERN: Regex = Regex::new(r"^mysql\b").unwrap();
     static ref MYSQLDUMP_PATTERN: Regex = Regex::new(r"^mysqldump\b").unwrap();
     static ref MYSQL_PASSWORD_PARAM: Regex = Regex::new(r"\s+-p\b").unwrap();
     static ref MYSQL_PASSWORD_VALUE: Regex = Regex::new(r"-p\s*['\w]").unwrap();
 
-    // GPG patterns
     static ref GPG_PATTERN: Regex = Regex::new(r"^gpg\b").unwrap();
     static ref GPG_NEEDS_PASSPHRASE: Regex = Regex::new(r"--decrypt|--sign|--clearsign").unwrap();
     static ref GPG_BATCH_MODE: Regex = Regex::new(r"--batch").unwrap();
 
-    // Predefined interactive command rules (Phase 1 + Phase 2). Held in a lazy_static
+    // Predefined interactive command rules. Held in a lazy_static
     // so the rule table can carry pre-compiled `&'static Regex` references — this avoids
     // recompiling regexes on every `detect_interactive_command` call.
     static ref INTERACTIVE_COMMAND_RULES: Vec<InteractiveCommandRule> = vec![
-        // Phase 1: SSH, sudo, passwd
         InteractiveCommandRule {
             command_type: "ssh",
             patterns: vec![&*SSH_PATTERN, &*SCP_PATTERN, &*RSYNC_SSH_PATTERN],
@@ -83,7 +75,6 @@ lazy_static! {
             needs_password_check: passwd_needs_password,
             needs_hostkey_check: None,
         },
-        // Phase 2: su, mysql, gpg
         InteractiveCommandRule {
             command_type: "su",
             patterns: vec![&*SU_PATTERN],
@@ -134,43 +125,34 @@ fn ssh_needs_hostkey(command: &str) -> bool {
         && !SSH_BATCH_MODE.is_match(command)
 }
 
-/// Check if sudo command needs password
 fn sudo_needs_password(command: &str) -> bool {
     !SUDO_NO_PASSWORD.is_match(command)
 }
 
-/// Check if passwd command needs password (always true)
 fn passwd_needs_password(_command: &str) -> bool {
     true
 }
 
-/// Check if su command needs password
 fn su_needs_password(command: &str) -> bool {
     !SU_NO_INTERACTIVE.is_match(command)
 }
 
-/// Check if mysql command needs password
 fn mysql_needs_password(command: &str) -> bool {
     MYSQL_PASSWORD_PARAM.is_match(command) && !MYSQL_PASSWORD_VALUE.is_match(command)
 }
 
-/// Check if gpg command needs passphrase
 fn gpg_needs_password(command: &str) -> bool {
     GPG_NEEDS_PASSPHRASE.is_match(command) && !GPG_BATCH_MODE.is_match(command)
 }
 
-/// Detect if command is interactive
 fn detect_interactive_command(command: &str) -> Option<(String, bool, bool)> {
     let command_trimmed = command.trim();
 
     for rule in INTERACTIVE_COMMAND_RULES.iter() {
-        // Check command patterns (pre-compiled regexes — no per-call compilation)
         for pattern in &rule.patterns {
             if pattern.is_match(command_trimmed) {
-                // Check if password is needed
                 let needs_password = (rule.needs_password_check)(command_trimmed);
 
-                // Check if hostkey confirmation is needed
                 let needs_hostkey = if let Some(check_fn) = rule.needs_hostkey_check {
                     check_fn(command_trimmed)
                 } else {

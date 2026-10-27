@@ -117,7 +117,8 @@ pub fn load_cron_snapshot(
     let config_content = fs::read_to_string(config_path)
         .map_err(|e| anyhow::anyhow!("failed to read config.toml: {e}"))?;
 
-    // Parse the [cron] section minimally
+    // A missing or broken cron config must not block the TUI: the whole
+    // chain is .ok()-tolerant and falls back to the default dir and timeout.
     let cron_section: Option<CronSectionRaw> = toml::from_str(&config_content)
         .ok()
         .and_then(|v: toml::Value| v.get("cron").cloned())

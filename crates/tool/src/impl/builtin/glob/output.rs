@@ -1,10 +1,5 @@
-//! Output type for GlobTool.
-//!
-//! Matches the TypeScript outputSchema:
-//! - durationMs: Time taken to execute in milliseconds
-//! - numFiles: Total number of files found
-//! - filenames: Array of matching file paths
-//! - truncated: Whether results were limited
+//! Output type for GlobTool. Matches the TypeScript outputSchema
+//! (camelCase serialization).
 
 use serde::{Deserialize, Serialize};
 

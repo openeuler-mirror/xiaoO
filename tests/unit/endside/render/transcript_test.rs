@@ -661,11 +661,12 @@ fn time_bench_paths(
 /// must satisfy the flat-index invariants (`assert_cache_invariants`).
 ///
 /// This is the unit-testable correctness property of the incremental
-/// path. It replaces wall-clock assertions: µs-scale `Instant`
-/// measurements are inherently unreliable under parallel test load (a
-/// single preemption in one measurement window but not the other can
-/// invert any `incr < full` comparison), so timing is printed for humans
-/// and never asserted.
+/// path — the only reliable one, because µs-scale `Instant` measurements
+/// are inherently unreliable under parallel test load (a single
+/// preemption in one measurement window but not the other can invert
+/// any `incr < full` comparison). Timing is printed for humans and
+/// never asserted; every other test in this file relies on this rule
+/// rather than restating it.
 fn assert_incremental_equivalent_to_full(
     all_dirty: &[Option<CachedMessageRender>],
     partial: &[Option<CachedMessageRender>],
@@ -900,11 +901,10 @@ fn long_content(lines_per_message: usize) -> Vec<Line<'static>> {
 ///  - output-equivalence: the incremental rebuild is structurally
 ///    identical to a full rebuild of the same messages.
 ///
-/// No wall-clock assertion is made: µs-scale `Instant` measurements are
-/// inherently flaky under parallel test load (a scheduler preemption or
-/// CPU-frequency step in one measurement window but not the other
-/// inverts any `incr < full` comparison — the original timing assert
-/// failed 11/12 runs under 12-way parallel `cargo test` load).
+/// No wall-clock assertion is made — see
+/// `assert_incremental_equivalent_to_full` for why. (Empirical anchor:
+/// the original timing assert failed 11/12 runs under 12-way parallel
+/// `cargo test` load.)
 #[test]
 fn build_transcript_cache_bench() {
     // Bench fixture: 50 messages × 5 logical lines, wrapped at width 80.
@@ -1001,11 +1001,8 @@ fn build_transcript_cache_bench() {
     // messages — the deterministic correctness property of the move path
     // (the pointer-identity checks above already prove the move itself).
     //
-    // The µs timings printed above are informational ONLY. No wall-clock
-    // assertion is made here: µs-scale `Instant` measurements are
-    // inherently flaky under parallel test load (a scheduler preemption
-    // or CPU-frequency step in one measurement window but not the other
-    // inverts any `incr < full` comparison).
+    // The µs timings printed above are informational ONLY — no
+    // wall-clock assertions; see `assert_incremental_equivalent_to_full`.
     assert_incremental_equivalent_to_full(&renders_all_dirty, &renders_incremental, "bench");
 }
 
@@ -1028,11 +1025,9 @@ fn build_transcript_cache_bench() {
 ///  4. Content shape (short / long) at 50 messages, 1 dirty — short
 ///     content skips wrapping, isolating per-logical-line overhead.
 ///
-/// This test deliberately contains NO timing. µs-scale wall-clock
-/// assertions flake under parallel test load (the original timing-based
-/// `build_transcript_cache_scalability` failed 11/12 runs under 12-way
-/// parallel `cargo test`); timings for humans live in
-/// `build_transcript_cache_bench`.
+/// This test deliberately contains NO timing — see
+/// `assert_incremental_equivalent_to_full` for the rule; timings for
+/// humans live in `build_transcript_cache_bench`.
 #[test]
 fn build_transcript_cache_incremental_matches_full_matrix() {
     let default_messages = 50usize;

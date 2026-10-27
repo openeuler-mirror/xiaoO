@@ -2,16 +2,15 @@
 //!
 //! 目前有两件事，都是"谁都不该自己再写一遍"的东西：
 //!
-//! 1. `NODE_TLS_REJECT_UNAUTHORIZED=0` 这个"自签名网关"开关的判据。它被 chat
-//!    provider（`providers/*`）、模型目录客户端（`models/*`）以及 `memory` 的
-//!    OpenAI 兼容 embedding 客户端共用，所以放在这里并对外公开——而不是让
-//!    providers 反向依赖 `models`，或让各 crate 各写一份判据。
-//! 2. [`client_build_failed`]：`reqwest::Client::builder()` 构造失败时的统一出口
-//!    （记日志，再带着原因 panic）。
+//! 1. [`tls_verification_disabled`]：`NODE_TLS_REJECT_UNAUTHORIZED=0` 这个
+//!    "自签名网关"开关的判据。它被 chat provider（`providers/*`）、模型目录
+//!    客户端（`models/*`）以及 `memory` 的 OpenAI 兼容 embedding 客户端共用，
+//!    所以放在这里并对外公开——而不是让 providers 反向依赖 `models`，或让各
+//!    crate 各写一份判据。
+//! 2. [`client_build_failed`]：`reqwest::Client::builder()` 构造失败时的统一出口。
 
 /// 是否跳过 TLS 证书校验：仅当 `NODE_TLS_REJECT_UNAUTHORIZED` 被显式设为 `0`
-/// （自签名证书网关的常见做法）。chat provider、模型目录客户端与 embedding
-/// 客户端共用这一个判据。
+/// （自签名证书网关的常见做法）。
 pub fn tls_verification_disabled() -> bool {
     tls_verification_disabled_from(
         std::env::var("NODE_TLS_REJECT_UNAUTHORIZED")
@@ -39,8 +38,8 @@ pub(crate) fn tls_verification_disabled_from(value: Option<&str>) -> bool {
 /// 的 handler：`!` 不会在泛型位置做 Never 强转，`-> !` 会被 `unwrap_or_else` 拒绝。
 /// 函数体永远 panic，不返回。
 pub fn client_build_failed(error: reqwest::Error) -> reqwest::Client {
-    // `Display` 对 builder error 只印 "builder error"（reqwest `error.rs:227-272`），
-    // 原因在 `source` 里，只有 `Debug` 带得出来。
+    // `Display` 对 builder error 只印 "builder error"（reqwest 0.12.28
+    // `error.rs:227-272`），原因在 `source` 里，只有 `Debug` 带得出来。
     tracing::error!(?error, "failed to build an HTTP client");
     panic!("failed to build an HTTP client: {error:?}")
 }

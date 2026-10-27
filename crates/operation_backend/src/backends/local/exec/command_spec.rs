@@ -70,7 +70,8 @@ fn inner_program_args(
 ) -> (String, Vec<String>) {
     if let Some(profile) = policy.seatbelt_profile() {
         // The seatbelt profile text is a runtime value; embed it through the
-        // launcher argv (same shape the previous early-return produced).
+        // launcher argv so `sandbox-exec -p <profile-text> <program> …` gets
+        // it verbatim without any shell quoting.
         let mut args = vec!["-p".to_string(), profile.to_profile_text()];
         args.push(spec.program.clone());
         args.extend(spec.args.iter().cloned());

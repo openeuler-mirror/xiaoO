@@ -184,13 +184,11 @@ def main() -> int:
     transformed_output = dict(bash_output)
     transformed_output["stdout"] = "\n".join(
         [
-            # stdout_value,
             notice,
         ]
     )
     transformed_output["stderr"] = "\n".join(
         [
-            # stderr_value,
             notice,
         ]
     )

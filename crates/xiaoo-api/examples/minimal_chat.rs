@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         .llm_provider(provider)
         .system_prompt("You are a concise coding assistant.")
         .token_budget_config(budget)
-        .build()?; // 其余 6 项全走缺省
+        .build()?; // everything else optional stays defaulted
 
     let mut state = runtime.new_state("example-conversation");
     let result = runtime

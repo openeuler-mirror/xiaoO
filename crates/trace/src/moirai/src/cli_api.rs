@@ -43,7 +43,6 @@ pub async fn get_trace(
     State(state): State<AppState>,
     Path(trace_id): Path<String>,
 ) -> Result<Json<Vec<Span>>, AppError> {
-    // Try to resolve prefix to full trace_id
     let resolved_id = state
         .storage
         .get_trace_by_prefix(&trace_id)
@@ -90,7 +89,6 @@ pub async fn delete_trace(
     Ok(Json(DeleteResponse { deleted_count }))
 }
 
-// Error handling
 pub enum AppError {
     Storage(moirai::MoiraiError),
     NotFound(String),

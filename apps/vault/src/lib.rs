@@ -5,9 +5,7 @@
 //! - InstanceKey: per-instance random master key (software default)
 //! - WhiteBox: legacy v1 derivation, decrypt-only for migration
 //! - SDF: national crypto interface (incl. TEE key providers)
-//! - HSM: hardware security module interface
 
-pub mod hsm;
 pub mod instance_key;
 pub mod key_provider;
 pub mod key_provider_error;
@@ -20,7 +18,6 @@ pub use key_provider::{KeyMaterial, KeyProvider};
 pub use key_provider_error::KeyProviderError;
 
 // Re-export providers
-pub use hsm::HsmKeyProvider;
 pub use instance_key::{store_key_tag, InstanceKeyProvider};
 pub use sdf::{
     decrypt_secret, encrypt_secret, init_sdf_provider, SdfKeyProvider, TeeKeyProvider, TeeType,

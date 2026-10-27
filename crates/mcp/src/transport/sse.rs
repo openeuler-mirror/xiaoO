@@ -81,8 +81,8 @@ impl SseTransport {
                             // SSE events are separated by a blank line (`\n\n`
                             // after CRLF normalization). We operate on raw bytes
                             // because a chunk may end mid-codepoint, in which
-                            // case `from_utf8` fails and the old code silently
-                            // dropped the entire chunk. Instead, find the
+                            // case `from_utf8` fails and a whole-chunk decode
+                            // would silently drop the chunk. Instead, find the
                             // longest valid UTF-8 prefix and only process that;
                             // the remaining bytes (incomplete sequence) stay in
                             // the buffer until the next chunk completes them.

@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """xiaoO plugin-hook bridge → AgentMoss HTTP service.
 
-替代 xiaoO/plugins/hookers/audit_agent/audit.py 的桥接脚本（audit_agent 是
-AgentMoss 的前身，已迁出为独立常驻服务）。
-
-契约（与 audit.py 完全对齐，便于无感替换）：
+契约：
   - xiaoO 在 tool-pre hook 触发时，经 stdin 发送 JSON payload
   - 本脚本：
       1. 活性检查：探 AgentMoss /api/v1/health，确认服务常驻可达
          （不可达时 fail-closed Deny，并给清晰错误引导，避免"服务挂了静默放行"）
       2. 解析 payload，提取 tool_name/tool_input → action_type/action_detail
-         （提取规则与 audit.py 一致：bash→command，file_*→file_path，skill→skill 名）
+         （提取规则：bash→command，file_*→file_path，skill→skill 名）
       3. POST 到 AgentMoss 的 /api/v1/analyze（127.0.0.1:9090）
       4. 将 AnalyzeResponse 映射为 PreHookResult JSON：
            {"result": "allow", "reason": "..."}
@@ -18,9 +15,8 @@ AgentMoss 的前身，已迁出为独立常驻服务）。
       5. stdout 输出 PreHookResult JSON（正常路径退出码 0；空 stdin / JSON
          解析失败时退出码 2）
 
-  - AgentMoss 作为常驻 HTTP 服务（systemd unit / pip 装后自启），比每次
-    spawn audit.py 子进程快得多（无 venv 启动/import 开销，无 ThreadPoolExecutor
-    卡死风险）。
+  - AgentMoss 作为常驻 HTTP 服务（systemd unit / pip 装后自启），避免每次
+    hook 都 spawn 子进程的开销（venv 启动/import、进程池管理）。
 
 活性检查设计（需求：用户装好 agent_moss 插件后要能看服务是否开/源码是否在）：
   - 启动时先 GET http://{HOST}:{PORT}/api/v1/health（超时 2s）
@@ -35,8 +31,8 @@ AgentMoss 的前身，已迁出为独立常驻服务）。
   AGENT_MOSS_HOST  AgentMoss 监听地址（默认 127.0.0.1）
   AGENT_MOSS_PORT  AgentMoss 监听端口（默认 9090）
   AGENT_MOSS_LOG_PATH  桥接全量 hook 日志路径（默认 空=不记）。每次 hook 调用
-                       记 HOOK_INPUT/HOOK_OUTPUT（含 tool_input、判定结果），
-                       对应 audit_agent 的 AUDIT_LOG_PATH。
+                       记 HOOK_INPUT/HOOK_OUTPUT（含 tool_input、判定结果）；
+                       一旦设置，hook 日志与 LLM prompt 都写同一文件。
   AGENT_MOSS_HOOK_TIMEOUT  HTTP 请求超时秒（默认 60）
   AGENT_MOSS_HEALTH_TIMEOUT  活性检查超时秒（默认 2）
   AGENT_MOSS_CHECK_SOURCE  =1 时额外检查源码可 import（默认 空=不查）
@@ -79,7 +75,8 @@ _CHECK_SOURCE = os.getenv("AGENT_MOSS_CHECK_SOURCE", "") == "1"
 _EXPECT_INSTANCE = os.getenv("AGENT_MOSS_INSTANCE", "xiaoo")
 
 # 探测端口范围（学 OpenDesk hook.ts GATE_PROBE_RANGE，6 个够用且快）。
-# AgentMoss 默认 9090，findFreePort 从 9090 往上找空闲，所以探测扫 9090-9095。
+# AgentMoss 默认 9090，findFreePort 从 9090 往上找空闲；具体探测端口以
+# _PROBE_PORTS 数组为单一事实源。
 _PROBE_PORTS = [9090, 9091, 9092, 9093, 9094, 9095]
 # 探测结果缓存：解析出的 service URL 缓存，仅首次 hook 调用有探测延迟。
 _cached_service_url: str | None = None
@@ -267,7 +264,7 @@ def _check_service_health() -> tuple[bool, str]:
 
 
 def _extract_action_detail(tool_name: str, tool_input) -> str:
-    """与 audit.py 一致的 action_detail 提取规则。
+    """action_detail 提取规则：取工具输入里最能代表意图的字段。
 
     bash → command 字段；file_write/edit/read → file_path；skill → skill 名；
     其他 → 整个 input 的 JSON。
@@ -369,7 +366,7 @@ def _handle_hook_payload(data: dict) -> int:
         # 拿不到 key（config 缺/key env 未设）则空 dict，服务端走全局配置。
         # llm_log_path 同理 per-request 注入：bridge 子进程有 AGENT_MOSS_LOG_PATH env
         # 但服务进程不一定有（可能别的终端起的），通过 metadata 传给服务端写 LLM_PROMPT，
-        # 跟 audit_agent "LOG_PATH 一设，hook 日志 + LLM prompt 都写同文件" 体验一致。
+        # 维持"LOG_PATH 一设，hook 日志 + LLM prompt 都写同文件"的行为契约。
         "metadata": {
             "llm_config": _load_xiaoo_llm_config(),
             "llm_log_path": _LOG_PATH,

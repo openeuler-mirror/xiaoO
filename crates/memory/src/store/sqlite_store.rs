@@ -119,7 +119,6 @@ impl SqliteDurableMemoryStore {
         let current_name = embedder.name();
         let current_dims = embedder.dimensions();
 
-        // Noop embedder (dims=0) — skip tracking entirely
         if current_dims == 0 {
             return Ok(());
         }
@@ -133,12 +132,8 @@ impl SqliteDurableMemoryStore {
             .ok();
 
         match stored {
-            Some((name, dims)) if name == current_name && dims == current_dims => {
-                // Model matches — nothing to do
-                Ok(())
-            }
+            Some((name, dims)) if name == current_name && dims == current_dims => Ok(()),
             Some((old_name, old_dims)) => {
-                // Model changed — invalidate all embeddings
                 tracing::warn!(
                     "embedding model changed: {}({}d) -> {}({}d), invalidating embeddings",
                     old_name,
@@ -164,7 +159,6 @@ impl SqliteDurableMemoryStore {
                 Ok(())
             }
             None => {
-                // First time — record model info
                 conn.execute(
                     "INSERT INTO embedding_meta (id, model_name, dimensions) VALUES (1, ?1, ?2)",
                     rusqlite::params![current_name, current_dims],
@@ -209,7 +203,6 @@ impl SqliteDurableMemoryStore {
         let conn = self.conn.clone();
         let hash_clone = hash.clone();
 
-        // Check cache
         let cached = tokio::task::spawn_blocking(move || {
             let conn = conn.lock();
             let mut stmt = conn
@@ -235,13 +228,11 @@ impl SqliteDurableMemoryStore {
             return Ok(Some(bytes_to_vec(&blob)));
         }
 
-        // Compute embedding
         let embedding = self.embedder.embed_one(text).await?;
         if embedding.is_empty() {
             return Ok(None);
         }
 
-        // Store in cache + LRU eviction
         let conn = self.conn.clone();
         let blob = vec_to_bytes(&embedding);
         let cache_max = self.cache_max;
@@ -252,7 +243,7 @@ impl SqliteDurableMemoryStore {
                  VALUES (?1, ?2, datetime('now'), datetime('now'))",
                 rusqlite::params![hash, blob],
             );
-            // LRU eviction
+            // Evict least-recently-used rows beyond the capacity.
             let _ = conn.execute(
                 "DELETE FROM embedding_cache WHERE content_hash IN (
                     SELECT content_hash FROM embedding_cache
@@ -522,7 +513,6 @@ impl DurableMemoryStore for SqliteDurableMemoryStore {
         &self,
         memories: &[DurableMemory],
     ) -> std::io::Result<Vec<DurableMemoryManifestEntry>> {
-        // Compute embeddings first (async)
         let mut memory_embeddings = Vec::new();
         for memory in memories {
             let embedding = self
@@ -632,7 +622,6 @@ impl SemanticMemoryStore for SqliteDurableMemoryStore {
     }
 
     async fn reindex(&self) -> MemoryResult<usize> {
-        // Step 1: Rebuild FTS5
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock();
@@ -646,7 +635,6 @@ impl SemanticMemoryStore for SqliteDurableMemoryStore {
             message: format!("reindex task failed: {e}"),
         })??;
 
-        // Step 2: Re-embed NULL embeddings
         let conn = self.conn.clone();
         let rows: Vec<(String, String)> = tokio::task::spawn_blocking(move || {
             let conn = conn.lock();

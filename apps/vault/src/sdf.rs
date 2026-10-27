@@ -1,15 +1,16 @@
-//! SDF 国密接口 + TEE 密钥提供者
+//! SDF national-crypto interface + TEE key providers.
 //!
-//! 包含:
-//! - SDF 国密加密/解密接口 (libsdf.so)
-//! - TEE 密钥提供者 (支持 Intel SGX, ARM TrustZone, AWS Nitro, SDF 等)
+//! Contains:
+//! - SDF encrypt/decrypt interface (libsdf.so)
+//! - TEE key providers (SDF is the only wired backend; the rest are
+//!   placeholders)
 
 use crate::key_provider::{KeyMaterial, KeyProvider, KeyProviderError};
 use async_trait::async_trait;
 use libloading::{Library, Symbol};
 
 // ============================================================================
-// TeeKeyProvider - TEE 密钥提供者
+// TeeKeyProvider — TEE key provider
 // ============================================================================
 
 #[derive(Clone, Debug)]
@@ -43,7 +44,11 @@ impl From<&str> for TeeType {
     }
 }
 
-/// TEE 密钥提供者
+/// TEE key provider.
+///
+/// Only the SDF type is usable (delegates to [`SdfKeyProvider`]); the other
+/// TEE backends are unwired and their `provide()` always returns
+/// `ProviderNotAvailable`.
 pub struct TeeKeyProvider {
     name: String,
     tee_type: TeeType,
@@ -153,10 +158,15 @@ impl TeeKeyProvider {
 }
 
 // ============================================================================
-// SdfKeyProvider - SDF 国密密钥提供者
+// SdfKeyProvider — SDF key provider
 // ============================================================================
 
-/// SDF 国密密钥提供者
+/// SDF key provider.
+///
+/// Note: the key material itself does not come from SDF hardware —
+/// `provide()` generates a software-random key in-process and caches it
+/// (OnceLock). The SDF device only takes part in the data encrypt/decrypt
+/// path of [`encrypt_secret`] / [`decrypt_secret`].
 pub struct SdfKeyProvider {
     name: String,
 }
@@ -216,23 +226,23 @@ impl KeyProvider for SdfKeyProvider {
 /// location can still pass their own path to [`init_sdf_provider`].
 pub const DEFAULT_SDF_LIBRARY_PATH: &str = "/usr/local/sdf/lib/libsdf.so";
 
-/// 初始化 SDF 国密提供者
 pub fn init_sdf_provider(path: &str) -> Result<(), KeyProviderError> {
     sdf_impl::load_library(path)
 }
 
-/// 使用 SDF 加密数据 (API key / token)
+/// Encrypt short secrets such as API keys / tokens; the envelope format is
+/// documented at `sdf_impl::sdf_encrypt` (version + key_length +
+/// key_buffer + ciphertext).
 pub fn encrypt_secret(data: &[u8]) -> Result<Vec<u8>, KeyProviderError> {
     sdf_impl::sdf_encrypt(data)
 }
 
-/// 使用 SDF 解密数据 (API key / token)
 pub fn decrypt_secret(encrypted: &[u8]) -> Result<Vec<u8>, KeyProviderError> {
     sdf_impl::sdf_decrypt(encrypted)
 }
 
 // ============================================================================
-// SDF 国密加密接口实现
+// SDF encrypt/decrypt implementation
 // ============================================================================
 
 pub mod sdf_impl {
@@ -240,7 +250,7 @@ pub mod sdf_impl {
     use std::os::raw::{c_int, c_void};
     use std::sync::OnceLock;
 
-    // SDF 函数签名声明
+    // SDF function signature declarations
     type SdfOpenDevice = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
     type SdfOpenSession = unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> c_int;
     type SdfCloseSession = unsafe extern "C" fn(*mut c_void) -> c_int;
@@ -279,34 +289,34 @@ pub mod sdf_impl {
         *mut u32,
     ) -> c_int;
 
-    // SDF 常量
-    const SDF_ALG_SMS4_ECB: u32 = 0x401; // SMS4 ECB 算法
+    // SDF constants
+    const SDF_ALG_SMS4_ECB: u32 = 0x401;
     const SDF_KEY_INDEX_KEK: u32 = 0x1;
     const SDF_KEK_INDEX: u32 = 1;
     const SDF_KEY_BITS_128: u32 = 128;
 
-    // 加密数据格式常量
-    const ENCRYPTED_VERSION_SIZE: usize = 1; // version 字段大小
-    const ENCRYPTED_KEY_LENGTH_SIZE: usize = 4; // key_length 字段大小
-    const ENCRYPTED_HEADER_SIZE: usize = ENCRYPTED_VERSION_SIZE + ENCRYPTED_KEY_LENGTH_SIZE; // 最小头大小 = 5
+    // Envelope format constants
+    const ENCRYPTED_VERSION_SIZE: usize = 1;
+    const ENCRYPTED_KEY_LENGTH_SIZE: usize = 4;
+    const ENCRYPTED_HEADER_SIZE: usize = ENCRYPTED_VERSION_SIZE + ENCRYPTED_KEY_LENGTH_SIZE;
 
-    // 明文格式常量
-    const PLAINTEXT_LENGTH_PREFIX_SIZE: usize = 4; // u32 长度前缀
-    const SMS4_BLOCK_SIZE: usize = 16; // SMS4 ECB 块大小
-    const SDF_CIPHER_TEXT_MAX_PADDING: usize = 32; // 解密输出缓冲区额外空间（PKCS7填充最大32字节）
+    // Plaintext format constants
+    const PLAINTEXT_LENGTH_PREFIX_SIZE: usize = 4;
+    const SMS4_BLOCK_SIZE: usize = 16;
+    // Decrypt output buffer headroom for PKCS7 padding (max 32 bytes).
+    const SDF_CIPHER_TEXT_MAX_PADDING: usize = 32;
 
-    // 默认密钥口令 (设为 NULL 请务必采取以下安全措施)
-    // 1. 通过安全的配置管理机制注入实际口令
-    // 2. 确保配置文件权限限制为仅管理员可读
-    // 3. 在使用完毕后从内存中清除敏感数据
-    // 4. 更新相关安全文档并记录密钥管理策略
-    // 注意: NULL 在 Rust 中用空切片表示,长度为0时传递给 C 即为 NULL 指针
+    // The KEK passphrase is NULL: an empty slice of length 0 becomes a NULL
+    // pointer in C. Deployments that need a real passphrase must inject it
+    // via secure config management, keep the config admin-only readable,
+    // scrub it from memory after use, and document the key-management
+    // policy.
     const DEFAULT_KEK_PASSWORD: &[u8] = &[];
 
-    // 库句柄
+    // Library handle
     static LIBRARY: OnceLock<Library> = OnceLock::new();
 
-    /// 加载 SDF 动态库
+    /// Load the SDF dynamic library.
     pub fn load_library(path: &str) -> Result<(), KeyProviderError> {
         unsafe {
             if LIBRARY.get().is_some() {
@@ -329,7 +339,7 @@ pub mod sdf_impl {
         }
     }
 
-    /// 使用 SDF 加密数据 (API key / token)
+    /// Encrypt data via SDF (API keys / tokens).
     pub fn sdf_encrypt(data: &[u8]) -> Result<Vec<u8>, KeyProviderError> {
         unsafe {
             let lib = LIBRARY
@@ -339,7 +349,6 @@ pub mod sdf_impl {
             let mut device_handle: *mut c_void = std::ptr::null_mut();
             let mut session_handle: *mut c_void = std::ptr::null_mut();
 
-            // 1. 打开设备
             let open_device: Symbol<SdfOpenDevice> = lib
                 .get(b"SDF_OpenDevice")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_OpenDevice未找到: {}", e)))?;
@@ -351,7 +360,6 @@ pub mod sdf_impl {
                 )));
             }
 
-            // 2. 创建会话
             let open_session: Symbol<SdfOpenSession> = lib
                 .get(b"SDF_OpenSession")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_OpenSession未找到: {}", e)))?;
@@ -365,7 +373,6 @@ pub mod sdf_impl {
                 )));
             }
 
-            // 3. 获取密钥使用权限
             let get_kek_right: Symbol<SdfGetKekAccessRight> =
                 lib.get(b"SDF_GetKEKAccessRight").map_err(|e| {
                     KeyProviderError::Tee(format!("SDF_GetKEKAccessRight未找到: {}", e))
@@ -388,7 +395,6 @@ pub mod sdf_impl {
                 )));
             }
 
-            // 4. 生成会话密钥密文
             let generate_key_with_kek: Symbol<SdfGenerateKeyWithKek> =
                 lib.get(b"SDF_GenerateKeyWithKEK").map_err(|e| {
                     KeyProviderError::Tee(format!("SDF_GenerateKeyWithKEK未找到: {}", e))
@@ -419,7 +425,6 @@ pub mod sdf_impl {
                 )));
             }
 
-            // 5. 加密数据
             let json_len = data.len() as u32;
             let len_bytes = json_len.to_be_bytes();
             let mut plaintext = Vec::with_capacity(PLAINTEXT_LENGTH_PREFIX_SIZE + data.len());
@@ -446,7 +451,6 @@ pub mod sdf_impl {
                 &mut ciphertext_len,
             );
 
-            // 6. 释放资源
             let release_kek: Symbol<SdfReleaseKekAccessRight> =
                 lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
             let close_session: Symbol<SdfCloseSession> = lib.get(b"SDF_CloseSession").unwrap();
@@ -461,7 +465,7 @@ pub mod sdf_impl {
 
             ciphertext.truncate(ciphertext_len as usize);
 
-            // 格式: version(1) + key_length(4) + key_buffer + ciphertext
+            // Envelope: version(1) + key_length(4) + key_buffer + ciphertext
             let mut result = vec![1u8];
             let key_len_bytes = key_length.to_be_bytes();
             result.extend(&key_len_bytes);
@@ -471,7 +475,7 @@ pub mod sdf_impl {
         }
     }
 
-    /// 使用 SDF 解密数据 (API key / token)
+    /// Decrypt data via SDF (API keys / tokens).
     pub fn sdf_decrypt(encrypted: &[u8]) -> Result<Vec<u8>, KeyProviderError> {
         if encrypted.len() < ENCRYPTED_HEADER_SIZE {
             return Err(KeyProviderError::InvalidInput(
@@ -492,7 +496,6 @@ pub mod sdf_impl {
                 )));
             }
 
-            // 解析 version(1) + key_length(4) + key_buffer + ciphertext
             let key_length_offset = ENCRYPTED_VERSION_SIZE;
             let key_length = u32::from_be_bytes([
                 encrypted[key_length_offset],
@@ -520,7 +523,6 @@ pub mod sdf_impl {
             let mut device_handle: *mut c_void = std::ptr::null_mut();
             let mut session_handle: *mut c_void = std::ptr::null_mut();
 
-            // 1. 打开设备
             let open_device: Symbol<SdfOpenDevice> = lib
                 .get(b"SDF_OpenDevice")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_OpenDevice未找到: {}", e)))?;
@@ -532,7 +534,6 @@ pub mod sdf_impl {
                 )));
             }
 
-            // 2. 创建会话
             let open_session: Symbol<SdfOpenSession> = lib
                 .get(b"SDF_OpenSession")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_OpenSession未找到: {}", e)))?;
@@ -546,7 +547,6 @@ pub mod sdf_impl {
                 )));
             }
 
-            // 3. 获取密钥使用权限
             let get_kek_right: Symbol<SdfGetKekAccessRight> =
                 lib.get(b"SDF_GetKEKAccessRight").map_err(|e| {
                     KeyProviderError::Tee(format!("SDF_GetKEKAccessRight未找到: {}", e))
@@ -569,7 +569,6 @@ pub mod sdf_impl {
                 )));
             }
 
-            // 4. 导入会话密钥（从加密时存储的 key_buffer）
             let import_key: Symbol<SdfImportKeyWithKek> = lib
                 .get(b"SDF_ImportKeyWithKEK")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_ImportKeyWithKEK未找到: {}", e)))?;
@@ -597,7 +596,6 @@ pub mod sdf_impl {
                 )));
             }
 
-            // 5. 解密数据
             let mut plaintext = vec![0u8; ciphertext.len() + SDF_CIPHER_TEXT_MAX_PADDING];
             let mut plaintext_len: u32 = plaintext.len() as u32;
 
@@ -615,7 +613,6 @@ pub mod sdf_impl {
                 &mut plaintext_len,
             );
 
-            // 6. 释放资源
             let release_kek: Symbol<SdfReleaseKekAccessRight> =
                 lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
             let close_session: Symbol<SdfCloseSession> = lib.get(b"SDF_CloseSession").unwrap();
@@ -630,7 +627,6 @@ pub mod sdf_impl {
 
             plaintext.truncate(plaintext_len as usize);
 
-            // 7. 解析长度前缀
             if plaintext.len() < PLAINTEXT_LENGTH_PREFIX_SIZE {
                 return Err(KeyProviderError::InvalidInput(
                     "decrypted data too short for length prefix".into(),

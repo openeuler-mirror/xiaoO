@@ -16,9 +16,10 @@ pub struct LspDiagnosticsInfo {
 
 /// Spawn a background task that calls `lsp.touch_file(file)`.
 ///
-/// Returns immediately — the caller is never blocked. Mirrors opencode's
-/// `LSP.touchFile(filepath, false)` in `read.ts`: send `textDocument/didOpen`
-/// so the language server starts indexing the file ahead of any future request.
+/// Returns immediately — the caller is never blocked. The goal is the same
+/// as opencode's `LSP.touchFile(filepath, false)` helper: send
+/// `textDocument/didOpen` so the language server starts indexing the file
+/// ahead of any future request.
 pub fn spawn_touch_file(lsp: &Arc<dyn LspProvider>, file: &Path) {
     let lsp = Arc::clone(lsp);
     let path = PathBuf::from(file);

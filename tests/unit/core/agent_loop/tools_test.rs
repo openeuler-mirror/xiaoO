@@ -151,7 +151,6 @@ async fn run_agent_loop_synthesizes_missing_call_id_and_executes_tool() {
 
 #[test]
 fn filter_ask_user_question_output_replaces_secret_with_display_value() {
-    // Test with display_value
     let input_with_display = json!({
         "answers": [{
             "kind": "text",
@@ -164,12 +163,10 @@ fn filter_ask_user_question_output_replaces_secret_with_display_value() {
 
     let filtered = filter_ask_user_question_output(&input_with_display);
 
-    // Should replace value with display_value
     let filtered_json: serde_json::Value = serde_json::from_str(&filtered).unwrap();
     assert_eq!(filtered_json["answers"][0]["value"], "<SECRET>");
     assert!(filtered_json["answers"][0].get("display_value").is_none());
 
-    // Test without display_value
     let input_without_display = json!({
         "answers": [{
             "kind": "text",
@@ -183,7 +180,6 @@ fn filter_ask_user_question_output_replaces_secret_with_display_value() {
     let filtered2_json: serde_json::Value = serde_json::from_str(&filtered2).unwrap();
     assert_eq!(filtered2_json["answers"][0]["value"], "John");
 
-    // Test with non-text type
     let input_choice = json!({
         "answers": [{
             "kind": "choice",
@@ -197,7 +193,6 @@ fn filter_ask_user_question_output_replaces_secret_with_display_value() {
     let filtered3_json: serde_json::Value = serde_json::from_str(&filtered3).unwrap();
     assert_eq!(filtered3_json["answers"][0]["value"], "option1");
 
-    // Test with invalid JSON
     let invalid = "not a json";
     let filtered4 = filter_ask_user_question_output(invalid);
     assert_eq!(filtered4, "not a json");
@@ -205,7 +200,8 @@ fn filter_ask_user_question_output_replaces_secret_with_display_value() {
 
 #[test]
 fn extract_secrets_from_messages_redacts_sensitive_values() {
-    // Test 1: Only extract secrets with display_value (is_secret=true)
+    // Only answers carrying display_value (i.e. user-marked is_secret)
+    // enter the secrets table.
     let message_with_secret = ChatMessage {
         role: MessageRole::Tool,
         blocks: vec![ContentBlock::ToolResult {
@@ -254,12 +250,10 @@ fn extract_secrets_from_messages_redacts_sensitive_values() {
     let messages = vec![message_with_secret, message_with_normal_text];
     let secrets = extract_secrets_from_messages(&messages);
 
-    // Should only extract the secret with display_value
     assert_eq!(secrets.len(), 1);
     assert_eq!(secrets[0], "secret123");
     assert!(!secrets.contains(&"john".to_string()));
 
-    // Test 2: Multiple secrets in one answer
     let message_multiple = ChatMessage {
         role: MessageRole::Tool,
         blocks: vec![ContentBlock::ToolResult {
@@ -295,7 +289,8 @@ fn extract_secrets_from_messages_redacts_sensitive_values() {
     assert_eq!(secrets2[0], "pass123");
     assert!(!secrets2.contains(&"admin".to_string()));
 
-    // Test 3: Non-ask_user_question tool results should not be extracted
+    // tool_results from tools other than ask_user_question do not
+    // contribute secrets.
     let message_other_tool = ChatMessage {
         role: MessageRole::Tool,
         blocks: vec![ContentBlock::ToolResult {

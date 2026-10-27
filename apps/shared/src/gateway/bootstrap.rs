@@ -143,7 +143,8 @@ impl AppBootstrap {
             }
         );
         // Best-effort orphan-session reaper: scans `list_all()` every 10 min
-        // and force-closes sessions whose lease has been gone for ~2 hours.
+        // and force-closes sessions whose lease has been stale for 45 s and
+        // whose last activity is older than 2 hours.
         let reaper_handle = Some(session_components.spawn_orphan_reaper());
         let subagent_control: Arc<dyn subagent::SubagentControl> = session_components.clone();
         // Prefer the resolver's opaque store when available (so the control is

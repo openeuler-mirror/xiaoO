@@ -407,7 +407,6 @@ def trace_to_alert(trace_data, trace_id=None):
     """
     user_span, tool_calls, end_span = parse_trace(trace_data)
 
-    # 提取 session_id
     session_id = trace_id
     if user_span:
         session_id = user_span.get("trace_id", trace_id)
@@ -418,7 +417,6 @@ def trace_to_alert(trace_data, trace_id=None):
                 session_id = sid
                 break
 
-    # 提取 user
     user = "unknown"
     if user_span:
         # USER span 没有 agent_id，从第一个 TOOL_CALL 获取
@@ -470,13 +468,10 @@ def trace_to_alert(trace_data, trace_id=None):
     blocked_tool_name = blocked_extras.get("tool_name", "unknown")
     blocked_command = extract_command(blocked_tc)
 
-    # 映射 blocked_action
     blocked_action = TOOL_ACTION_MAP.get(blocked_tool_name, blocked_tool_name)
 
-    # 推断风险
     risk_type, risk_level, violated_perm = infer_risk(blocked_command, blocked_tool_name)
 
-    # 构建动作描述
     action_desc = build_action_desc(blocked_tool_name, blocked_command, blocked_extras)
 
     # 推断 source
@@ -486,10 +481,8 @@ def trace_to_alert(trace_data, trace_id=None):
     if blocked_extras.get("result_kind") == "blocked":
         source = "react_agent"
 
-    # 构建 trace 链
     trace_chain = _build_trace_chain(trace_data)
 
-    # 构建 timestamp
     timestamp = _format_timestamp(blocked_tc.get("start_time"))
 
     alert = {
@@ -559,17 +552,14 @@ def main():
             sys.exit(1)
         args.moirai_bin = moirai_found
 
-    # 加载 trace 数据
     if args.trace_file:
         print(f"从文件加载 trace 数据: {args.trace_file}", file=sys.stderr)
         trace_data = load_trace_from_file(args.trace_file)
     else:
         trace_data = export_trace(args.trace_id, args.db, args.moirai_bin)
 
-    # 转换
     alert = trace_to_alert(trace_data, trace_id=args.trace_id)
 
-    # 写入输出文件
     output_path = args.output
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:

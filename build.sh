@@ -25,10 +25,13 @@ if [ ! -t 0 ]; then
 fi
 
 # Interactive mode: ask user if they want to install agent_moss
-# NOTE: agent_moss 是 audit_agent 的后继者——判定逻辑已迁出为独立常驻 HTTP 服务
-# （AgentMoss server）。xiaoO 只装一个瘦 bridge 插件（bridge.py）转发到服务。
-# 所以"装 agent_moss"= ①注册 bridge 插件到 xiaoO config + ②确保 AgentMoss 服务在跑。
-# 用户的诉求：选 Y 后必须自动把服务拉起来——探活→没装则问装不装→装了尝试起→起失败终止 build。
+# NOTE: the agent_moss decision logic lives in a standalone resident HTTP
+# service (the AgentMoss server). xiaoO only installs a thin bridge plugin
+# (bridge.py) that forwards to it. So "installing agent_moss" = (1) register
+# the bridge plugin in the xiaoO config + (2) make sure the AgentMoss
+# service is running. User expectation: choosing Y must bring the service up
+# automatically — probe → ask to install if absent → try to start after
+# install → abort the build if starting fails.
 echo ""
 echo "╔═════════════════════════════════════════════════════════════╗"
 echo "║  Security Plugin: agent_moss                                ║"
@@ -45,10 +48,10 @@ read -p "Install agent_moss? [Y/n]: " choice
 
 INSTALL_AUDIT=false
 if [[ "$choice" =~ ^[Nn]$ ]]; then
-    # 用户明确选择不安装
+    # The user explicitly declined the install.
     :
 else
-    # 默认安装（空输入或 Y/y）
+    # Default: install (empty input or Y/y).
     INSTALL_AUDIT=true
 fi
 
@@ -64,16 +67,21 @@ if [ "$INSTALL_AUDIT" = false ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────
-# 第二次问：是否启用 LLM 第三层分析（与老版 audit_agent 一致，两次问的节奏不变）。
-# 关键：偏好落盘到 runtime JSON（~/.config/agentmoss/agent_moss_runtime.json 的
-# layers.L3_llm_analysis），不能用 export 环境变量——env 只在 build.sh 这个 shell
-# 进程内有效，用户在别的终端起服务、或 systemd 起服务都读不到，等于白选。
-# 落盘后，服务不管谁起、何时起，都从同一个 runtime JSON 读到这个偏好。
-# 优先级仍是 env > runtime JSON > settings.json > 默认，env 最高不冲突。
+# Second question: enable LLM tier-3 analysis?
+# Key point: the preference is persisted to the runtime JSON
+# (~/.config/agentmoss/agent_moss_runtime.json, layers.L3_llm_analysis), not
+# an exported environment variable — env only lives inside this build.sh
+# shell, and a service started from another terminal or by systemd would
+# never see it, making the choice pointless. Once persisted, whoever starts
+# the service and whenever, it reads the same preference from the runtime
+# JSON. Priority stays env > runtime JSON > settings.json > default; env
+# being highest does not conflict.
 #
-# 注意：问（读用户输入）紧跟第一次问，保持两次问的节奏；但"落盘 runtime JSON"
-# 推迟到服务块里 agent_moss 确认能 import 之后——没装 agent_moss 时写不了 runtime JSON，
-# 步骤4 会先装，装完再落盘。所以这里只记 ENABLE_LLM_ENV，落盘延后。
+# The question itself directly follows the first one to keep the two-step
+# rhythm; the runtime-JSON write is deferred until the service block
+# confirms agent_moss is importable — without agent_moss installed the
+# runtime JSON cannot be written, step 4 installs it first and persists
+# afterwards. So we only record ENABLE_LLM_ENV here and persist later.
 # ──────────────────────────────────────────────────────────────
 ENABLE_LLM_ENV=""  # 1=启用 L3，0=禁用 L3
 if [ "$INSTALL_AUDIT" = true ]; then
@@ -113,15 +121,16 @@ if [ $BUILD_EXIT_CODE -ne 0 ]; then
     exit $BUILD_EXIT_CODE
 fi
 
-# 编译完成后，安装 agent_moss 服务 + 注册插件到 xiaoO config.toml（仅用户选 Y 时）
+# After compilation: install the agent_moss service + register the plugin in
+# the xiaoO config.toml (only when the user chose Y).
 if [ "$INSTALL_AUDIT" = true ]; then
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
     echo "  安装 AgentMoss 服务 + 注册插件..."
     echo "═══════════════════════════════════════════════════════════════"
 
-    # 通过环境变量传递 LLM 偏好给 install.sh
-    # plugins/hookers/install.sh 会自动调用 agent_moss/install.sh
+    # Pass the LLM preference to install.sh via environment variable;
+    # plugins/hookers/install.sh calls agent_moss/install.sh automatically.
     export AM_ENABLE_LLM="${ENABLE_LLM_ENV:-}"
     cd "$SCRIPT_DIR/plugins/hookers"
     REGISTER_EXIT_CODE=0
@@ -132,9 +141,11 @@ if [ "$INSTALL_AUDIT" = true ]; then
         echo ""
         echo "✅ agent_moss installed & service running."
         echo ""
-        # 动态探测实际端口（与 install.sh 步骤5 同源逻辑）：agent-moss server --port 0
-        # findFreePort 从 9090 往上找空闲，同机多实例并存时可能落在 9091+。只认
-        # healthy 且 instance==xiaoo 的服务，避免漂移到同机其他 agent 的 agentmoss。
+        # Probe the actual port dynamically (same logic as install.sh step 5):
+        # agent-moss server --port 0 makes findFreePort scan upward from 9090,
+        # so co-located instances may land on 9091+. Only services that are
+        # healthy AND instance==xiaoo count, so we never drift to another
+        # agent's agentmoss on the same host.
         AM_CONSOLE_URL="http://127.0.0.1:9090/console"  # 探测失败兜底
         for port in 9090 9091 9092 9093 9094 9095; do
             if curl -sf -m 1 "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null \

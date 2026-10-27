@@ -86,9 +86,9 @@ impl AppRuntimeFactory {
         // `build_compression_pipeline`, local CLI: ditto). If a caller forgets
         // to set `compression_pipeline`, fall back to a real `ContextManager`
         // built from the shared defaults instead of a silent no-op
-        // `PassthroughCompressionPipeline` — the no-op trap was what caused
-        // the daemon to emit `Pre-check failed` / `context compression
-        // triggered` with `removed=0` forever when `[compact]` was missing.
+        // `PassthroughCompressionPipeline` — a no-op trap leaves the agent
+        // loop emitting `Pre-check failed` / `context compression triggered`
+        // with `removed=0` forever.
         let compression_pipeline: Arc<dyn CompressionPipeline> =
             match resolved.compression_pipeline.clone() {
                 Some(pipeline) => pipeline,

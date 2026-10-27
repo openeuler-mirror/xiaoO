@@ -10,12 +10,12 @@ use std::str::FromStr;
 /// Supports standard 5-field (`min hour dom month dow`) and
 /// 6-field (`sec min hour dom month dow`) formats.
 ///
-/// The parsed `Schedule` is cached to avoid repeated parsing on each trigger calculation.
+/// The parsed `Schedule` is cached on the struct so trigger calculations do
+/// not re-parse the expression.
 #[derive(Debug, Clone)]
 pub struct CronExpression {
     /// Original expression string (normalized to 6-field format)
     raw: String,
-    /// Cached parsed schedule for efficient iteration
     schedule: cron::Schedule,
 }
 
@@ -76,7 +76,6 @@ impl CronExpression {
         &self,
         after: chrono::DateTime<chrono::Utc>,
     ) -> Option<chrono::DateTime<chrono::Utc>> {
-        // Use cached schedule instead of re-parsing
         self.schedule.after(&after).next()
     }
 

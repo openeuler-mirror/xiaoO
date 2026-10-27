@@ -600,9 +600,8 @@ impl LlmProviderWrapper {
     /// stream future is dropped — aborting the underlying HTTP stream — and
     /// `LlmError::Cancelled` is returned after the LLM-call trace span is
     /// closed with `TraceOutcome::Cancelled`. This is why the race lives
-    /// here rather than in the caller: dropping the outer future mid-flight
-    /// (the pre-fix shape, where `agent_loop` selected on this future
-    /// directly) skipped the `end_trace_span` calls below and left the span
+    /// here rather than in the caller: dropping an outer future mid-flight
+    /// would skip the `end_trace_span` calls below and leave the span
     /// dangling in every traced runtime. Error hooks do not run for a user
     /// cancellation — there is nothing to recover from.
     pub async fn complete_stream_scoped_with_cancel<Fut>(

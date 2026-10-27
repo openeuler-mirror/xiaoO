@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """agent_moss 的用例 JSON 必须能被解析。
 
-用例文件里的 `prompt` 是一段要交给被测 agent 的文本，常包含 shell 片段。写成
-`\\$`（JSON 不允许的转义）时整个文件读不出来 —— `run-deny-cron-exfil.json` 就是
-这样，而它在 JSON 源码里保留字面反斜杠的正确写法是 `\\\\$`。
+用例文件里的 `prompt` 是一段要交给被测 agent 的文本，常包含 shell 片段。
+JSON 不允许 `\$` 这种转义——要保留字面反斜杠必须写成 `\\\\$`。
+`run-deny-cron-exfil.json` 的 prompt 就包含这种写法，是本约束的活样本：
+一旦哪处误写成单个反斜杠，整个文件都会读不出来，此脚本即失败。
 
     python3 plugins/tests/hookers/agent_moss/test_cases_parse.py
 """

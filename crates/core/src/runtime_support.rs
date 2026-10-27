@@ -88,12 +88,10 @@ impl OwnedConversationView {
         }
     }
 
-    /// Create a view that shares the same message storage.
     pub fn shared(messages: Arc<RwLock<Vec<ChatMessage>>>) -> Self {
         Self { messages }
     }
 
-    /// Get a clone of the underlying Arc for sharing.
     pub fn messages_arc(&self) -> Arc<RwLock<Vec<ChatMessage>>> {
         Arc::clone(&self.messages)
     }
@@ -148,7 +146,6 @@ impl BasicAgentContext {
         }
     }
 
-    /// Get the shared message storage Arc.
     pub fn messages_arc(&self) -> Arc<RwLock<Vec<ChatMessage>>> {
         self.conversation.messages_arc()
     }

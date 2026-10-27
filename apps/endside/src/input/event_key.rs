@@ -1294,8 +1294,9 @@ impl App {
         let mut close_dialog = false;
         let mut check_model_refresh = false;
         let mut force_model_refresh = false;
-        // 上下键只有在高亮 provider 真的变了时才值得拉取；在 Models 栏内
-        // 移动只是换模型，不触发任何请求（TTL 也只按 provider 记）。
+        // Fetch only when the highlighted provider actually changes; moving
+        // within the Models column just selects a model and fires no request
+        // (the TTL is tracked per provider).
         let previous_provider = self
             .state
             .provider_dialog
@@ -1342,9 +1343,12 @@ impl App {
                 }
                 KeyCode::Left => dialog.switch_to_providers(),
                 KeyCode::Right => dialog.switch_to_models(),
-                // 官方列表可能几百条（openrouter），只靠上下键不现实：整屏翻页 +
-                // 首尾直达。步长取渲染时量出的一屏行数（见 `page_height`），
-                // providers 栏翻页同样可能换 provider，所以照样走"是否需要拉取"判定。
+                // The official list can run to hundreds of entries
+                // (openrouter), so arrow keys alone are impractical: page
+                // up/down plus jump-to-first/last. The step size is the
+                // measured page height (see `page_height`).
+                // Paging the providers column can also change the highlighted
+                // provider, so it goes through the same "needs fetch?" check.
                 KeyCode::PageUp => {
                     dialog.page_up();
                     check_model_refresh = true;
@@ -1368,8 +1372,9 @@ impl App {
                         dialog.switch_to_providers();
                     }
                 }
-                // Ctrl+R：强制重拉当前 provider 的官方列表，无视 TTL 与失败退避
-                // （刚补完 API key 想立刻看到官方列表就按它）。
+                // Ctrl+R force-refetches the current provider's official
+                // list, ignoring the TTL and the failure backoff (the button
+                // to press after just filling in the API key).
                 KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                     force_model_refresh = true;
                 }
@@ -1591,8 +1596,9 @@ impl App {
             Some(&self.state.agent_config.llm.provider),
             Some(&self.state.agent_config.llm.model),
         ));
-        // 打开即按需拉取当前高亮 provider 的官方模型列表：从未拉过
-        // （Builtin）或已过 TTL 才打请求，命中缓存则直接复用。
+        // Opening fetches the highlighted provider's official model list on
+        // demand: a request goes out only when never fetched (Builtin) or
+        // past the TTL; a cache hit is reused as-is.
         self.maybe_refresh_selected_provider(false);
     }
 

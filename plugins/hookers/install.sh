@@ -154,10 +154,11 @@ DQ = '\x22'
 SQ = chr(39)
 
 def strip_trailing_comment(value):
-    # 值的尾注释在这里一次性剥掉，之后才按类型分派。
-    # 先前是每个类型各管各的，数字、内联表这类没有分支的值整行匹配不上，
-    # key 就丢了；写入端又只重建它认识的几个 key，用户的设置便静默消失。
-    # 引号内部的 # 不是注释，所以按引号状态走。
+    # Trailing comments are stripped here once, before the type dispatch;
+    # it must track quote state (a # inside quotes is not a comment),
+    # otherwise unquoted values like numbers / inline tables fail the
+    # line match and their keys go missing — and the writer only rewrites
+    # the keys it knows, so the user's settings silently disappear.
     out = []
     quote = None
     for ch in value:
@@ -209,8 +210,9 @@ while i < len(lines):
             combined = ' '.join(array_lines)
             result[key] = re.findall(r'\"([^\"]+)\"', combined)
     else:
-        # 内联表、数字、布尔以及其它标量：原样保留文本，写入端照原文回写。
-        # 这里不再逐类型打补丁，凡是 strip_trailing_comment 之后剩下的都留着。
+        # Inline tables, numbers, booleans and other scalars: keep the text
+        # verbatim; the writer echoes it back as-is. No per-type dispatch —
+        # whatever survives strip_trailing_comment stays.
         result[key] = value
     i += 1
 
@@ -225,8 +227,9 @@ CURRENT_DEFAULT=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; print(js
 CURRENT_ENABLED=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('enabled', []))")
 CURRENT_DISABLED=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin).get('disabled', []); print(d if isinstance(d, list) else [])")
 CURRENT_POLICIES=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin).get('policies', '{}'); print(d if isinstance(d, str) else json.dumps(d))")
-# 解析器没专门管的 key（例如 max_prompt_chain_depth）原样带过去，
-# 写入端照原文回写 —— 否则这些 key 会在每次安装/卸载时被重建逻辑抹掉。
+# Keys the parser does not specifically manage (e.g. max_prompt_chain_depth)
+# pass through untouched and are echoed back verbatim — otherwise the
+# rebuild logic would wipe them on every install/uninstall.
 CURRENT_EXTRA=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin); managed={'default','enabled','disabled','plugins','policies'}; print(json.dumps({k: v for k, v in d.items() if k not in managed and isinstance(v, str)}))")
 export CURRENT_POLICIES_RAW="$CURRENT_POLICIES"
 export CURRENT_EXTRA_JSON="$CURRENT_EXTRA"
@@ -358,7 +361,8 @@ hooker_lines.append(']')
 hooker_lines.append(f'enabled = {json.dumps(enabled)}')
 hooker_lines.append(f'disabled = {json.dumps(disabled)}')
 hooker_lines.append('policies = ' + policies)
-# 非受管 key 原样回写，安装/卸载不再顺手把它们删掉。
+# Unmanaged keys are echoed back verbatim: install/uninstall leaves them
+# alone.
 for extra_key, extra_value in extra.items():
     hooker_lines.append(f'{extra_key} = {extra_value}')
 

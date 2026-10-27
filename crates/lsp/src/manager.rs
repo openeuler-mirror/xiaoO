@@ -36,8 +36,7 @@ pub struct LspServerManager {
     env: Arc<dyn LspEnv>,
     /// Cache of `find_root` results, keyed by `(file, server_id)`. All
     /// results (including the fallback to the file's parent) are cached;
-    /// entries expire after `ROOT_CACHE_TTL`, so a marker added or removed
-    /// later is picked up once the entry goes stale.
+    /// expiry semantics live on `ROOT_CACHE_TTL`.
     root_cache: HashMap<PathBuf, HashMap<String, CachedRoot>>,
 }
 
@@ -71,9 +70,7 @@ impl LspServerManager {
 
     /// Resolve the workspace root for `file` against `root_markers`, using
     /// the in-process cache to avoid re-walking ancestors on every LSP
-    /// action. All results are cached and expire after `ROOT_CACHE_TTL`;
-    /// staleness is bounded, so markers added or removed during the TTL
-    /// window are picked up after expiry.
+    /// action.
     async fn cached_find_root(
         &mut self,
         file: &Path,
@@ -90,11 +87,11 @@ impl LspServerManager {
         }
         let markers: Vec<&str> = root_markers.iter().map(String::as_str).collect();
         let root = find_root(file, &markers, self.env.as_ref()).await;
-        // Always cache the result. The previous "only cache if root !=
-        // file.parent()" heuristic skipped the case where the marker is in
-        // the file's direct parent (e.g. main.rs next to Cargo.toml),
-        // defeating the cache for that common layout. Rely on the TTL to
-        // surface markers added or removed after the entry was stored.
+        // Always cache the result, even when the root equals the file's own
+        // parent — a root marker may sit in that very directory (e.g.
+        // main.rs next to Cargo.toml), and excluding the case would defeat
+        // the cache for that common layout. Staleness is bounded by
+        // `ROOT_CACHE_TTL`.
         self.root_cache
             .entry(file.to_path_buf())
             .or_default()

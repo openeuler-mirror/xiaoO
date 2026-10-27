@@ -22,14 +22,12 @@ use super::webfetch::discover_webfetch;
 use super::websearch::discover_web_search;
 use crate::r#impl::ToolRuntimeServices;
 
-/// A built-in tool source.
 pub struct BuiltinToolSource {
     services: ToolRuntimeServices,
     file_read_state: Arc<Mutex<DedupStateStore>>,
 }
 
 impl BuiltinToolSource {
-    /// Creates a new built-in tool source.
     pub fn new(services: ToolRuntimeServices) -> Self {
         Self {
             services,

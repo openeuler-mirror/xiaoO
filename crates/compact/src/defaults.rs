@@ -3,13 +3,13 @@
 //! Both the daemon (`apps/serverside`) and the local CLI/TUI (`apps/endside`)
 //! route through [`build_context_manager`] so that:
 //!
-//! 1. `[compact]` missing from the config file no longer silently falls back
-//!    to `PassthroughCompressionPipeline` (a no-op that leaves the agent loop
+//! 1. `[compact]` missing from the config file still builds a real
+//!    `ContextManager` using the defaults below — never a silent fallback to
+//!    `PassthroughCompressionPipeline` (a no-op that leaves the agent loop
 //!    emitting `Pre-check failed` / `context compression triggered` with
-//!    `removed=0` forever). Instead, a real `ContextManager` is built using
-//!    the defaults below.
+//!    `removed=0` forever).
 //! 2. Both modes share a single source of truth for default thresholds /
-//!    estimator tuning, so they can never drift apart again.
+//!    estimator tuning, so they cannot drift apart.
 
 use std::sync::Arc;
 
@@ -69,9 +69,9 @@ const ESTIMATOR_DOCUMENT_BLOCK_OVERHEAD: usize = 256;
 /// Build a real [`ContextManager`] compression pipeline from `overrides`
 /// (user-supplied) layered on top of the defaults above.
 ///
-/// Pass `overrides = None` to use every default — this is the path that
-/// fixes the daemon's previous `None -> Passthrough` regression, where a
-/// missing `[compact]` section silently disabled compression.
+/// Pass `overrides = None` to use every default — guaranteeing the
+/// module-level contract that a missing `[compact]` section still yields a
+/// real compression pipeline instead of a silent no-op.
 pub fn build_context_manager(
     overrides: Option<&CompactOverrides>,
     llm_provider: Arc<LlmProviderWrapper>,

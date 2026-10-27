@@ -16,8 +16,9 @@ use serde_json::{json, Value};
 use super::super::core::PluginHookerCore;
 use crate::{resolve_hook_point_category, HookPointCategory};
 
-/// plugin hooker 子进程最长执行时间(10 分钟)。超时后由 `kill_on_drop` 自动兜底杀掉子进程,
-/// 防止卡死命令长期阻塞 tokio worker。
+/// Maximum runtime of a plugin hooker subprocess (10 minutes). On timeout,
+/// `kill_on_drop` reaps the child as a backstop so a wedged command cannot
+/// pin a tokio worker indefinitely.
 const PLUGIN_HOOKER_TIMEOUT_MS: u64 = 600_000;
 
 pub(crate) struct PluginLlmHookerAdaptor {

@@ -50,8 +50,10 @@ pub(crate) use support::error_log;
 const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 const CLI_SWITCH: &str = "--cli";
 
-/// 启动校验等待动态上下文窗口探测的总时限：探测链各 HTTP 客户端自身超时
-/// 之和可达 ~40s，启动阶段不可无界等待；超限回落协议族静态兜底值放行。
+/// Total budget startup validation waits for dynamic context-window probing:
+/// the probe chain's per-client timeouts add up to ~40s, and startup cannot
+/// wait unbounded. Past this deadline we fall back to the protocol-family
+/// static value and continue.
 const CONFIG_PROBE_DEADLINE: Duration = Duration::from_secs(3);
 
 #[tokio::main]
@@ -333,10 +335,13 @@ async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBu
 
 /// Validate configuration for TUI.
 ///
-/// 上下文窗口优先走动态探测链（[`crate::gateway_api::runtime_request::probe_dynamic_context_window`]，
-/// 与 TUI 网关同一链），以内联 deadline 封顶，超时/失败回落协议族静态兜底
-/// 值（[`config::resolve_context_window`]）。这样大上下文模型配大 `max_tokens`
-/// 不会因静态兜底 128k/200k 低估而误判为错误、阻断启动。
+/// Prefer the dynamic probing chain for the context window
+/// ([`crate::gateway_api::runtime_request::probe_dynamic_context_window`],
+/// the same one the TUI gateway uses), capped by an inline deadline; on
+/// timeout/failure fall back to the protocol-family static value
+/// ([`config::resolve_context_window`]). That way a large-`max_tokens`
+/// config on a large-window model is not rejected as an error just because
+/// the 128k/200k static fallback underestimates it.
 async fn validate_config_for_tui(
     config: &config::Config,
     config_path: &Path,
@@ -350,9 +355,10 @@ async fn validate_config_for_tui(
     )
 }
 
-/// 启动校验专用的窗口解析：走 TUI 网关同一份进程级缓存与探测链
-/// （`resolve_window_with_shared_cache`），探测直接写缓存，首个 turn
-/// 命中即免重复等待。
+/// Window resolution for startup validation: goes through the same
+/// process-wide cache and probe chain as the TUI gateway
+/// (`resolve_window_with_shared_cache`); the probe writes the cache, so the
+/// first turn hits it and skips a repeat wait.
 async fn resolve_context_window_for_validation(config: &config::Config) -> usize {
     crate::gateway_api::runtime_request::resolve_window_with_shared_cache(
         &config.llm,
@@ -363,8 +369,9 @@ async fn resolve_context_window_for_validation(config: &config::Config) -> usize
     .unwrap_or(128_000)
 }
 
-/// 纯函数：给定解析出的上下文窗口与配置，产出 `(errors, warnings)`。
-/// 抽离为独立函数以便单测注入合成窗口，不触网。
+/// Pure function: resolved window + config in, `(errors, warnings)` out.
+/// Kept standalone so unit tests can inject a synthetic window without
+/// touching the network.
 fn validate_max_tokens_against_window(
     max_tokens: u32,
     model: &str,

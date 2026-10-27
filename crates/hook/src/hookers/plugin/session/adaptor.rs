@@ -224,12 +224,8 @@ impl PluginSessionHookerAdaptor {
         payload
     }
 
-    /// Result parsing for the ack-only session lifecycle hooks: the only
-    /// accepted result is `ack` / `acknowledged`, mapped to
-    /// [`SessionHookResult::Acknowledged`]. There is no `transform`/`deny`
-    /// path because the events carry no mutable output; created/closed are
-    /// best-effort observers whose output is not consumed by the gateway
-    /// (`actions` are not collected; only `state` collects them).
+    /// Result parsing for the ack-only session lifecycle hooks — semantics
+    /// documented on [`PluginSessionHookerAdaptor`].
     fn parse_session_event_result(
         &self,
         output: &Value,

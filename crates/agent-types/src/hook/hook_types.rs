@@ -123,8 +123,8 @@ pub struct HookInvokeOutput {
 }
 
 /// The category-specific result payload of a hook invocation, unwrapped from
-/// [`HookInvokeOutput`]. Was previously the top-level `HookInvokeOutput` enum;
-/// renamed when `actions` were added as a sibling field.
+/// [`HookInvokeOutput`] (whose sibling `actions` field is shared across all
+/// categories).
 #[derive(Clone, Debug)]
 pub enum HookInvokePrimary {
     // Tool hook variants
@@ -161,10 +161,10 @@ impl HookInvokeOutput {
         self
     }
 
-    // Category-specific constructors mirroring the previous enum variants.
-    // Construction sites that wrote `HookInvokeOutput::Pre(r)` keep working
-    // because these are associated functions with the same names. Match
-    // sites must destructure via `output.primary` instead.
+    // Category-specific constructors in enum-variant casing (`Pre`, `Post`,
+    // `LlmPre`, …), so construction sites keep the `HookInvokeOutput::Pre(r)`
+    // call shape. Match sites must destructure via `output.primary`
+    // instead.
     #[allow(non_snake_case)]
     pub fn Pre(r: PreHookResult) -> Self {
         Self::new(HookInvokePrimary::Pre(r))

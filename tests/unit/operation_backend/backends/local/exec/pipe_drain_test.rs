@@ -158,9 +158,6 @@ fn exec_streaming_kills_child_when_sink_returns_false() {
             .exec()
             .exec_streaming(
                 ExecRequest {
-                    // `seq 1 1000000` emits a million lines over a few
-                    // seconds. If streaming + early kill works, we return
-                    // immediately after 5 lines.
                     command: "seq 1 1000000".to_string(),
                     args: vec![],
                     shell: Some("bash".to_string()),

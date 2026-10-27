@@ -183,8 +183,8 @@ fn ctrl_k_kills_through_the_line_newline() {
     assert_eq!(input.value(), "acd");
     assert_eq!(input.cursor(), 1);
 
-    // At end of line (caret right before the newline): join instead of the
-    // old no-op.
+    // At end of line (caret right before the newline): Ctrl+K joins the
+    // lines by deleting the newline.
     let mut input = Input::default().with_value("ab\ncd".to_string());
     input.set_cursor(2);
     handle_input_key(

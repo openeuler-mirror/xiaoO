@@ -65,7 +65,6 @@ fn signal_group(pgid: i32, signal_name: &str, signal: i32) {
     let result = unsafe { libc::kill(-pgid, signal) };
     if result != 0 {
         let err = std::io::Error::last_os_error();
-        // ESRCH means no such process - group might already be empty
         if err.raw_os_error() != Some(libc::ESRCH) {
             tracing::warn!(
                 "Failed to send {} to process group {}: {}",
@@ -82,14 +81,6 @@ fn signal_group(pgid: i32, signal_name: &str, signal: i32) {
 /// Sends SIGTERM, waits 300ms, then sends SIGKILL to ensure all processes
 /// in the group are terminated. This handles processes that spawn children
 /// (e.g., `sh -c "sleep 1000 &"`).
-///
-/// # Arguments
-///
-/// * `pgid` - The process group ID (must be positive)
-///
-/// # Returns
-///
-/// Returns Ok(()) on success, or an error message on failure.
 #[cfg(unix)]
 pub fn terminate_process_group(pgid: i32) -> Result<(), String> {
     if pgid <= 0 {

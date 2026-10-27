@@ -33,7 +33,7 @@ pub struct ContextManagerConfig {
     pub session_memory_compaction: Option<SessionMemoryCompactionPolicy>,
     /// Only snip messages older than this threshold (milliseconds).
     /// Messages within an active task are recent and should be summarized, not deleted.
-    /// Default: 3_600_000 (1 hour).
+    /// Default: `DEFAULT_SNIP_STALE_AFTER_MS` in `compact::defaults`.
     pub snip_stale_after_ms: u64,
 }
 
@@ -352,10 +352,8 @@ impl ContextManager {
         let (boundary, candidates) =
             self.resolve_candidates(messages, preserve_tail_messages, boundary)?;
 
-        // HistorySnip only deletes stale messages (older than snip_stale_after_ms).
-        // Active-task messages should be summarized (ContextCollapse/AutoCompact), not deleted.
-        // Compression summary messages are also protected — they can only be *absorbed* by
-        // a summarization pass, never silently deleted.
+        // Snip deletes only stale messages and leaves active-task messages
+        // to summarization — see `CompactOverrides::snip_stale_after_ms`.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)

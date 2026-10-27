@@ -16,13 +16,15 @@ use crate::gateway_runtime::GatewayRuntime;
 pub struct App {
     pub(crate) state: AppState,
     pub(crate) gateway: GatewayRuntime,
-    /// 官方 model list 拉取结果的回传通道。
+    /// Report-back channel for official model-list fetches.
     ///
-    /// 用 mpsc 而不是 oneshot：拉取按 provider 独立进行，快速上下键切换
-    /// provider 时允许多个请求在飞（上限见 `MAX_INFLIGHT_MODEL_FETCHES`），
-    /// 每个任务都必须能把结果回传——否则被顶掉的那个 provider 会卡在 `Loading`
-    /// 直到陈旧兜底窗口（`MODEL_LIST_STALE_AFTER`）到期后的下一次触发，见
-    /// `start_model_fetch`。结果按 provider 名应用，与顺序无关。
+    /// mpsc rather than oneshot: fetches proceed per provider, and quickly
+    /// arrow-keying through providers allows several requests in flight
+    /// (cap in `MAX_INFLIGHT_MODEL_FETCHES`); every task must be able to
+    /// report back — otherwise the displaced provider would sit in
+    /// `Loading` until the next trigger after the stale backstop window
+    /// (`MODEL_LIST_STALE_AFTER`) expires; see `start_model_fetch`. Results
+    /// are applied by provider name, order-independent.
     pub(crate) model_fetch_tx: tokio::sync::mpsc::UnboundedSender<(
         u64,
         crate::provider_service::ProviderModelFetchOutcome,
@@ -179,12 +181,8 @@ impl App {
             // style: compensated for draw time → ~16ms cycle = 60fps). While
             // idle, a 250ms relative sleep is enough — the spinner doesn't
             // run and `clock_refresh_interval` (1s) handles idle refresh.
-            //
-            // The deadline is ADVANCED only when the sleep actually fires
-            // (see the select! sleep branch), never here: advancing per loop
-            // iteration would let a burst of fast event-driven iterations
-            // (scroll wheel, key auto-repeat) push the deadline 16ms into the
-            // future each time, stalling the loop until it caught up.
+            // The deadline is advanced only in the select! sleep branch
+            // below, never per iteration (why: see the setup comment above).
             let next_wake = if active_refresh {
                 let now = tokio::time::Instant::now();
                 // Fallen behind (idle→active switch, or draw > period):
@@ -208,13 +206,12 @@ impl App {
                 {
                     tokio::select! {
                         _ = sleep_until(next_wake) => {
-                            // Advance the animation deadline only when this
-                            // sleep fires (Delay semantics) — see the
-                            // `next_wake` comment above. Spinner frames are
-                            // wall-clock derived; only `is_loading` needs the
-                            // forced redraw (the reveal drain and stream
-                            // updates drive their own redraws via
-                            // `poll_stream_updates`).
+                            // Delay-semantics deadline advance — see the
+                            // `next_animation_frame` setup comment above.
+                            // Spinner frames are wall-clock derived; only
+                            // `is_loading` needs the forced redraw (the
+                            // reveal drain and stream updates drive their
+                            // own redraws via `poll_stream_updates`).
                             if active_refresh {
                                 next_animation_frame += animation_period;
                                 if self.state.chat_state.is_loading {
@@ -239,15 +236,13 @@ impl App {
                             needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
                         }
                         _ = clock_refresh_interval.tick() => {
-                            // Light diff redraw: only the clock/status cells
-                            // are re-emitted (see the interval setup above).
+                            // Light diff redraw; see the interval setup above.
                             if !self.state.chat_state.is_loading {
                                 needs_redraw = true;
                             }
                         }
                         _ = corruption_recovery_interval.tick() => {
-                            // Full-frame rewrite to recover from external
-                            // corruption; see the interval setup above.
+                            // Full-frame rewrite; see the interval setup above.
                             if !self.state.chat_state.is_loading {
                                 terminal.swap_buffers();
                                 needs_redraw = true;
@@ -274,13 +269,9 @@ impl App {
                 {
                     tokio::select! {
                         _ = sleep_until(next_wake) => {
-                            // Advance the animation deadline only when this
-                            // sleep fires (Delay semantics) — see the
-                            // `next_wake` comment above. Spinner frames are
-                            // wall-clock derived; only `is_loading` needs the
-                            // forced redraw (the reveal drain and stream
-                            // updates drive their own redraws via
-                            // `poll_stream_updates`).
+                            // Same sleep-branch semantics as the unix
+                            // select! above (Delay advance; only `is_loading`
+                            // forces a redraw).
                             if active_refresh {
                                 next_animation_frame += animation_period;
                                 if self.state.chat_state.is_loading {
@@ -305,15 +296,13 @@ impl App {
                             needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
                         }
                         _ = clock_refresh_interval.tick() => {
-                            // Light diff redraw: only the clock/status cells
-                            // are re-emitted (see the interval setup above).
+                            // Light diff redraw; see the interval setup above.
                             if !self.state.chat_state.is_loading {
                                 needs_redraw = true;
                             }
                         }
                         _ = corruption_recovery_interval.tick() => {
-                            // Full-frame rewrite to recover from external
-                            // corruption; see the interval setup above.
+                            // Full-frame rewrite; see the interval setup above.
                             if !self.state.chat_state.is_loading {
                                 terminal.swap_buffers();
                                 needs_redraw = true;
@@ -338,20 +327,13 @@ impl App {
             }
 
             // Drain and execute any hook actions received from the daemon
-            // (create/switch session, set title).
-            //
-            // Remote (daemon) mode: actions arrive via the SSE `Done`
-            // event's `actions` field after the daemon has already run
-            // daemon-side effects (open_session) via
-            // `DaemonHookActionSink`; the TUI only needs to switch UI
-            // focus and sync its local registry.
-            //
-            // Local (non-daemon) mode: actions arrive via
+            // (create/switch session, set title): remote mode via the SSE
+            // `Done` event's `actions` field, local mode via
             // `SessionTurnUpdate::HookActions` (no SSE, no daemon).
-            // `execute_hook_action` → `switch_to_remote_session` checks
-            // `remote_base_url()`, finds None, and drops each action with
-            // a `tracing::warn!`. This is intentional: create_session /
-            // switch_session are not supported in local mode.
+            // Mode-specific semantics — the daemon has already run its
+            // daemon-side effects in remote mode; local mode drops
+            // create/switch by design — are documented on
+            // [`Self::execute_hook_action`].
             let pending_actions = self.gateway.take_pending_hook_actions();
             if !pending_actions.is_empty() {
                 for action in pending_actions {
@@ -430,18 +412,23 @@ impl App {
         Ok(())
     }
 
-    /// 发起一次官方 model list 拉取（`provider` 为弹窗里的 provider 名）。
+    /// Start one official model-list fetch (`provider` is the dialog's
+    /// provider name).
     ///
-    /// 守卫两条：目标 provider 已有请求在飞时不重复发起；在飞请求数达到
-    /// [`MAX_INFLIGHT_MODEL_FETCHES`] 时跳过（超出的 provider 保持 `Builtin`，
-    /// 下次高亮时再拉）。任务只负责回传结果，`apply_model_fetch_outcome`
-    /// 负责落地，因此这里可以先同步把状态置为 `Loading` 让 UI 立刻反应。
+    /// Two guards: no duplicate fetch while the target provider already has
+    /// one in flight; and skipping once the in-flight count reaches
+    /// [`MAX_INFLIGHT_MODEL_FETCHES`] (providers beyond the cap stay
+    /// `Builtin` and are fetched on the next highlight). The task only
+    /// reports back while `apply_model_fetch_outcome` lands the result, so
+    /// the state can be set to `Loading` synchronously here for an instant
+    /// UI reaction.
     pub(crate) fn start_model_fetch(&mut self, provider: String) {
         if provider.trim().is_empty() {
             return;
         }
-        // 陈旧的 `Loading`（结果不会再回来）先清掉在飞登记，否则它既拉不动、又永久
-        // 占着名额。
+        // A stale `Loading` (the result will never arrive) has its in-flight
+        // registration cleared first — otherwise it can neither fetch nor
+        // release the slot it permanently holds.
         let now = Instant::now();
         if self
             .state
@@ -463,20 +450,24 @@ impl App {
         let session = self.state.model_fetch_session;
         let tx = self.model_fetch_tx.clone();
         tokio::spawn(async move {
-            // 内层任务单独 spawn 再 await，是为了拿到 `JoinHandle`：任务 panic 时
-            // `handle.await` 返回 `Err`，`join_fetch_outcome` 据此合成失败结果，保证状态
-            // 一定能离开 `Loading`。
+            // The inner task is spawned separately so we can hold its
+            // `JoinHandle`: on panic, `handle.await` returns `Err` and
+            // `join_fetch_outcome` synthesizes a failure outcome, so the
+            // state is guaranteed to leave `Loading`.
             let handle = tokio::spawn(crate::provider_service::fetch_provider_models(request));
             let outcome = crate::provider_service::join_fetch_outcome(provider, handle).await;
-            // 接收端随 App 一同存活；发送失败只说明 TUI 正在退出。
+            // The receiver lives as long as the App; a send failure only
+            // means the TUI is shutting down.
             let _ = tx.send((session, outcome));
         });
     }
 
-    /// 按需刷新当前高亮 provider 的官方列表。
+    /// Refresh the highlighted provider's official list on demand.
     ///
-    /// `force` 来自 `Ctrl+R`：无视 TTL/失败退避强制重拉（用户刚补完 API key
-    /// 就按它，不必等 30s 退避）。非强制路径走 [`ModelListState::needs_refresh`]。
+    /// `force` comes from `Ctrl+R`: re-fetch ignoring the TTL/failure
+    /// backoff (the key to press right after filling in the API key, no
+    /// 30s backoff wait). The non-forced path goes through
+    /// [`ModelListState::needs_refresh`].
     pub(crate) fn maybe_refresh_selected_provider(&mut self, force: bool) {
         let Some(provider) = self
             .state
@@ -497,15 +488,18 @@ impl App {
         }
     }
 
-    /// 落地一次拉取结果。
+    /// Land one fetch outcome.
     ///
-    /// 结果按 provider 名应用，因此弹窗已关闭、或用户已经切到别的 provider
-    /// 都不会错位：`ChatState` 始终更新（下次 `/connect` 直接看到官方列表），
-    /// 弹窗副本只在它还持有该 provider 时更新，且选中项只在被替换的 provider
-    /// 就是当前高亮项时才重算。
+    /// Results apply by provider name, so neither a closed dialog nor the
+    /// user having switched providers can misplace them: `ChatState` is
+    /// always updated (the next `/connect` sees the official list
+    /// directly); the dialog copy updates only while it still holds that
+    /// provider, and the selection is recalculated only when the replaced
+    /// provider is the highlighted one.
     ///
-    /// 成功路径把同一份列表写进两处（弹窗 + `available_providers`），失败路径
-    /// 一律不碰列表——"成功一次后永久替换内置列表"由此成立。
+    /// Success writes the same list into both places (dialog +
+    /// `available_providers`); failure never touches the list — that is
+    /// what makes "one success permanently replaces the builtin list" hold.
     pub(crate) fn apply_model_fetch_outcome(
         &mut self,
         session: u64,
@@ -513,15 +507,19 @@ impl App {
     ) {
         use crate::provider_service::ModelFetchError;
         let provider = outcome.provider;
-        // 无论结果是否被采纳，名额都要释放（`join_fetch_outcome` 保证任务一定回传）。
+        // The slot is released whether or not the result is adopted
+        // (`join_fetch_outcome` guarantees the task reports back).
         self.state.finish_model_fetch(&provider);
         if session != self.state.model_fetch_session {
-            // 会话已被重建（`/new`、`/load` 与远端会话的连接/切换都会重建）：这是旧会话的结果，丢弃。
+            // The session was rebuilt (`/new`, `/load`, and remote connect/
+            // switch all rebuild it): this outcome belongs to the old
+            // session — drop it.
             return;
         }
         match outcome.result {
             Ok(models) if !models.is_empty() => {
-                // 官方列表不含当前激活模型时补到首位（两家副本用同一份结果）。
+                // Prepend the active model when the official list lacks it
+                // (both copies share one result).
                 let configured = self
                     .state
                     .agent_config
@@ -534,10 +532,13 @@ impl App {
                 if let Some(dialog) = self.state.provider_dialog.as_mut() {
                     dialog.replace_models(&provider, models.clone());
                 }
-                // 目录里已经没有这个 provider 时写不进去（防御分支：会话重建会同时重置
-                // 目录与状态，那种情形在世代检查处已被丢弃）：这时记 `Builtin` 而不是
-                // `Ready`，否则下次打开弹窗会拿着内置列表显示"官方模型列表"并在 TTL 内
-                // 拒绝重新拉取。
+                // Defensive branch: if the catalog no longer has this
+                // provider, the write fails (a session rebuild resets the
+                // catalog and status together, and that case was already
+                // dropped at the generation check). Record `Builtin` rather
+                // than `Ready` — otherwise the next dialog open would show
+                // the builtin list labelled "official" and refuse to
+                // re-fetch within the TTL.
                 let applied_to_catalog = self
                     .state
                     .chat_state
@@ -552,7 +553,8 @@ impl App {
                 self.state.chat_state.set_model_list_state(&provider, state);
             }
             Ok(_) => {
-                // 官方返回空数组：不清空列表，只记录失败。
+                // The official endpoint returned an empty array: do not
+                // clear the list; record it as a failure.
                 self.state.chat_state.set_model_list_state(
                     &provider,
                     crate::chat::ModelListState::Failed {

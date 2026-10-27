@@ -426,10 +426,12 @@ pub struct FileMentionState {
 
 pub use xiaoo_shared::session_diff::{SessionFileChangeEntry, SessionFileChangeStats};
 
-/// 全局在飞的模型拉取上限（按 provider 名去重后计数）。
+/// Global cap on in-flight model-list fetches (deduplicated by provider
+/// name).
 ///
-/// 计数放在 `AppState` 而不是 `ChatState`：后者会被 `/new`、`/load` 与 `/remote`
-/// （连接或切换已有远端会话）重建，放在里面会让"最多两个在飞"失效。
+/// The counter lives on `AppState`, not `ChatState`: the latter is rebuilt
+/// by `/new`, `/load` and `/remote` (connecting to / switching remote
+/// sessions), which would reset a per-chat cap and defeat the limit.
 pub const MAX_INFLIGHT_MODEL_FETCHES: usize = 2;
 
 pub struct AppState {
@@ -455,10 +457,14 @@ pub struct AppState {
     pub reasoning_effort: ReasoningEffort,
     pub config_path: PathBuf,
     pub workspace: PathBuf,
-    /// 模型拉取的"会话世代"：会话重建后，在飞的旧任务结果必须丢弃，否则会把旧会话的
-    /// 官方列表写进新会话并置 `Ready`（TTL 内不再刷新）。
+    /// Session generation for model fetches: after a session rebuild, old
+    /// in-flight results must be dropped — otherwise the previous session's
+    /// official list would be written into the new session and marked
+    /// `Ready` (not refreshed again within the TTL).
     pub model_fetch_session: u64,
-    /// 全局在飞的模型拉取（provider 名去重）；无论结果是否被采纳，回传时都要释放。
+    /// In-flight model fetches, deduplicated by provider name. The slot is
+    /// released on task completion regardless of whether the result is
+    /// adopted.
     pub model_fetch_inflight: std::collections::HashSet<String>,
     pub session_messages: Vec<xiaoo_api::chat::ChatMessage>,
     pub plan_state: Option<TodoMessageState>,
@@ -542,7 +548,8 @@ impl AppState {
         })
     }
 
-    /// 标记一次模型拉取开始；`false` 表示被拒（同 provider 已在飞，或已达全局上限）。
+    /// Mark a model fetch as started; `false` means rejected (the same
+    /// provider is already in flight, or the global cap is hit).
     pub(crate) fn begin_model_fetch(&mut self, provider: &str) -> bool {
         if self.model_fetch_inflight.contains(provider)
             || self.model_fetch_inflight.len() >= MAX_INFLIGHT_MODEL_FETCHES
@@ -553,12 +560,13 @@ impl AppState {
         true
     }
 
-    /// 任务回传（或被丢弃）时释放名额。
+    /// Release the slot when the task reports back (or is dropped).
     pub(crate) fn finish_model_fetch(&mut self, provider: &str) {
         self.model_fetch_inflight.remove(provider);
     }
 
-    /// 会话重建：让在飞任务的结果作废（名额仍由任务回传时释放）。
+    /// Session rebuild: invalidates in-flight results (the slot is still
+    /// released when the task reports back).
     pub(crate) fn next_model_fetch_session(&mut self) {
         self.model_fetch_session = self.model_fetch_session.wrapping_add(1);
     }
@@ -623,9 +631,9 @@ impl AppState {
     /// toast only when delivery is confirmed (native clipboard tool) or the
     /// terminal is known to honour OSC 52. A fire-and-forget OSC 52 sequence
     /// into an unknown terminal (PuTTY, MobaXterm, FinalShell, Xshell …)
-    /// shows the error toast instead — previously the UI claimed
-    /// "Copied to clipboard" while the terminal silently dropped the
-    /// sequence and the clipboard kept its old contents.
+    /// shows the error toast instead of claiming "Copied to clipboard" while
+    /// the terminal silently drops the sequence and the clipboard keeps its
+    /// old contents.
     ///
     /// Returns `true` when a copy was actually attempted (`Ok(..)`), so
     /// callers know they may clear the source selection.

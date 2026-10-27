@@ -18,9 +18,8 @@ import time
 from pathlib import Path
 
 # 添加包路径：指向源码中的 agent_moss 包。
-# agent_moss 判定逻辑已从旧 audit_agent/audit_policy_checker 迁出为独立包，
-# 源码在与 xiaoO 同级的 AgentMoss 仓库（parents[4]/AgentMoss）。
-# 若已 pip 装好 agent_moss，直接 import 即可，无需此 sys.path。
+# parents[4] 是本仓库根目录，即允许把 AgentMoss 源码检出到 <repo>/AgentMoss
+# 备用；该目录不存在时跳过，直接 import 已 pip 安装的 agent_moss。
 _AGENT_MOSS_SRC = Path(__file__).resolve().parents[4] / "AgentMoss"
 if _AGENT_MOSS_SRC.is_dir():
     sys.path.insert(0, str(_AGENT_MOSS_SRC))

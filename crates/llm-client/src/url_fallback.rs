@@ -8,15 +8,16 @@ pub fn build_base_url_candidates(original_base: &str) -> Vec<String> {
     }
     let mut candidates = Vec::new();
 
-    // B1: 用户原始配置（最高优先级）
+    // B1: the user's original configuration (highest priority).
     candidates.push(base.to_string());
 
-    // B2: 补/v1（除原始外最高优先级）
+    // B2: append /v1 (highest priority after the original).
     if !has_version_path(base) {
         candidates.push(format!("{}/v1", base));
     }
 
-    // B3: 补/v4等其他版本（如智谱等provider）
+    // B3: append other version segments like /v4 (some providers, e.g.
+    // Zhipu, use them).
     if !base.contains("/paas") && !has_version_path(base) {
         candidates.push(format!("{}/v4", base));
     }

@@ -136,7 +136,6 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
     pub async fn append_span_field(&self, span_id: &str, field: &str, chunk: &str) -> Result<()> {
         let mut inner = self.inner.lock().await;
 
-        // Try to find and update in buffer first
         if let Some(buffered_span) = inner.buffer.iter_mut().find(|s| s.span_id == span_id) {
             let current = buffered_span
                 .extras
@@ -148,7 +147,6 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
             return Ok(());
         }
 
-        // Try pending updates
         if let Some(pending_update) = inner.pending_updates.get_mut(span_id) {
             let current = pending_update
                 .extras
@@ -162,7 +160,6 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
 
         drop(inner);
 
-        // For persisted spans, we need to read current value first
         let span = self.storage.get_span(span_id).await?;
         match span {
             Some(existing_span) => {
@@ -178,7 +175,6 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
                     .await
             }
             None => {
-                // Span doesn't exist yet, create pending update
                 let mut inner = self.inner.lock().await;
                 let pending_update =
                     inner

@@ -9,17 +9,14 @@ pub use crate::types::KeyMaterial;
 
 use async_trait::async_trait;
 
-/// 密钥提供者接口
-///
-/// 实现此 trait 来提供密钥材料
+/// Key provider interface.
 #[async_trait]
 pub trait KeyProvider: Send + Sync {
-    /// 获取密钥材料
     async fn provide(&self) -> Result<KeyMaterial, KeyProviderError>;
 
-    /// 提供者类型标识
+    /// Provider type identifier.
     fn provider_type(&self) -> &'static str;
 
-    /// 提供者名称 (用于日志和配置)
+    /// Provider name (for logs and configuration).
     fn name(&self) -> &str;
 }

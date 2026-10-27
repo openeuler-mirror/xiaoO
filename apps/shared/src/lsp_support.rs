@@ -1,9 +1,9 @@
-// 配置词汇再导出：应用层（endside support/config、serverside daemon_config）
-// 需要命名这些类型以 serde 反序列化与持有 LSP 注册表句柄，无法下沉为粗粒度
-// 函数，故作为配置词汇再导出。`AutoInstall` / `ServerConfig` 在尚未提供
-// 粗粒度 lsp builder 之前仍需被应用直接构造；builder 落地后可吸收这两个。
-// 本模块内 `build_extra_server_configs` 亦使用 `ServerConfig` / `AutoInstall`，
-// 直接复用此 `pub use`，无需重复私有 import。
+// Config-vocabulary re-export: the app config layers (endside
+// support/config, serverside daemon_config) must name these types for serde
+// deserialization and to hold the registry handle, so they cannot be hidden
+// behind coarse-grained functions. `AutoInstall` / `ServerConfig` stay
+// directly constructible by the apps until a coarse-grained lsp builder
+// absorbs them. `build_extra_server_configs` below reuses this `pub use`.
 pub use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
 use serde::Serialize;
 use std::collections::HashSet;

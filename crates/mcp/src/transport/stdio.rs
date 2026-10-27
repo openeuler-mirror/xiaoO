@@ -44,7 +44,7 @@ const INHERITED_ENV_NAMES: [&str; 5] = ["PATH", "HOME", "LANG", "LC_ALL", "TMPDI
 /// [`INHERITED_ENV_NAMES`] are carried over from it. The server's explicitly
 /// configured `configured` variables are applied afterwards, so an operator
 /// can still opt a server into a specific variable — and those entries win on
-/// conflict, matching the previous `Command::envs` behaviour.
+/// conflict.
 fn child_env<I>(parent: I, configured: &HashMap<String, String>) -> Vec<(String, String)>
 where
     I: IntoIterator<Item = (String, String)>,

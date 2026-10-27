@@ -31,9 +31,8 @@ fn ingest_fixture(id: &str, user: &str, assistant: &str) -> CompletedTurnIngest 
 }
 
 /// Drain every due entry through `ingest` and count how many it processed.
-/// This replaces the old `pending()` introspection: instead of asserting on
-/// queue length, we assert on how many entries the real `drain_due` consumer
-/// received.
+/// Assertions target what the real `drain_due` consumer received rather
+/// than queue-length introspection — delivery is the observable contract.
 async fn drain_count(queue: &DurableIngestQueue, now_ms: u64) -> usize {
     let calls = Arc::new(AtomicUsize::new(0));
     queue
@@ -150,8 +149,7 @@ async fn queued_ingest_survives_worker_restart() {
         .unwrap();
 
     // Re-open the queue file; the persisted entry must still be there and
-    // deliverable to a real `drain_due` consumer (replaces the old
-    // `pending().len() == 1` introspection).
+    // deliverable to a real `drain_due` consumer.
     let restarted = DurableIngestQueue::open(path, 4).await.unwrap();
     assert_eq!(drain_count(&restarted, 0).await, 1);
     // A second drain must find the queue empty — the entry was consumed.
@@ -187,7 +185,7 @@ async fn preexisting_lock_file_does_not_block_queue_owner() {
         .unwrap();
 
     // The stale lock was reclaimed; reopening yields the enqueued entry to a
-    // real consumer (replaces `pending().len() == 1`).
+    // real consumer.
     let restarted = DurableIngestQueue::open(path, 4).await.unwrap();
     assert_eq!(drain_count(&restarted, 0).await, 1);
 }
@@ -235,7 +233,7 @@ async fn concurrent_queue_handles_merge_entries_without_lost_updates() {
     enqueue_b.unwrap();
 
     // Both entries survive concurrent enqueues and are delivered exactly once
-    // to a single `drain_due` consumer (replaces reading `pending()` ids).
+    // to a single `drain_due` consumer.
     let restarted = DurableIngestQueue::open(path, 4).await.unwrap();
     assert_eq!(drain_count(&restarted, 0).await, 2);
     assert_eq!(drain_count(&restarted, 0).await, 0);
@@ -343,7 +341,7 @@ async fn concurrent_drainers_claim_entry_before_ingest() {
     result_a.unwrap();
     result_b.unwrap();
 
-    // Exactly one drainer claimed the entry (replaces `pending().is_empty()`).
+    // Exactly one drainer claimed the entry.
     assert_eq!(server_calls.load(Ordering::SeqCst), 1);
     let restarted = DurableIngestQueue::open(path, 4).await.unwrap();
     assert_eq!(drain_count(&restarted, 0).await, 0);

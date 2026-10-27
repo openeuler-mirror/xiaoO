@@ -1,6 +1,6 @@
-//! Slash-command completion for the TUI chat input. Must stay in sync with dispatch in
-//! `app.rs` (`/connect`, `/delete`, `/dir`, `/load`, `/new`, `/remote`, `/sandbox`, `/save`,
-//! `/sessions`, `/skills`).
+//! Slash-command completion for the TUI chat input. Must stay in sync with
+//! the slash-command dispatch in `input/event_key.rs` (plus the `/dir` /
+//! `/cd` interception in `services/workspace.rs`).
 
 use crate::input::Input;
 use crate::services::command_loader::ExternalCommand;

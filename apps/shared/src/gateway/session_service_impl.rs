@@ -178,19 +178,21 @@ impl CoreBackedSessionService {
 
     /// Spawn the background orphan-session reaper. Wakes every
     /// [`REAPER_INTERVAL`](crate::gateway::REAPER_INTERVAL) and force-closes
-    /// sessions whose lease has been gone for longer than
+    /// sessions whose lease has been stale for longer than
+    /// [`STALE_LEASE_THRESHOLD_MS`](crate::gateway::STALE_LEASE_THRESHOLD_MS)
+    /// (45 s without a heartbeat) and whose last activity is older than
     /// [`ORPHAN_SESSION_THRESHOLD_MS`](crate::gateway::ORPHAN_SESSION_THRESHOLD_MS)
-    /// and whose last activity is older than the same threshold, reclaiming
-    /// leaked backends (e2b sandboxes) when a TUI crashes
+    /// (2 h), reclaiming leaked backends (e2b sandboxes) when a TUI crashes
     /// and nobody comes back.
     ///
     /// The reaper must NOT close sessions whose in-memory handle is currently
     /// running an active turn (killing the sandbox mid-turn would leave the
     /// session half-applied).
     ///
-    /// Returns a `JoinHandle` (currently only the daemon's `main.rs`) so
-    /// callers can `.abort()` it on shutdown. Errors are logged and never
-    /// propagated (best-effort).
+    /// Returns a `JoinHandle` so callers can `.abort()` it on shutdown. It is
+    /// spawned unconditionally by [`AppBootstrap`](crate::gateway::AppBootstrap)'s
+    /// assembly step, so it runs in every full-bootstrap process. Errors are
+    /// logged and never propagated (best-effort).
     pub(crate) fn spawn_orphan_reaper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         const ORPHAN_THRESHOLD_MS: u64 = crate::gateway::ORPHAN_SESSION_THRESHOLD_MS;
         const STALE_LEASE_MS: u64 = crate::gateway::STALE_LEASE_THRESHOLD_MS;
@@ -215,7 +217,8 @@ impl CoreBackedSessionService {
 
     /// Reaper's per-sweep logic, factored out for unit tests (tests drive it
     /// directly with backdated `updated_at_ms` rather than waiting 2h; no
-    /// fake-clock injection — `now` uses [`crate::gateway::current_time_ms`],
+    /// fake-clock injection — `now` uses
+    /// [`current_time_ms`](crate::gateway::session_lease::current_time_ms),
     /// fail-closed on a skewed clock). Iterates every session record and
     /// delegates per-record close decisions to [`reap_one_record`].
     async fn run_reaper_sweep(
@@ -2359,9 +2362,8 @@ fn recent_memory_context_messages(
     recent
 }
 
-/// Build a `*.Session.lifecycle.<stage>` hook point id. Consolidates the
-/// inline `format!("{}.Session.lifecycle.<stage>", agent_id)` previously
-/// repeated across the session created/closed/state call sites.
+/// Build a `*.Session.lifecycle.<stage>` hook point id — the single source
+/// of truth used by the session created/closed/state call sites.
 fn session_lifecycle_hook_point(agent_id: &str, stage: &str) -> HookPointId {
     HookPointId(format!("{}.Session.lifecycle.{}", agent_id, stage))
 }

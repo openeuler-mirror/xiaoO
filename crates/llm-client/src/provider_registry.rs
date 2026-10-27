@@ -33,10 +33,12 @@ impl ProtocolFamily {
         }
     }
 
-    /// 协议族的静态兜底上下文窗口：动态探测链（provider catalog >
-    /// OpenRouter > Ollama `/api/show`）全部未命中时，provider 构造默认值
-    /// 与 TUI 同步校验共用此值，避免两处魔法数字漂移。仅作粗估下限，
-    /// 不代表真实窗口（真实值以动态探测为准）。
+    /// Static fallback context window for the protocol family: when the
+    /// dynamic probing chain (provider catalog > OpenRouter > Ollama
+    /// `/api/show`) misses entirely, the provider-construction default and
+    /// the TUI's synchronous validation share this value so the two magic
+    /// numbers cannot drift. A coarse lower bound only — not the real
+    /// window (dynamic probing is authoritative).
     pub fn static_context_window(&self) -> usize {
         match self {
             Self::OpenAiCompatible | Self::Ollama | Self::Zhipu => 128_000,
@@ -65,10 +67,12 @@ pub struct ProviderProfile {
     pub default_api_key_env: Option<&'static str>,
     pub api_key_required: bool,
     pub supports_model_catalog: bool,
-    /// `reasoning_effort` 取值方言。端点为 Zhipu API 但走 OpenAI 兼容协议
-    /// 的 provider（如 zai-coding-plan，api.z.ai/api/coding/paas/v4）必须
-    /// 声明 `Zhipu`，其余保持默认 `OpenAi`。由工厂的 OpenAI 兼容分支消费；
-    /// Zhipu 协议族由 `ZhipuProvider` 原生内置，不读此字段。
+    /// Dialect for `reasoning_effort` values. Providers whose endpoint is
+    /// the Zhipu API but speaks the OpenAI-compatible protocol (e.g.
+    /// zai-coding-plan, api.z.ai/api/coding/paas/v4) must declare `Zhipu`;
+    /// everyone else keeps the `OpenAi` default. Consumed by the factory's
+    /// OpenAI-compatible branch; the Zhipu protocol family has it built in
+    /// natively via `ZhipuProvider` and never reads this field.
     pub reasoning_dialect: ReasoningDialect,
 }
 
@@ -78,10 +82,11 @@ impl ProviderProfile {
     }
 }
 
-/// 注册表条目的结构体更新基底（`..BASE_PROFILE`）：`reasoning_dialect` 缺省
-/// 为 OpenAi，仅 Zhipu 端点（zhipu / zai-coding-plan）显式声明
-/// `ReasoningDialect::Zhipu`。其余字段值只是占位——每条注册表条目都须
-/// 显式设置，不落缺省。
+/// Struct-update base for registry entries (`..BASE_PROFILE`):
+/// `reasoning_dialect` defaults to OpenAi with only the Zhipu endpoints
+/// (zhipu / zai-coding-plan) declaring `ReasoningDialect::Zhipu`
+/// explicitly. Every other field value is a placeholder — each registry
+/// entry must set its own, never relying on the defaults.
 const BASE_PROFILE: ProviderProfile = ProviderProfile {
     provider_name: "",
     display_name: "",
@@ -99,17 +104,20 @@ impl Default for ProviderProfile {
     }
 }
 
-/// 单个 provider 的注册声明：`aliases` 为全部可识别名（小写，含规范名且
-/// 规范名 `profile.provider_name` 居首），`profile` 为装配档案。
+/// One provider's registration: `aliases` lists every recognized name
+/// (lowercase, canonical name included and first as
+/// `profile.provider_name`); `profile` is the assembly profile.
 struct ProviderSpec {
     aliases: &'static [&'static str],
     profile: ProviderProfile,
 }
 
-/// 全部 provider 注册表，解析（`resolve_provider_profile`）、目录
-/// （`provider_catalog`）与支持名单（`supported_providers`）均由本表派生。
-/// **新增 provider 只需在表中增加一条**，不存在需要同步维护的第二份名单。
-/// 表序即目录展示序（常用 provider 在前）。
+/// The full provider registry: resolution (`resolve_provider_profile`),
+/// the catalog (`provider_catalog`) and the supported list
+/// (`supported_providers`) are all derived from this table.
+/// **Adding a provider means adding one row** — there is no second list to
+/// keep in sync. Table order is the catalog display order (common
+/// providers first).
 const PROVIDER_SPECS: &[ProviderSpec] = &[
     ProviderSpec {
         aliases: &["openai"],
@@ -463,7 +471,8 @@ pub fn resolve_protocol_family(name: &str) -> Option<ProtocolFamily> {
 
 static SUPPORTED_PROVIDERS: OnceLock<Vec<&'static str>> = OnceLock::new();
 
-/// 全部可识别 provider 名（含别名），由 [`PROVIDER_SPECS`] 派生。
+/// All recognized provider names (aliases included), derived from
+/// [`PROVIDER_SPECS`].
 pub fn supported_providers() -> &'static [&'static str] {
     SUPPORTED_PROVIDERS.get_or_init(|| {
         PROVIDER_SPECS

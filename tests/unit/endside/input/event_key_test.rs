@@ -510,9 +510,9 @@ async fn ctrl_p_recalls_previous_history_through_real_dispatch() {
 #[tokio::test]
 async fn unbound_alt_letter_does_not_type_through_real_dispatch() {
     // The unbound Alt+letter drop lives in a single place — `handle_input_key`
-    // (the main-flow edit arm used to repeat it and early-return). Alt+Q (never
-    // bound) must not type the bare letter; a bound Alt chord on the same path
-    // still applies.
+    // (the main-flow edit arm must not duplicate it and early-return). Alt+Q
+    // (never bound) must not type the bare letter; a bound Alt chord on the
+    // same path still applies.
     let mut app = test_app();
     let mut input = Input::from("hi");
     input.set_cursor(2);
@@ -546,11 +546,13 @@ async fn unbound_alt_letter_does_not_type_through_real_dispatch() {
     );
 }
 
-// ── 官方 model list 拉取的触发与落地 ────────────────────────────────────────
+// ── Official model-list fetch triggering and landing ─────────────────────────
 //
-// 这些用例走真实的按键派发与真实的 HTTP 客户端：mockito 起本地假 `/models`
-// 端点，把 `llm.api_base` 指过去。拉取任务用 `recv().await` 确定性驱动，
-// 不靠 sleep 轮询；只断言"同步写入的状态"的用例则完全不等待网络。
+// These cases use real key dispatch and the real HTTP client: mockito
+// serves a local fake `/models` endpoint and `llm.api_base` points at it.
+// Fetch tasks are driven deterministically via `recv().await`, no sleep
+// polling; cases that only assert synchronously-written state do not wait
+// on the network at all.
 
 fn model(id: &str) -> crate::chat::ModelInfo {
     crate::chat::ModelInfo {
@@ -567,9 +569,12 @@ fn model_list_state(app: &App, provider: &str) -> crate::chat::ModelListState {
     app.state.chat_state.model_list_state(provider)
 }
 
-/// 把 `llm` 指向本地假端点：provider 与 `llm.provider` 一致时
-/// `persisted_selection_settings` 才会用配置里的 api_base（否则回落默认表，
-/// 请求会打到真实厂商）。模型 id 特意与官方列表不同，便于断言官方结果确实替换了内置表。
+/// Point `llm` at the local fake endpoint: only when the provider equals
+/// `llm.provider` does `persisted_selection_settings` use the config's
+/// api_base (otherwise it falls back to the default table and the request
+/// would hit a real vendor). The model id deliberately differs from the
+/// official list so assertions can prove the official result really
+/// replaced the builtin table.
 fn test_app_with_llm(provider: &str, model: &str, api_base: &str) -> App {
     let mut config = Config::default();
     config.llm.provider = provider.to_string();
@@ -605,8 +610,9 @@ fn failed_outcome(
     }
 }
 
-/// `/connect` 打开弹窗后必须为当前高亮 provider 起一次拉取（从未拉过 →
-/// `Builtin` → 要拉），并且这一步是同步置位的，UI 立刻能显示 "refreshing…"。
+/// Opening the dialog via `/connect` must start a fetch for the
+/// highlighted provider (never fetched → `Builtin` → fetch), and the state
+/// is set synchronously so the UI can show "refreshing…" immediately.
 #[tokio::test]
 async fn opening_connect_schedules_fetch_for_active_provider() {
     let mut server = mockito::Server::new_async().await;
@@ -638,12 +644,15 @@ async fn opening_connect_schedules_fetch_for_active_provider() {
     );
 }
 
-/// 端到端：真实 HTTP 响应 → 结果回传 → 落地。断言官方列表替换弹窗与
-/// `ChatState` 两处副本（含激活模型补到首位）、状态转 `Ready`；选中项按 id
-/// 保持由 `provider_dialog_test` 覆盖，这里不断言选中项。
+/// End to end: real HTTP response → report-back → landing. Asserts the
+/// official list replaces both copies (dialog + `ChatState`, including the
+/// active model pinned to the front) and the state flips to `Ready`;
+/// selection preservation by id is covered by `provider_dialog_test` and is
+/// not asserted here.
 ///
-/// provider 用 `local`：它的 profile 不要求 API key（`api_key_required=false`），
-/// 因此请求能真正打到假端点，不需要在测试里摆弄环境变量。
+/// The provider is `local`: its profile does not require an API key
+/// (`api_key_required=false`), so the request really reaches the fake
+/// endpoint without fiddling with environment variables.
 #[tokio::test]
 async fn fetched_official_list_replaces_dialog_models_end_to_end() {
     let mut server = mockito::Server::new_async().await;
@@ -692,8 +701,9 @@ async fn fetched_official_list_replaces_dialog_models_end_to_end() {
     ));
 }
 
-/// 失败落地：列表与选中项都不动，只记一条错误状态（"成功一次后永久替换"
-/// 的另一面——失败永远不回退、也不清空）。
+/// Failure landing: list and selection untouched, only an error state is
+/// recorded (the flip side of "one success permanently replaces" — failures
+/// never roll back and never clear).
 #[tokio::test]
 async fn failed_fetch_keeps_models_and_records_error() {
     let mut app = test_app_with_llm("openai-compatible", "pin-me", "http://127.0.0.1:1/v1");
@@ -722,10 +732,13 @@ async fn failed_fetch_keeps_models_and_records_error() {
     }
 }
 
-/// 目录里已经没有该 provider 时写不进目录（防御分支：`/new`、快照恢复与远端会话重建
-/// 都会推进世代，那种结果在世代检查处就被丢弃；本测试直接清空目录构造这一状态）：
-/// 此时必须回落 `Builtin`，否则下次打开弹窗会拿着内置列表声称"官方模型列表"，
-/// 并在 TTL 内拒绝重新拉取。
+/// When the catalog no longer holds the provider, the catalog write fails
+/// (defensive branch: `/new`, snapshot restore and remote rebuild all bump
+/// the generation, and those outcomes are dropped at the generation check;
+/// this test constructs the state directly by clearing the catalog): it
+/// must fall back to `Builtin`, otherwise the next dialog open would
+/// present the builtin list as the "official model list" and refuse to
+/// re-fetch within the TTL.
 #[tokio::test]
 async fn outcome_for_provider_missing_from_catalog_falls_back_to_builtin() {
     let mut app = test_app_with_llm("local", "pin-me", "http://127.0.0.1:1/v1");
@@ -744,8 +757,9 @@ async fn outcome_for_provider_missing_from_catalog_falls_back_to_builtin() {
     );
 }
 
-/// 同一会话内 `Ctrl+R` 是唯一能绕过退避的路径：用户刚补完 API key 时不该等 30s
-/// （会话重建会把状态重置成 `Builtin`，那是另一条路）。
+/// Within one session, `Ctrl+R` is the only path that bypasses the backoff:
+/// right after filling in the API key the user should not wait 30s (a
+/// session rebuild resetting the state to `Builtin` is a separate path).
 #[tokio::test]
 async fn ctrl_r_force_refreshes_past_failure_backoff() {
     let mut server = mockito::Server::new_async().await;
@@ -756,14 +770,17 @@ async fn ctrl_r_force_refreshes_past_failure_backoff() {
         .with_body(r#"{"data":[{"id":"m1"}]}"#)
         .create_async()
         .await;
-    // provider 名用 `local`：只有与 `llm.provider` 一致时才会用配置里的 api_base，
-    // 否则请求会打到真实厂商（这条测试过去只断言 is_loading()，弱 oracle 掩盖了这点）。
+    // The provider is `local`: only when it matches `llm.provider` does the
+    // config's api_base apply, otherwise the request would hit a real
+    // vendor. The oracle here is the real HTTP mock, not just an
+    // is_loading() flip.
     let mut app = test_app_with_llm("local", "pin-me", &format!("{}/v1", server.url()));
     app.open_provider_selection_dialog();
-    // 先让打开弹窗那次拉取落地并释放在飞名额（同 provider 在飞时不重复发请求）。
+    // Let the dialog-open fetch land first and release its in-flight slot
+    // (a same-provider fetch in flight means no duplicate request).
     let (session, outcome) = app.model_fetch_rx.recv().await.expect("首次拉取应回传");
     app.apply_model_fetch_outcome(session, outcome);
-    // 模拟"刚失败、仍在 30s 退避窗口内"的状态。
+    // Simulate "just failed, still inside the 30s backoff window".
     app.state.chat_state.set_model_list_state(
         "local",
         crate::chat::ModelListState::Failed {
@@ -782,14 +799,16 @@ async fn ctrl_r_force_refreshes_past_failure_backoff() {
         "Ctrl+R 必须无视退避直接重拉"
     );
 
-    // 等这次重试真的打出去再核对请求数（否则断言跑在 HTTP 之前，是竞态）。
+    // Wait until this retry actually goes out before checking the request
+    // count — otherwise the assertion races ahead of the HTTP call.
     let (session, outcome) = app.model_fetch_rx.recv().await.expect("重试应回传");
     app.apply_model_fetch_outcome(session, outcome);
     mock.assert_async().await;
 }
 
-/// 切 provider 才拉取：Providers 栏内上下键只在真正换了 provider 时触发；
-/// Models 栏内上下键只换模型，不触发任何请求。
+/// Fetch only on provider change: arrow keys inside the Providers column
+/// trigger only when the provider actually changes; inside the Models column
+/// they just select a model and fire no request.
 #[tokio::test]
 async fn provider_switch_refetches_only_when_provider_changes() {
     let mut server = mockito::Server::new_async().await;
@@ -799,14 +818,16 @@ async fn provider_switch_refetches_only_when_provider_changes() {
         .with_body(r#"{"data":[{"id":"m1"}]}"#)
         .create_async()
         .await;
-    // openrouter 的下一项是 minimax：profile 声明无 catalog，拉取会在发请求前
-    // 就返回 Unsupported，因此这条用例不会碰到任何真实厂商端点。
+    // The entry after openrouter is minimax: its profile declares no
+    // catalog, so the fetch returns Unsupported before any request — this
+    // case cannot touch a real vendor endpoint.
     let mut app = test_app_with_llm("openrouter", "or-pin", &format!("{}/v1", server.url()));
     app.open_provider_selection_dialog();
     let session = app.state.model_fetch_session;
     app.apply_model_fetch_outcome(session, ready_outcome("openrouter", &["or-a"]));
 
-    // Models 栏内移动：provider 未变 → 不重拉（Ready 保持原样）。
+    // Moving within the Models column: provider unchanged → no re-fetch
+    // (Ready stays as-is).
     app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
         .await
         .expect("switch focus to Models");
@@ -821,7 +842,8 @@ async fn provider_switch_refetches_only_when_provider_changes() {
         "只在 Models 栏内移动不得触发重新拉取"
     );
 
-    // Providers 栏内移到 minimax：provider 变了 → 从未拉过 → Loading。
+    // Moving to minimax within the Providers column: provider changed →
+    // never fetched → Loading.
     app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
         .await
         .expect("switch focus back to Providers");
@@ -852,18 +874,20 @@ async fn stale_loading_does_not_block_a_new_fetch() {
         .with_body(r#"{"data":[{"id":"m1"}]}"#)
         .create_async()
         .await;
-    // provider 名用 `local`：只有与 `llm.provider` 一致时才会用配置里的 api_base，
-    // 否则请求会打到真实厂商。
+    // Why the provider is `local`: see the same-shaped test above; the
+    // config's api_base applies only when it matches `llm.provider`.
     let mut app = test_app_with_llm("local", "pin-me", &format!("{}/v1", server.url()));
     app.open_provider_selection_dialog();
 
-    // 先让"打开弹窗"那次拉取正常落地，腾出在飞名额（否则下面的重试会被名额挡住，
-    // 测试会变成竞态）。
+    // Let the dialog-open fetch land normally first to free the in-flight
+    // slot (otherwise the retry below is blocked by the slot cap and the
+    // test becomes a race).
     let (session, outcome) = app.model_fetch_rx.recv().await.expect("首次拉取应回传");
     app.apply_model_fetch_outcome(session, outcome);
     assert!(app.state.model_fetch_inflight.is_empty());
 
-    // 模拟"任务 panic 导致结果永不回传"：状态停在 Loading，且已过兜底窗口。
+    // Simulate "the task panicked and the outcome never arrives": state
+    // stuck in Loading, past the backstop window.
     app.state.chat_state.set_model_list_state(
         "local",
         crate::chat::ModelListState::Loading {
@@ -873,7 +897,8 @@ async fn stale_loading_does_not_block_a_new_fetch() {
 
     app.maybe_refresh_selected_provider(false);
 
-    // 状态是同步置位的：立刻就能看到"新任务"的时间戳（不再是陈旧的）。
+    // The state is set synchronously: the "new task" timestamp is visible
+    // immediately (no longer stale).
     let state = model_list_state(&app, "local");
     assert!(state.is_loading(), "重新拉起后仍是 Loading");
     assert!(
@@ -881,7 +906,8 @@ async fn stale_loading_does_not_block_a_new_fetch() {
         "陈旧 Loading 必须能被重新拉起（时间戳应为新任务）"
     );
 
-    // 等这次重试真的打出去，再核对请求数（否则断言跑在 HTTP 之前，是竞态）。
+    // Wait for the retry to land before checking the request count, else
+    // the assertion races ahead of HTTP — see the same-shaped note above.
     let (session, outcome) = app.model_fetch_rx.recv().await.expect("重试必须回传结果");
     app.apply_model_fetch_outcome(session, outcome);
     mock.assert_async().await;
@@ -914,7 +940,8 @@ fn outcomes_from_a_previous_session_are_dropped() {
         "被丢弃的结果同样要释放在飞名额"
     );
 
-    // 对照组：当代的结果必须照常落地，证明上面的断言不是空转。
+    // Control group: a same-generation outcome must land normally,
+    // proving the assertions above are not vacuous.
     let current = app.state.model_fetch_session;
     app.apply_model_fetch_outcome(current, outcome());
     assert!(

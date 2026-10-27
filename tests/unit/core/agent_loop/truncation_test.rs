@@ -118,17 +118,11 @@ mod truncate_tool_tests {
             !preview.is_empty(),
             "byte-level fallback must produce a non-empty preview; got empty"
         );
-        // Preview should be <= MAX_TOOL_OUTPUT_BYTES (char-safe).
         assert!(
             preview.len() <= MAX_TOOL_OUTPUT_BYTES,
             "preview must be <= MAX_TOOL_OUTPUT_BYTES ({}), got {}",
             MAX_TOOL_OUTPUT_BYTES,
             preview.len()
-        );
-        // Preview should be > 0 — the whole point of the fallback.
-        assert!(
-            !preview.is_empty(),
-            "preview must have content, not just the hint"
         );
     }
 
@@ -149,12 +143,10 @@ mod truncate_tool_tests {
         assert!(input.len() > MAX_TOOL_OUTPUT_BYTES);
 
         let out = truncate_tool_output("test_tool", "call_oversized", &input);
-        // Should be truncated — either byte or line limit triggers.
         assert!(
             out.contains("[Tool output truncated"),
             "should be truncated; got: {out}"
         );
-        // Preview should be bounded.
         let preview = out.split("\n[Tool output truncated").next().unwrap_or("");
         assert!(
             preview.len() <= MAX_TOOL_OUTPUT_BYTES,
@@ -180,12 +172,10 @@ mod truncate_tool_tests {
 
         let out = truncate_tool_output("test_tool", "call_mb", &input);
         let preview = out.split("\n[Tool output truncated").next().unwrap_or("");
-        // Must be valid UTF-8 (no panic, no broken codepoint).
         assert!(
             std::str::from_utf8(preview.as_bytes()).is_ok(),
             "preview must be valid UTF-8; got broken bytes"
         );
-        // Must be <= MAX_TOOL_OUTPUT_BYTES.
         assert!(
             preview.len() <= MAX_TOOL_OUTPUT_BYTES,
             "preview must be <= MAX_TOOL_OUTPUT_BYTES, got {}",

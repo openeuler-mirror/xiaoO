@@ -24,9 +24,10 @@ pub struct AgentLoopInput {
     pub event_sink: Option<Arc<dyn LoopEventSink>>,
     pub interaction: Option<Arc<dyn InteractionHandle>>,
     pub agent_id: Option<AgentId>,
-    /// Gateway 预解析的可见工具集（`Arc` 因为 `PromptBuildInput` 需要 owned）。
+    /// Gateway-resolved visible tool set (`Arc` because `PromptBuildInput`
+    /// needs it owned).
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
-    /// `None` = tool execution 跳过。
+    /// `None` = tool execution is skipped.
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub reasoning_effort: ReasoningEffort,
     pub stop_rules: Vec<LoopStopRule>,

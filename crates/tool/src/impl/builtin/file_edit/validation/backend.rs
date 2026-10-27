@@ -21,37 +21,33 @@ use agent_contracts::backend::PathStat;
 ///
 /// These codes MUST match the TypeScript error codes exactly.
 pub mod error_code {
-    /// No change made (old_string == new_string) (error_code = 1)
+    /// No change made (old_string == new_string)
     pub const NO_CHANGE: u32 = 1;
-    /// File exists when trying to create with empty old_string (error_code = 3)
+    /// File exists when trying to create with empty old_string
     pub const FILE_EXISTS: u32 = 3;
-    /// File not found (error_code = 4)
+    /// File not found
     pub const FILE_NOT_FOUND: u32 = 4;
-    /// Notebook file not supported (error_code = 5)
+    /// Notebook file not supported
     pub const NOTEBOOK_FILE: u32 = 5;
-    /// File modified since read (error_code = 7)
+    /// File modified since read
     pub const FILE_MODIFIED: u32 = 7;
-    /// old_string not found in file (error_code = 8)
+    /// old_string not found in file
     pub const OLD_STRING_NOT_FOUND: u32 = 8;
-    /// Ambiguous match (multiple matches but replace_all=false) (error_code = 9)
+    /// Ambiguous match (multiple matches but replace_all=false)
     pub const AMBIGUOUS_MATCH: u32 = 9;
-    /// File too large (error_code = 10)
+    /// File too large
     pub const FILE_TOO_LARGE: u32 = 10;
 }
 
 /// Result of input validation.
 #[derive(Debug, Clone)]
 pub struct ValidationResult {
-    /// Whether validation passed.
     pub result: bool,
-    /// Error message if validation failed.
     pub message: Option<String>,
-    /// Error code if validation failed.
     pub error_code: Option<u32>,
 }
 
 impl ValidationResult {
-    /// Create a successful validation result.
     pub fn ok() -> Self {
         Self {
             result: true,

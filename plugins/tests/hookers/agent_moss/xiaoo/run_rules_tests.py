@@ -396,8 +396,7 @@ def run_single_test(bin_path, config_path, prompt, timeout, max_turns, max_retri
         "-p", prompt,
     ]
 
-    # 设置环境变量（agent_moss bridge 用 AGENT_MOSS_LOG_PATH 写桥接日志，
-    # 对应旧 audit_agent 的 AUDIT_LOG_PATH）
+    # 设置环境变量（agent_moss bridge 用 AGENT_MOSS_LOG_PATH 写桥接日志）
     env = os.environ.copy()
     env["AGENT_MOSS_LOG_PATH"] = str(audit_log_path)
 

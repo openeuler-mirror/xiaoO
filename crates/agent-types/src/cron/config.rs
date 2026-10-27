@@ -16,23 +16,16 @@ pub struct CronGlobalConfig {
 /// Raw definition of a single cron job from `jobs.toml` (before merging globals).
 #[derive(Debug, Clone)]
 pub struct CronJobDef {
-    /// Unique job identifier.
     pub name: String,
-    /// Human-readable description for logging / UI.
     pub description: Option<String>,
-    /// Validated cron expression.
     pub cron: super::CronExpression,
-    /// Prompt text sent to the agent at trigger time.
     pub prompt: String,
-    /// Optional agent role override (maps to `[agent.<name>]` in config).
+    /// Overrides `[agent.<name>]` when set.
     pub agent_role: Option<String>,
-    /// Per-job timeout override.  `None` means "use the global default".
+    /// `None` means "use the global default".
     pub timeout_secs: Option<u64>,
-    /// Whether the job is enabled.
     pub enabled: bool,
-    /// Maximum retry attempts on failure.
     pub max_retries: u32,
-    /// Delay between retries (seconds).
     pub retry_delay_secs: u64,
 }
 
@@ -41,22 +34,14 @@ pub struct CronJobDef {
 /// All optional fields have been merged with global defaults.
 #[derive(Debug, Clone)]
 pub struct CronJobConfig {
-    /// Unique job identifier.
     pub name: String,
-    /// Human-readable description.
     pub description: Option<String>,
-    /// Validated cron expression.
     pub cron: super::CronExpression,
-    /// Prompt text.
     pub prompt: String,
-    /// Optional agent role.
     pub agent_role: Option<String>,
-    /// Resolved timeout in seconds.
+    /// Resolved from `CronJobDef::timeout_secs` or the global default.
     pub timeout_secs: u64,
-    /// Whether the job is enabled.
     pub enabled: bool,
-    /// Maximum retry attempts.
     pub max_retries: u32,
-    /// Delay between retries (seconds).
     pub retry_delay_secs: u64,
 }

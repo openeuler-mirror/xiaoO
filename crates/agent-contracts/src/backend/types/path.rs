@@ -30,12 +30,11 @@ impl PathNamespace {
 
 /// A path in the backend's filesystem namespace.
 ///
-/// Unlike the old `String` newtype, a `BackendPath` carries ownership and
-/// namespace metadata so a path produced by one backend cannot silently be
-/// interpreted as a path inside a different backend. `native_path` holds the
-/// canonical absolute path *inside* that backend (the same value that was
-/// previously stored in the tuple field), so existing `Display` / tool output
-/// stays byte-for-byte compatible.
+/// A `BackendPath` carries ownership and namespace metadata so a path
+/// produced by one backend cannot silently be interpreted as a path inside
+/// a different backend. `native_path` holds the canonical absolute path
+/// *inside* that backend, so `Display` / tool output stays byte-for-byte
+/// compatible with the raw path form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BackendPath {
     pub backend_id: String,

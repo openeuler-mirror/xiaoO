@@ -109,7 +109,6 @@ fn ssh_with_key_and_no_hostkey_allowed() {
     };
     let result = validate_interactive_command(&input);
     // Has both key and StrictHostKeyChecking=no, fully non-interactive
-    // Should be allowed
     assert!(result.result);
 }
 
@@ -123,7 +122,6 @@ fn ssh_with_batch_and_no_hostkey_allowed() {
     };
     let result = validate_interactive_command(&input);
     // Has both BatchMode and StrictHostKeyChecking=no, fully non-interactive
-    // Should be allowed
     assert!(result.result);
 }
 

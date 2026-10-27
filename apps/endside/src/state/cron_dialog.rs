@@ -97,7 +97,6 @@ impl CronEditForm {
         }
     }
 
-    /// Get a mutable reference to the value string for a given field.
     pub fn field_value_mut(&mut self, field: CronEditField) -> &mut String {
         match field {
             CronEditField::Name => &mut self.name,
@@ -298,7 +297,8 @@ impl CronDialog {
             let entry = form.to_entry(self.default_timeout_secs)?;
             match editing_index {
                 Some(index) => {
-                    // Check for duplicate name if name changed
+                    // Only check for duplicates when the name changed: the
+                    // old name is necessarily already in the list.
                     let old_name = &self.jobs[*index].name;
                     if entry.name != *old_name && self.jobs.iter().any(|j| j.name == entry.name) {
                         return Err(format!("Job name '{}' already exists.", entry.name));
@@ -367,7 +367,6 @@ impl CronDialog {
         }
     }
 
-    /// Set error on the edit form.
     pub fn edit_set_error(&mut self, msg: String) {
         if let CronDialogMode::EditForm { error, .. } = &mut self.mode {
             *error = Some(msg);

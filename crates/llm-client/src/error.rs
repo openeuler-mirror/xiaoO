@@ -229,7 +229,8 @@ fn overflow_patterns() -> &'static [Regex] {
 static OVERFLOW_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
 static NO_BODY_OVERFLOW_RE: OnceLock<Regex> = OnceLock::new();
 
-/// 记录 LLM 流式请求失败的详细信息到 error.log（完整记录，不截断）
+/// Log the full details of a failed streaming LLM request to error.log
+/// (complete, never truncated).
 pub(crate) fn write_stream_error_log(
     url: &str,
     response_headers: Option<&reqwest::header::HeaderMap>,

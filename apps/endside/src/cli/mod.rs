@@ -176,8 +176,9 @@ pub fn build_compression_pipeline(
     Ok(pipeline)
 }
 
-/// CLI 上下文窗口解析：动态探测链优先（与 TUI 网关共用
-/// `probe_dynamic_context_window`），失败回落 provider 构造时的静态值。
+/// CLI context-window resolution: dynamic probing chain first (shared with
+/// the TUI gateway via `probe_dynamic_context_window`), falling back to the
+/// provider's static value on failure.
 pub async fn resolve_effective_context_window(
     config: &CliConfig,
     llm_provider: &Arc<LlmProviderWrapper>,

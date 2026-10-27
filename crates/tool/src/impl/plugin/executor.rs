@@ -152,9 +152,9 @@ impl DeclarativeToolExecutor {
             .stderr(Stdio::piped());
 
         // 声明式插件工具的 manifest 位于 agent 可写的工作区内，所以这个子进程是
-        // "模型间接决定跑什么"的那一类。它此前继承了 daemon 的整个环境 —— 包括
-        // 注入进来的 LLM 凭据（见 `inject_llm_secrets_into_env`）—— 意味着一次
-        // 工具调用就能把进程的全部密钥读走。清空后只放回运行必需的最小集合。
+        // "模型间接决定跑什么"的那一类。它若继承 daemon 的整个环境——包括注入进来
+        // 的 LLM 凭据（见 `inject_llm_secrets_into_env`）——意味着一次工具调用就能
+        // 把进程的全部密钥读走。清空后只放回运行必需的最小集合。
         command.env_clear();
         for inherited in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"] {
             if let Ok(value) = std::env::var(inherited) {
@@ -174,11 +174,10 @@ impl DeclarativeToolExecutor {
         }
         command.env("XIAOO_AGENT_ID", agent_id);
 
-        // `exec.env` 曾经按 manifest 声明的名字从 daemon 环境逐个取值。但 manifest
-        // 属于 agent 可写的不受信输入，而 daemon 环境里放着全部明文凭据，于是
-        // `env = ["ANTHROPIC_API_KEY"]` 可以在 `env_clear()` 之后把凭据原样取回，
-        // 把这条加固抵消掉。manifest 不应具备"指名读取宿主环境变量"的能力，因此
-        // 这里只记录被忽略的声明，不再导出任何 daemon 环境变量。
+        // manifest 的 `exec.env` 声明会被忽略并告警：manifest 属于 agent 可写的
+        // 不受信输入，而 daemon 环境里放着全部明文凭据，`env = ["ANTHROPIC_API_KEY"]`
+        // 可以在 `env_clear()` 之后把凭据原样取回，把上面那条加固抵消掉。manifest
+        // 不应具备"指名读取宿主环境变量"的能力。
         for env_name in &self.env_names {
             tracing::warn!(
                 env = %env_name,

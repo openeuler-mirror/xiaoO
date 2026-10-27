@@ -14,15 +14,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextOutput {
-    /// The path to the file that was read.
     pub file_path: String,
-    /// The text content of the file.
     pub content: String,
-    /// Number of lines in this output.
     pub num_lines: u64,
-    /// The starting line number (1-indexed).
     pub start_line: u64,
-    /// Total number of lines in the file.
     pub total_lines: u64,
 }
 

@@ -72,7 +72,6 @@ fn install_builtin_skills() {
         return;
     }
 
-    // Collect all skill directories
     let skills: Vec<String> = match fs::read_dir(&skills_src_dir) {
         Ok(entries) => entries
             .filter_map(|entry| entry.ok())
@@ -107,7 +106,6 @@ fn install_builtin_skills() {
             let src = skills_src_dir.join(skill_name);
             let dst = system_install_base.join(skill_name);
 
-            // Check if this is a replacement
             let is_replacement = dst.exists();
 
             if install_skill(&src, &dst).is_ok() {
@@ -171,7 +169,6 @@ fn install_builtin_skills() {
         let src = skills_src_dir.join(skill_name);
         let dst = user_install_base.join(skill_name);
 
-        // Check if this is a replacement
         let is_replacement = dst.exists();
 
         if install_skill(&src, &dst).is_ok() {
@@ -204,18 +201,15 @@ fn install_skill(src: &Path, dst: &Path) -> io::Result<()> {
             fs::remove_dir_all(backup)?;
         }
 
-        // Backup existing directory
+        // Back up before overwriting and roll back on copy failure so a
+        // half-updated directory is never left behind.
         fs::rename(dst, backup)?;
-
-        // Copy new version
         match copy_dir_recursive(src, dst) {
             Ok(()) => {
-                // Success: remove backup
                 fs::remove_dir_all(backup)?;
                 Ok(())
             }
             Err(e) => {
-                // Failure: restore backup
                 if dst.exists() {
                     let _ = fs::remove_dir_all(dst);
                 }
@@ -224,7 +218,6 @@ fn install_skill(src: &Path, dst: &Path) -> io::Result<()> {
             }
         }
     } else {
-        // No existing directory, just copy
         copy_dir_recursive(src, dst)
     }
 }

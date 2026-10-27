@@ -502,9 +502,11 @@ fn default_llm_max_tokens() -> u32 {
     DEFAULT_LLM_MAX_TOKENS
 }
 
-/// 协议族的静态兜底上下文窗口：仅用于同步启动校验与运行时动态探测失败
-/// 后的粗估。真实窗口以动态探测链（provider catalog > OpenRouter > Ollama
-/// `/api/show`）为准，见 `gateway_api::runtime_request::probe_dynamic_context_window`。
+/// Protocol-family static fallback context window: only a coarse estimate
+/// for synchronous startup validation and for when the runtime dynamic probe
+/// fails. The authoritative window comes from the dynamic probing chain
+/// (provider catalog > OpenRouter > Ollama `/api/show`) — see
+/// `gateway_api::runtime_request::probe_dynamic_context_window`.
 pub fn resolve_context_window(config: &Config) -> Option<usize> {
     xiaoo_api::llm::resolve_protocol_family(&config.llm.provider)
         .map(|family| family.static_context_window())

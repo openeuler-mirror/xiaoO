@@ -49,8 +49,9 @@ pub use e2b::{
 };
 pub use labels::{backend_endpoint_kind, backend_endpoint_str, backend_state_label};
 
-// 不透明 RAII 句柄再导出：应用（endside / serverside）启动时安装进程组清理
-// 守卫，无需命名底层 process_group 内部类型，故只导出该句柄。
+// Opaque RAII handle re-export: apps (endside / serverside) install the
+// process-group cleanup guard at startup and never need to name the
+// underlying process_group internals.
 pub use operation_backend::process_group::ProcessGroupCleanupGuard;
 use sandbox_counter::{
     load_global_max_sandbox_cnt, SandboxCounter, SandboxCounterError, SandboxCounterKey,

@@ -194,7 +194,8 @@ impl ToolRegistryBuilderImpl {
 
 impl ToolRegistryBuilder for ToolRegistryBuilderImpl {
     fn with_sources(mut self, sources: Vec<Box<dyn ToolSource>>) -> Self {
-        // 去重
+        // Box<dyn ToolSource> has no PartialEq, so pointer identity is the
+        // only available dedup criterion.
         for source in sources {
             if !self
                 .sources
