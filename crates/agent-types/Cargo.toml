@@ -12,3 +12,6 @@ schemars.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 cron.workspace = true
+# error_log_path 的 home 目录解析;版本收敛交给 workspace.dependencies,
+# 避免各 crate 单独声明后发生漂移
+dirs.workspace = true

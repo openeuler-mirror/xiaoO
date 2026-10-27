@@ -333,6 +333,7 @@ impl LlmProvider for AnthropicProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
+        let started = std::time::Instant::now();
         let url = format!("{}/messages", self.base_url);
         let body = self.build_body(request, true);
         let body_str = serde_json::to_string(&body).unwrap_or_default();
@@ -360,6 +361,25 @@ impl LlmProvider for AnthropicProvider {
             ));
         }
 
+        // Same gate as the other SSE providers: a 200 with a non-SSE
+        // content type is an error page or misrouted endpoint, and feeding
+        // it to the SSE parser would silently yield an empty stream.
+        let content_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !content_type.to_lowercase().starts_with("text/event-stream") {
+            let full_response = response.text().await.unwrap_or_default();
+            return Err(crate::error::map_protocol_mismatch(
+                &url,
+                status.as_u16(),
+                &headers,
+                format!("unexpected content type: {}", content_type),
+                started,
+                &full_response,
+            ));
+        }
+
         let mut full_text = String::new();
         let mut full_reasoning = String::new();
         let mut full_tool_calls: Vec<crate::wire_types::WireToolCall> = Vec::new();
@@ -369,23 +389,24 @@ impl LlmProvider for AnthropicProvider {
         let mut decoder = StreamUtf8Decoder::default();
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
+        let mut bytes_received: usize = 0;
         // Per-stream event_type state. Scoped locally so concurrent streams
         // on the same shared provider don't race on a shared Mutex.
         let mut current_event: Option<String> = None;
 
         while let Some(chunk_result) = byte_stream.next().await {
             let bytes = chunk_result.map_err(|e| {
-                crate::error::write_stream_error_log(
+                crate::error::map_stream_read_error(
                     &url,
-                    Some(&headers),
+                    status.as_u16(),
+                    &headers,
+                    &e,
+                    started,
+                    bytes_received,
                     &buffer,
-                    &e.to_string(),
-                    Some(status.as_u16()),
-                );
-                LlmError::StreamError {
-                    message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
-                }
+                )
             })?;
+            bytes_received += bytes.len();
             decoder.push(&bytes, &mut buffer);
 
             // Cursor-based SSE scanning: find each '\n' without rebuilding

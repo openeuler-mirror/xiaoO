@@ -1,16 +1,20 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
 
-const DISPLAY_LOG_PATH: &str = "~/.xiaoo/log/error.log";
+use xiaoo_shared::error_log_path;
+
 const MAX_SUMMARY_CHARS: usize = 220;
 
 pub(crate) fn record_tui_error(source: &str, error: impl AsRef<str>) -> String {
     let error = error.as_ref();
     let summary = visible_error_summary(error);
+    // The hint must resolve the same way as the write itself: a hardcoded
+    // default would misdirect operators whenever XIAOO_ERROR_LOG redirects
+    // the file (e.g. to a container volume).
+    let display_path = error_log_path().display().to_string();
     let log_status = match append_error_log(source, error) {
-        Ok(()) => format!("错误已写入 {DISPLAY_LOG_PATH}。"),
-        Err(write_error) => format!("错误写入 {DISPLAY_LOG_PATH} 失败: {write_error}"),
+        Ok(()) => format!("错误已写入 {display_path}。"),
+        Err(write_error) => format!("错误写入 {display_path} 失败: {write_error}"),
     };
 
     if summary.is_empty() {
@@ -20,9 +24,11 @@ pub(crate) fn record_tui_error(source: &str, error: impl AsRef<str>) -> String {
     }
 }
 
-/// Append a raw entry to `~/.xiaoo/log/error.log`. Exposed so non-error
-/// diagnostics (e.g. `on_tool_completed` parameter dumps) can share the same
-/// log file without going through the user-facing `record_tui_error`.
+/// Append a raw entry to the shared error log resolved by
+/// [`agent_types::common::error_log_path`] (re-exported through
+/// `xiaoo_shared`). Exposed so non-error diagnostics (e.g.
+/// `on_tool_completed` parameter dumps) can share the same log file
+/// without going through the user-facing `record_tui_error`.
 pub(crate) fn append_error_log(source: &str, error: &str) -> std::io::Result<()> {
     let path = error_log_path();
     if let Some(parent) = path.parent() {
@@ -36,14 +42,6 @@ pub(crate) fn append_error_log(source: &str, error: &str) -> std::io::Result<()>
     writeln!(file, "{error}")?;
     writeln!(file)?;
     Ok(())
-}
-
-fn error_log_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".xiaoo")
-        .join("log")
-        .join("error.log")
 }
 
 fn visible_error_summary(error: &str) -> String {

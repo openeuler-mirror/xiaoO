@@ -130,6 +130,7 @@ impl LlmProvider for OllamaProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
+        let started = std::time::Instant::now();
         let url = format!("{}/api/chat", self.base_url);
         let body = self.build_ollama_body(request, true);
         let body_str = serde_json::to_string(&body).unwrap_or_default();
@@ -159,23 +160,31 @@ impl LlmProvider for OllamaProvider {
         let mut final_usage = None;
         let mut final_stop_reason = StopReason::EndTurn;
 
+        // No content-type gate here on purpose: ollama's wire protocol is
+        // NDJSON, not SSE, so the `text/event-stream` gate used by the
+        // other providers does not apply, and ollama releases/proxies vary
+        // the header (`application/x-ndjson`, `application/json`, or
+        // absent) — any strict expectation would cut working streams.
+        // Malformed payloads are instead absorbed by the line-oriented
+        // JSON parser below.
         let mut decoder = StreamUtf8Decoder::default();
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
+        let mut bytes_received: usize = 0;
 
         while let Some(chunk_result) = byte_stream.next().await {
             let bytes = chunk_result.map_err(|e| {
-                crate::error::write_stream_error_log(
+                crate::error::map_stream_read_error(
                     &url,
-                    Some(&headers),
+                    status.as_u16(),
+                    &headers,
+                    &e,
+                    started,
+                    bytes_received,
                     &buffer,
-                    &e.to_string(),
-                    Some(status.as_u16()),
-                );
-                LlmError::StreamError {
-                    message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
-                }
+                )
             })?;
+            bytes_received += bytes.len();
             decoder.push(&bytes, &mut buffer);
 
             while let Some(pos) = buffer.find('\n') {

@@ -69,6 +69,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "cron",
+ "dirs 5.0.1",
  "schemars",
  "serde",
  "serde_json",
