@@ -1117,17 +1117,26 @@ fn canonicalize_agent_workspace(workspace: &Path) -> Result<PathBuf, String> {
             workspace.display()
         ));
     }
-    let canonical = workspace
-        .canonicalize()
-        .map_err(|error| format!("workspace {} is invalid: {error}", workspace.display()))?;
+    // Same wording as `daemon_runtime::canonicalize_workspace_dir`: the path has to
+    // exist on the daemon host, and saying so keeps the whole error chain consistent.
+    let canonical = workspace.canonicalize().map_err(|error| {
+        format!(
+            "workspace {} does not exist on the daemon host: {error}",
+            workspace.display()
+        )
+    })?;
     if !canonical.is_dir() {
         return Err(format!(
-            "workspace is not a directory: {}",
+            "workspace {} on the daemon host is not a directory",
             canonical.display()
         ));
     }
-    std::fs::read_dir(&canonical)
-        .map_err(|error| format!("workspace {} is not readable: {error}", canonical.display()))?;
+    std::fs::read_dir(&canonical).map_err(|error| {
+        format!(
+            "workspace {} on the daemon host is not readable: {error}",
+            canonical.display()
+        )
+    })?;
     Ok(canonical)
 }
 
