@@ -17,6 +17,7 @@ TUI supports all common configurations and has the following specific configurat
 | `tui.redact_secrets_display` | Redact assistant-echoed secrets in the transcript display (default `false`) |
 | `[lsp]` | LSP server configuration (real-time diagnostics, **disabled by default**) |
 | `[agent]` | Agent role configuration (Tab key multi-role switching) |
+| `[agents]` | Agent identity list (`default_agent_id` + `[[agents.list]]` sender ids) |
 
 > **Note**: TUI does not read the `[compact]` section. Adaptive context
 > compression is only wired into CLI and Daemon. If a TUI conversation grows
@@ -395,6 +396,56 @@ In TUI:
 
 ---
 
+### [agents] - Agent Identity List
+
+`[agents]` declares the **agent identities** the TUI may speak as: the
+`sender_id` attached to session-open and turn requests, and the marker that
+tells root-agent turns apart from subagent turns in the stream
+(`apps/endside/src/gateway_api/runtime_request.rs`,
+`apps/endside/src/gateway_api/runtime_stream.rs`).
+
+> **`[agents]` vs `[agent]`**: `[agents]` picks **who** is talking (a flat
+> list of identity ids); `[agent.<name>]` picks **how** a role behaves
+> (prompt / tool mask / Tab cycling, see above). The two sections are
+> unrelated despite the names.
+
+#### Configuration Structure
+
+```toml
+[agents]
+default_agent_id = "main"             # Optional, default sender id
+
+[[agents.list]]
+id = "main"                           # Agent ID - the ONLY field
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `agents.default_agent_id` | string | `"main"` | Sender id the TUI reports for root-agent turns. When blank, the first `[[agents.list]]` entry is used, else `"main"`. |
+| `agents.list[].id` | string | — (required) | An agent identity entry. The whole list may be omitted: no validation happens and the default stays `"main"`. |
+
+There is no runtime override for the sender id: it is resolved from the
+config on every session open / turn (`resolve_agent_id`, which also knows
+how to validate an explicit or session-supplied id against the list,
+case-insensitively — no TUI path supplies one today). Matching is
+case-insensitive throughout (ids are lowercased). When the list is
+non-empty, startup fails if the resolved default is not in the list
+(`agents.default_agent_id validation failed`).
+
+> **There is only the `id` field on `[[agents.list]]`.** `AgentConfig` has
+> exactly `id` (`apps/endside/src/support/config.rs`) — no `workspace_dir`,
+> `model`, `profile_id` or `system_prompt`; those live on the daemon-side
+> `AgentConfig` (`apps/serverside/src/daemon_config.rs`). Because the struct
+> does not set `deny_unknown_fields`, a stray key — a leftover
+> `workspace_dir` from older configs, or a `profile_id` copied from a daemon
+> config — is **silently ignored** rather than reported, and the next TUI
+> rewrite of config.toml (e.g. applying a `/connect` provider change) drops
+> it from the file. The TUI workspace is not configurable here: in local
+> mode it is the launch directory (switch at runtime via `/dir`); in remote
+> mode it is bound by the daemon at session-open time.
+
+---
+
 ## Keybindings
 
 All TUI keybindings are **hard-coded**. There is no keymap configuration table,
@@ -572,6 +623,14 @@ prompt = "You are a test generator."
 bash = true
 file_read = true
 file_write = true
+
+# Agent identity list (sender ids; entries carry ONLY the id field —
+# stray keys are silently ignored, see the [agents] section above)
+[agents]
+default_agent_id = "main"
+
+[[agents.list]]
+id = "main"
 ```
 
 ---
@@ -607,7 +666,7 @@ The TUI argument parser accepts **only** `--config` / `-c`, `--mcp-config`,
 **A**: TUI supports:
 - ✅ Common configurations it actually parses: llm, subagent, skills, trace, hooker
 - ❌ `[compact]` — **not read by the TUI**; it is CLI/Daemon only (see the note above)
-- ✅ TUI-specific configurations (`tui`, `tui.remote`, `lsp`, `agent`)
+- ✅ TUI-specific configurations (`tui`, `tui.remote`, `lsp`, `agent`, `agents`)
 
 The TUI `Config` struct has no `compact` field
 (`apps/endside/src/support/config.rs`), so a `[compact]` section in a
@@ -659,6 +718,9 @@ not a configuration option.
   config structs do not use `deny_unknown_fields`, so a typo such as
   `read = true` (instead of `file_read = true`) is accepted and ignored
   (`apps/serverside/src/daemon_runtime.rs`).
+- **Stray keys on `[[agents.list]]` entries are silently ignored.** A leftover
+  `workspace_dir` or a daemon-style `profile_id` is accepted and dropped on
+  the next TUI config rewrite (see the `[agents]` section).
 
 ---
 

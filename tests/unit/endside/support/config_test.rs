@@ -67,7 +67,6 @@ fn tui_bootstrap_requires_default_agent_id_in_agents_list() {
     config.agents.default_agent_id = "missing".to_string();
     config.agents.list.push(super::AgentConfig {
         id: "main".to_string(),
-        workspace_dir: None,
     });
 
     let error = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
