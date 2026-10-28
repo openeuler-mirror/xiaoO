@@ -13,6 +13,329 @@ fn request_counts(storage: &SqliteStorage) -> (i64, i64, i64) {
     .unwrap()
 }
 
+fn payload_count(storage: &SqliteStorage) -> i64 {
+    storage
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM span_payloads_v1", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn compressed_requests_responses_and_tool_outputs_round_trip_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("compressed.db");
+    let storage = SqliteStorage::new(path.to_str().unwrap()).unwrap();
+    let text = "你好🙂 repeated output\n".repeat(400);
+    let request = serde_json::json!({
+        "messages": [{"role": "user", "content": text}],
+        "tools": [{"name": "shell", "description": text}], "temperature": 0.5,
+    });
+    let response =
+        serde_json::json!({"text": text, "tool_calls": [], "usage": {"total_tokens": 42}});
+    let output = serde_json::json!({"stdout": text, "exit_code": 0});
+    for (id, kind, fields) in [
+        (
+            "llm",
+            "LLM_CALL",
+            serde_json::json!({"effective_request": request, "input_preview": "task"}),
+        ),
+        (
+            "tool",
+            "TOOL_CALL",
+            serde_json::json!({"tool_name": "shell"}),
+        ),
+    ] {
+        storage
+            .insert_span(&span(id, "trace", None, kind, 1, None, fields))
+            .await
+            .unwrap();
+    }
+    storage
+        .update_span_extras(
+            "llm",
+            serde_json::json!({
+                "final_response": response, "total_tokens": 42, "session_id": "session",
+            }),
+            2,
+            Some(2),
+        )
+        .await
+        .unwrap();
+    storage
+        .update_span_extras(
+            "tool",
+            serde_json::json!({"final_output": output}),
+            3,
+            Some(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(payload_count(&storage), 2);
+    {
+        let conn = storage.conn.lock().unwrap();
+        let (compressed, plain): (i64, i64) = conn.query_row(
+            "SELECT SUM(typeof(content)='blob'), SUM(typeof(content)='text') FROM request_blobs_v1",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((compressed, plain), (2, 1));
+        let compressed_bytes: i64 = conn
+            .query_row(
+                "SELECT SUM(length(content)) FROM span_payloads_v1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(compressed_bytes < text.len() as i64 / 2);
+        let (inline, tokens, session): (Option<String>, i64, String) = conn.query_row(
+            "SELECT json_type(extras,'$.final_response'), json_extract(extras,'$.total_tokens'),
+                    json_extract(extras,'$.session_id') FROM spans WHERE span_id='llm'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(inline, None);
+        assert_eq!(tokens, 42);
+        assert_eq!(session, "session");
+    }
+    drop(storage);
+    let storage = SqliteStorage::new(path.to_str().unwrap()).unwrap();
+    let llm = storage.get_span("llm").await.unwrap().unwrap();
+    assert_eq!(llm.extras["effective_request"], request);
+    assert_eq!(llm.extras["final_response"], response);
+    let spans = storage.get_trace_spans("trace").await.unwrap();
+    assert_eq!(
+        spans.iter().find(|s| s.span_id == "tool").unwrap().extras["final_output"],
+        output
+    );
+    assert_eq!(
+        storage.list_traces(10).await.unwrap()[0]
+            .task_description
+            .as_deref(),
+        Some("task")
+    );
+}
+
+#[tokio::test]
+async fn compressed_payload_updates_preserve_omitted_fields_and_replace_explicit_values() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+    let large = serde_json::json!("large reply or tool output\n".repeat(200));
+    for field in ["final_response", "final_output"] {
+        storage
+            .insert_span(&span(
+                field,
+                "trace",
+                None,
+                "CUSTOM",
+                1,
+                None,
+                serde_json::json!({field: large}),
+            ))
+            .await
+            .unwrap();
+        storage
+            .update_span_extras(field, serde_json::json!({"phase": "done"}), 2, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get_span(field).await.unwrap().unwrap().extras[field],
+            large
+        );
+        let replacement = serde_json::json!({"nested": ["replacement🙂".repeat(300)]});
+        storage
+            .update_span_extras(field, serde_json::json!({field: replacement}), 3, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get_span(field).await.unwrap().unwrap().extras[field],
+            replacement
+        );
+        assert_eq!(payload_count(&storage), 1);
+        storage
+            .update_span_extras(field, serde_json::json!({field: null}), 4, None)
+            .await
+            .unwrap();
+        assert!(storage.get_span(field).await.unwrap().unwrap().extras[field].is_null());
+        assert_eq!(payload_count(&storage), 0);
+        storage
+            .update_span_extras(field, serde_json::json!({field: large}), 5, None)
+            .await
+            .unwrap();
+        storage
+            .update_span_extras(field, serde_json::json!({field: "ok"}), 6, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get_span(field).await.unwrap().unwrap().extras[field],
+            "ok"
+        );
+        assert_eq!(payload_count(&storage), 0);
+    }
+}
+
+#[tokio::test]
+async fn legacy_text_blobs_and_inline_payloads_remain_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    let storage = SqliteStorage::new(path.to_str().unwrap()).unwrap();
+    let large = "legacy text🙂".repeat(200);
+    let request = serde_json::json!({"messages": [large]});
+    let inline = serde_json::json!({"final_response": {"text": large}, "final_output": large});
+    storage
+        .insert_span(&span(
+            "old",
+            "trace",
+            None,
+            "LLM_CALL",
+            1,
+            None,
+            serde_json::json!({"effective_request": request}),
+        ))
+        .await
+        .unwrap();
+    {
+        let conn = storage.conn.lock().unwrap();
+        let old_blobs: Vec<(String, Vec<u8>)> = conn
+            .prepare("SELECT hash, content FROM request_blobs_v1 WHERE typeof(content)='blob'")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for (hash, compressed) in old_blobs {
+            let plain = String::from_utf8(zstd::stream::decode_all(compressed.as_slice()).unwrap())
+                .unwrap();
+            conn.execute(
+                "UPDATE request_blobs_v1 SET content=?1 WHERE hash=?2",
+                rusqlite::params![plain, hash],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE spans SET extras=?1 WHERE span_id='old'",
+            [inline.to_string()],
+        )
+        .unwrap();
+        conn.execute_batch("DROP TRIGGER delete_span_payload_v1; DROP TABLE span_payloads_v1;")
+            .unwrap();
+    }
+    drop(storage);
+    let storage = SqliteStorage::new(path.to_str().unwrap()).unwrap();
+    let read = storage.get_span("old").await.unwrap().unwrap();
+    assert_eq!(read.extras["effective_request"], request);
+    assert_eq!(read.extras["final_response"], inline["final_response"]);
+    assert_eq!(read.extras["final_output"], inline["final_output"]);
+    assert_eq!(payload_count(&storage), 0);
+    storage
+        .update_span_extras("old", serde_json::json!({"phase": "done"}), 2, None)
+        .await
+        .unwrap();
+    assert_eq!(payload_count(&storage), 2);
+    let read = storage.get_span("old").await.unwrap().unwrap();
+    assert_eq!(read.extras["effective_request"], request);
+    assert_eq!(read.extras["final_output"], inline["final_output"]);
+}
+
+#[tokio::test]
+async fn payload_writes_roll_back_and_deletions_remove_payloads() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+    let fields = serde_json::json!({"final_output": "tool output".repeat(300)});
+    for (id, time) in [("old", 1), ("new", 2)] {
+        storage
+            .insert_span(&span(id, id, None, "TOOL_CALL", time, None, fields.clone()))
+            .await
+            .unwrap();
+    }
+    let replacement = serde_json::json!({"final_output": "different output".repeat(300)});
+    assert!(storage
+        .insert_span(&span(
+            "new",
+            "new",
+            None,
+            "TOOL_CALL",
+            2,
+            None,
+            replacement.clone()
+        ))
+        .await
+        .is_err());
+    assert!(storage
+        .update_span_extras("missing", replacement, 3, None)
+        .await
+        .is_err());
+    assert_eq!(payload_count(&storage), 2);
+    assert_eq!(
+        storage.get_span("new").await.unwrap().unwrap().extras,
+        fields
+    );
+    assert_eq!(storage.delete_old_spans(2).await.unwrap(), 1);
+    assert_eq!(payload_count(&storage), 1);
+    assert_eq!(
+        storage.get_span("new").await.unwrap().unwrap().extras,
+        fields
+    );
+    assert_eq!(storage.delete_trace("new").await.unwrap(), 1);
+    assert_eq!(payload_count(&storage), 0);
+}
+
+#[tokio::test]
+async fn corrupt_compressed_content_returns_an_error() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+    storage
+        .insert_span(&span(
+            "bad",
+            "trace",
+            None,
+            "LLM_CALL",
+            1,
+            None,
+            serde_json::json!({"final_response": "reply".repeat(300)}),
+        ))
+        .await
+        .unwrap();
+    storage
+        .conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE span_payloads_v1 SET content=X'00'", [])
+        .unwrap();
+    assert!(storage
+        .get_span("bad")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("zstd decompression failed"));
+    storage.delete_trace("trace").await.unwrap();
+    storage
+        .insert_span(&span(
+            "bad-request",
+            "trace",
+            None,
+            "LLM_CALL",
+            1,
+            None,
+            serde_json::json!({"effective_request": {"messages": ["request".repeat(300)]}}),
+        ))
+        .await
+        .unwrap();
+    storage
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE request_blobs_v1 SET content=X'00' WHERE typeof(content)='blob'",
+            [],
+        )
+        .unwrap();
+    assert!(storage
+        .get_span("bad-request")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("zstd decompression failed"));
+}
+
 #[tokio::test]
 async fn growing_requests_store_linear_prefixes_and_round_trip_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -21,7 +344,9 @@ async fn growing_requests_store_linear_prefixes_and_round_trip_after_reopen() {
     let mut messages = Vec::new();
     let mut expected = Vec::new();
     for i in 0..100 {
-        messages.push(serde_json::json!({"role": "user", "content": format!("message {i}")}));
+        messages.push(
+            serde_json::json!({"role": "user", "content": format!("message {i}\n").repeat(50)}),
+        );
         let extras = serde_json::json!({
             "phase": "started",
             "effective_request": {"messages": messages, "tools": [{"name": "shell"}], "temperature": 0.5}

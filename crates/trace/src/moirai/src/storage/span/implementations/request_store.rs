@@ -1,11 +1,17 @@
-//! On-disk request format v1. Public Span reads still return the original JSON.
+//! Request and payload storage. Public Span reads return the original JSON.
 //! Messages and tools are immutable content-addressed blobs; message sequences
 //! are prefix nodes, so appending a message stores one node, not another ID list.
-use rusqlite::{params, Connection, OptionalExtension};
+//! Blob content is either legacy JSON TEXT or zstd BLOB (SQLite storage classes
+//! distinguish them even in the existing non-STRICT TEXT column). Compressed
+//! replies and tool outputs live separately so extras remain queryable JSON.
+use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{MoiraiError, Result};
+
+const MIN_COMPRESS_BYTES: usize = 256;
+const PAYLOAD_FIELDS: [&str; 2] = ["final_response", "final_output"];
 
 pub(super) fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -19,8 +25,14 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
             span_id TEXT PRIMARY KEY, head_hash TEXT,
             metadata_hash TEXT NOT NULL, tools_hash TEXT
         );
+        CREATE TABLE IF NOT EXISTS span_payloads_v1 (
+            span_id TEXT NOT NULL, field TEXT NOT NULL, content BLOB NOT NULL,
+            PRIMARY KEY (span_id, field)
+        );
         CREATE TRIGGER IF NOT EXISTS delete_span_request_v1 AFTER DELETE ON spans
-        BEGIN DELETE FROM span_requests_v1 WHERE span_id = OLD.span_id; END;",
+        BEGIN DELETE FROM span_requests_v1 WHERE span_id = OLD.span_id; END;
+        CREATE TRIGGER IF NOT EXISTS delete_span_payload_v1 AFTER DELETE ON spans
+        BEGIN DELETE FROM span_payloads_v1 WHERE span_id = OLD.span_id; END;",
     )?;
     Ok(())
 }
@@ -56,6 +68,14 @@ fn hash(domain: &[u8], bytes: &[u8]) -> String {
 fn put_blob(conn: &Connection, value: Value) -> Result<String> {
     let content = serde_json::to_string(&canonical(value))?;
     let hash = hash(b"moirai/request/blob/v1\0", content.as_bytes());
+    // Appended histories revisit old messages: don't recompress existing blobs.
+    if conn
+        .prepare_cached("SELECT 1 FROM request_blobs_v1 WHERE hash = ?1")?
+        .exists([&hash])?
+    {
+        return Ok(hash);
+    }
+    let content = encode_content(content)?;
     conn.prepare_cached(
         "INSERT INTO request_blobs_v1(hash, content) VALUES (?1, ?2)
          ON CONFLICT(hash) DO NOTHING",
@@ -67,6 +87,7 @@ fn put_blob(conn: &Connection, value: Value) -> Result<String> {
 /// Must run inside the transaction that writes the owning span. Ordinary extras
 /// updates leave the reference untouched, without materializing the request.
 pub(super) fn encode(conn: &Connection, span_id: &str, extras: &mut Value) -> Result<()> {
+    encode_payloads(conn, span_id, extras)?;
     let Some(request) = extras.get("effective_request") else {
         return Ok(());
     };
@@ -113,13 +134,22 @@ pub(super) fn encode(conn: &Connection, span_id: &str, extras: &mut Value) -> Re
 }
 
 fn get_blob(conn: &Connection, hash: &str) -> Result<Value> {
-    let content: String = conn
+    let content: SqlValue = conn
         .prepare_cached("SELECT content FROM request_blobs_v1 WHERE hash = ?1")?
         .query_row([hash], |row| row.get(0))?;
-    Ok(serde_json::from_str(&content)?)
+    decode_content(content)
 }
 
 pub(super) fn decode(conn: &Connection, span_id: &str, extras: &mut Value) -> Result<()> {
+    let mut stmt =
+        conn.prepare_cached("SELECT field, content FROM span_payloads_v1 WHERE span_id = ?1")?;
+    let payloads = stmt.query_map([span_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, SqlValue>(1)?))
+    })?;
+    for payload in payloads {
+        let (field, content) = payload?;
+        extras[field] = decode_content(content)?;
+    }
     let reference = conn
         .prepare_cached(
             "SELECT head_hash, metadata_hash, tools_hash FROM span_requests_v1 WHERE span_id = ?1",
@@ -157,6 +187,62 @@ pub(super) fn decode(conn: &Connection, span_id: &str, extras: &mut Value) -> Re
         request["tools"] = get_blob(conn, &hash)?;
     }
     extras["effective_request"] = request;
+    Ok(())
+}
+
+fn encode_content(content: String) -> Result<SqlValue> {
+    if content.len() >= MIN_COMPRESS_BYTES {
+        let compressed = zstd::bulk::compress(content.as_bytes(), 3)
+            .map_err(|error| MoiraiError::Storage(format!("zstd compression failed: {error}")))?;
+        if compressed.len() < content.len() {
+            return Ok(SqlValue::Blob(compressed));
+        }
+    }
+    Ok(SqlValue::Text(content))
+}
+
+fn decode_content(content: SqlValue) -> Result<Value> {
+    match content {
+        SqlValue::Text(content) => Ok(serde_json::from_str(&content)?),
+        SqlValue::Blob(content) => {
+            let decoded = zstd::stream::decode_all(content.as_slice()).map_err(|error| {
+                MoiraiError::Storage(format!("zstd decompression failed: {error}"))
+            })?;
+            Ok(serde_json::from_slice(&decoded)?)
+        }
+        _ => Err(MoiraiError::Storage(
+            "Invalid trace payload storage type".into(),
+        )),
+    }
+}
+
+fn encode_payloads(conn: &Connection, span_id: &str, extras: &mut Value) -> Result<()> {
+    let Some(fields) = extras.as_object_mut() else {
+        return Ok(());
+    };
+    for field in PAYLOAD_FIELDS {
+        let Some(value) = fields.get(field) else {
+            // Status-only updates preserve the stored payload without decoding it.
+            continue;
+        };
+        match encode_content(serde_json::to_string(value)?)? {
+            SqlValue::Blob(content) => {
+                conn.prepare_cached(
+                    "INSERT INTO span_payloads_v1(span_id, field, content) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(span_id, field) DO UPDATE SET content=excluded.content",
+                )?
+                .execute(params![span_id, field, content])?;
+                fields.remove(field);
+            }
+            _ => {
+                // A small value or explicit null replaces any previous reference.
+                conn.prepare_cached(
+                    "DELETE FROM span_payloads_v1 WHERE span_id = ?1 AND field = ?2",
+                )?
+                .execute(params![span_id, field])?;
+            }
+        }
+    }
     Ok(())
 }
 
