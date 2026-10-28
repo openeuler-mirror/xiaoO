@@ -28,6 +28,18 @@ pub const DEFAULT_SUPPLEMENT_TITLE: &str = " 补充（可选） ";
 /// padding; the renderer adds it.
 pub const TYPE_ANSWER_HINT: &str = "输入你的回答";
 
+/// Caret offset inside the supplement box. The masked secret shows one '*'
+/// per character, so the caret follows the character index; the plaintext
+/// projection expands TAB to four cells, so the caret follows the visual
+/// cursor there instead.
+fn supplement_caret_offset(input: &Input, is_secret: bool) -> u16 {
+    if is_secret {
+        input.cursor() as u16
+    } else {
+        input.visual_cursor() as u16
+    }
+}
+
 /// Single selectable option (can align with JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptChoice {
@@ -412,7 +424,7 @@ pub fn render_interaction_prompt(
         *supplement_hit_area = Some(sup_area);
 
         if sup_focus && sup_inner.width > 0 && sup_inner.height > 0 {
-            let vc = state.supplement.visual_cursor() as u16;
+            let vc = supplement_caret_offset(&state.supplement, state.request.is_secret);
             let cx = sup_inner
                 .x
                 .saturating_add(vc.min(sup_inner.width.saturating_sub(2)));

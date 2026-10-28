@@ -14,7 +14,13 @@ pub fn scroll_offset_from_drag(rel_y: usize, track_height: usize, max_scroll: us
 }
 
 pub fn paste_into_input(input: &mut Input, text: &str) {
-    for ch in text.chars() {
+    // Paste is the shared entry for manual terminal pastes and managed
+    // message delivery, and the two cannot be told apart here. A CR in a
+    // manual multi-line paste means a line break, so CR/CRLF normalize to
+    // LF; TAB survives unchanged so delivered problem statements keep their
+    // indentation bytes in the submitted value.
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    for ch in normalized.chars() {
         input.handle(InputRequest::InsertChar(ch));
     }
 }

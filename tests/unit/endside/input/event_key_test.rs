@@ -960,7 +960,7 @@ async fn pasted_multiline_text_is_queued_without_trimming() {
     std::env::set_var("HOME", home.path());
     let mut app = test_app();
     app.state.chat_state.is_loading = true;
-    for text in [" \t中\r\n文\t ", "\t\r\n"] {
+    for (text, submitted) in [(" \t中\r\n文\t ", " \t中\n文\t "), ("\t\r\n", "\t\n")] {
         app.state.chat_state.input.reset();
         app.handle_paste_event(text).expect("paste");
         app.submit_editing_input().await.expect("submit");
@@ -972,7 +972,7 @@ async fn pasted_multiline_text_is_queued_without_trimming() {
                 .unwrap()
                 .prompt
                 .as_bytes(),
-            text.as_bytes()
+            submitted.as_bytes()
         );
     }
     match previous {

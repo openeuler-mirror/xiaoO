@@ -355,14 +355,8 @@ fn pasted_indented_block_keeps_tabs() {
 }
 
 #[test]
-fn paste_preserves_multiline_bytes_at_every_position() {
-    for text in [
-        "\tA\tB\t",
-        "\rA\rB\r",
-        "\nA\nB\n",
-        " \t中\r\n文\t ",
-        "\t\r\n",
-    ] {
+fn paste_preserves_tabs_and_line_feeds_at_every_position() {
+    for text in ["\tA\tB\t", "\nA\nB\n", " \t中\n文\t ", "\t\n"] {
         let mut input = Input::default();
         crate::render::paste_into_input(&mut input, text);
         assert_eq!(input.value().as_bytes(), text.as_bytes());
@@ -374,6 +368,18 @@ fn paste_preserves_multiline_bytes_at_every_position() {
         assert_eq!(input.delete_selected().as_deref(), Some(text));
         assert_eq!(input.value(), "");
     }
+}
+
+#[test]
+fn paste_normalizes_carriage_returns_to_line_feeds() {
+    // A CR in a manual multi-line paste means a line break, not a value
+    // byte: "A\rB" pastes as two lines, CRLF collapses to one LF, and no
+    // filler or trailing space is added.
+    let mut input = Input::default();
+    crate::render::paste_into_input(&mut input, "A\rB");
+    assert_eq!(input.value(), "A\nB");
+    crate::render::paste_into_input(&mut input, "C\r\nD\r");
+    assert_eq!(input.value(), "A\nBC\nD\n");
 }
 
 #[test]
