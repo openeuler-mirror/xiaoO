@@ -14,8 +14,7 @@ pub fn scroll_offset_from_drag(rel_y: usize, track_height: usize, max_scroll: us
 }
 
 pub fn paste_into_input(input: &mut Input, text: &str) {
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    for ch in normalized.chars() {
+    for ch in text.chars() {
         input.handle(InputRequest::InsertChar(ch));
     }
 }

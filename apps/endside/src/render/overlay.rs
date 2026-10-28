@@ -1,3 +1,4 @@
+use crate::input::core::input_display_text;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -448,7 +449,7 @@ impl App {
                 .scroll((scroll_y as u16, 0))
                 .block(block)
         } else {
-            Paragraph::new(value)
+            Paragraph::new(input_display_text(value))
                 .style(input_style)
                 .wrap(Wrap { trim: false })
                 .scroll((scroll_y as u16, 0))
@@ -1286,11 +1287,7 @@ impl App {
             row_chunks[0],
         );
 
-        let display_value = if dialog.show_plaintext {
-            dialog.input.value().to_string()
-        } else {
-            "*".repeat(dialog.input.value().chars().count())
-        };
+        let display_value = dialog.input.display_value(!dialog.show_plaintext);
         let input_paragraph = Paragraph::new(display_value).style(
             Style::default()
                 .fg(self.state.theme.foreground)
@@ -1370,7 +1367,7 @@ fn build_input_text_with_selection(
         let mut spans: Vec<Span<'static>> = Vec::new();
         if overlap_start >= overlap_end {
             // No selection overlap on this line.
-            spans.push(Span::styled(source_line.to_owned(), normal_style));
+            spans.push(Span::styled(input_display_text(source_line), normal_style));
         } else {
             // Before selection
             let before: String = source_line
@@ -1378,7 +1375,7 @@ fn build_input_text_with_selection(
                 .take(overlap_start - char_offset)
                 .collect();
             if !before.is_empty() {
-                spans.push(Span::styled(before, normal_style));
+                spans.push(Span::styled(input_display_text(&before), normal_style));
             }
             // Selected portion
             let sel_local_start = overlap_start - char_offset;
@@ -1389,12 +1386,12 @@ fn build_input_text_with_selection(
                 .take(sel_local_end - sel_local_start)
                 .collect();
             if !selected.is_empty() {
-                spans.push(Span::styled(selected, sel_style));
+                spans.push(Span::styled(input_display_text(&selected), sel_style));
             }
             // After selection
             let after: String = source_line.chars().skip(sel_local_end).collect();
             if !after.is_empty() {
-                spans.push(Span::styled(after, normal_style));
+                spans.push(Span::styled(input_display_text(&after), normal_style));
             }
         }
 
@@ -1471,15 +1468,31 @@ pub(crate) fn calculate_visual_cursor_position(
     cursor: usize,
     max_width: usize,
 ) -> (usize, usize) {
-    if max_width == 0 || value.is_empty() {
-        return (0, 0);
-    }
+    let positions = input_visual_positions(value, max_width);
+    positions[cursor.min(positions.len() - 1)]
+}
 
+/// Character boundaries in the original input, using the rendered projection.
+pub(crate) fn input_visual_positions(value: &str, max_width: usize) -> Vec<(usize, usize)> {
+    let display = input_display_text(value);
+    let positions = display_visual_positions(&display, max_width);
+    let mut offset = 0;
+    let mut mapped = Vec::with_capacity(value.chars().count() + 1);
+    for ch in value.chars() {
+        mapped.push(positions[offset]);
+        offset += if ch == '\t' { 4 } else { 1 };
+    }
+    mapped.push(positions[offset]);
+    mapped
+}
+
+fn display_visual_positions(value: &str, max_width: usize) -> Vec<(usize, usize)> {
     let chars: Vec<char> = value.chars().collect();
     let n = chars.len();
-    let cursor = cursor.min(n);
-
-    let mut pos: Vec<(usize, usize)> = vec![(0, 0); n + 1];
+    let mut pos = vec![(0, 0); n + 1];
+    if max_width == 0 || value.is_empty() {
+        return pos;
+    }
 
     // ratatui WordWrapper state (trim == false).
     let mut row = 0usize;
@@ -1576,7 +1589,7 @@ pub(crate) fn calculate_visual_cursor_position(
     line_width = flush_pending(&mut pos, &chars, &mut pending, row, line_width);
     pos[n] = (row, line_width);
 
-    pos[cursor]
+    pos
 }
 
 #[cfg(test)]

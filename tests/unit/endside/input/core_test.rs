@@ -310,15 +310,13 @@ fn app_level_actions_fall_through_to_plain_handling() {
 }
 
 #[test]
-fn tab_insert_expands_to_four_spaces() {
-    // A raw tab cannot live in the TUI cell grid: printed as 0x09 the
-    // terminal jumps to the next tab stop, desyncing every following
-    // character from ratatui's 1-column advance (garbled input box,
-    // history-switch leftover rows). Tabs expand to four spaces instead.
+fn inserted_tab_keeps_one_character_and_four_display_cells() {
     let mut input = Input::default();
     input.handle(crate::input::InputRequest::InsertChar('\t'));
-    assert_eq!(input.value(), "    ");
-    assert_eq!(input.cursor(), 4);
+    assert_eq!(input.value().as_bytes(), b"\t");
+    assert_eq!(input.cursor(), 1);
+    assert_eq!(input.visual_cursor(), 4);
+    assert_eq!(input.display_value(false), "    ");
 }
 
 #[test]
@@ -335,17 +333,14 @@ fn control_chars_dropped_on_insert_newline_kept() {
 }
 
 #[test]
-fn with_value_normalizes_tabs_and_control_chars() {
-    // History restore (Input::from → with_value) must sanitize legacy
-    // entries that still contain tabs, or switching history re-garbles
-    // the input box.
-    let input = Input::default().with_value("a\tb\u{8}c\nd".to_string());
-    assert_eq!(input.value(), "a    bc\nd");
-    assert_eq!(input.cursor(), "a    bc\nd".chars().count());
+fn with_value_preserves_allowed_controls_and_filters_others() {
+    let input = Input::default().with_value("a\tb\u{8}c\r\nd".to_string());
+    assert_eq!(input.value(), "a\tbc\r\nd");
+    assert_eq!(input.cursor(), 7);
 }
 
 #[test]
-fn pasted_indented_block_expands_tabs() {
+fn pasted_indented_block_keeps_tabs() {
     // End-to-end: pasting an indented rpath=( … ) block (the reported
     // repro) keeps every line but renders tab indentation as spaces.
     let mut input = Input::default();
@@ -355,6 +350,54 @@ fn pasted_indented_block_expands_tabs() {
     );
     assert_eq!(
         input.value(),
-        "rpath=(\n    \"/usr/lib64\",\n    \"/lib64\",\n)\n)"
+        "rpath=(\n\t\"/usr/lib64\",\n\t\"/lib64\",\n)\n)"
     );
+}
+
+#[test]
+fn paste_preserves_multiline_bytes_at_every_position() {
+    for text in [
+        "\tA\tB\t",
+        "\rA\rB\r",
+        "\nA\nB\n",
+        " \t中\r\n文\t ",
+        "\t\r\n",
+    ] {
+        let mut input = Input::default();
+        crate::render::paste_into_input(&mut input, text);
+        assert_eq!(input.value().as_bytes(), text.as_bytes());
+        assert_eq!(Input::from(text).value().as_bytes(), text.as_bytes());
+        input.set_cursor(0);
+        input.set_anchor();
+        input.set_cursor(text.chars().count());
+        assert_eq!(input.selected_text(), Some(text));
+        assert_eq!(input.delete_selected().as_deref(), Some(text));
+        assert_eq!(input.value(), "");
+    }
+}
+
+#[test]
+fn deleting_preserved_controls_uses_original_character_indices() {
+    let mut input = Input::from("A\t\r\nB");
+    input.set_cursor(2);
+    handle_input_key(
+        &mut input,
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+    );
+    assert_eq!(input.value(), "A\r\nB");
+    handle_input_key(
+        &mut input,
+        KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+    );
+    assert_eq!(input.value(), "A\nB");
+}
+
+#[test]
+fn tab_keys_do_not_insert_text() {
+    let mut input = Input::from("A\tB");
+    for code in [KeyCode::Tab, KeyCode::BackTab] {
+        handle_input_key(&mut input, KeyEvent::new(code, KeyModifiers::NONE));
+        assert_eq!(input.value(), "A\tB");
+        assert_eq!(input.cursor(), 3);
+    }
 }

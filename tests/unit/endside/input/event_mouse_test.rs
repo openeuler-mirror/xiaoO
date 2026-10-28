@@ -411,3 +411,15 @@ fn input_char_index_handles_wide_chars() {
     // "你好" fills row 0 (4 cols); "x" wraps to row 1.
     assert_eq!(input_char_index_at("你好x", 4, 1, 0), 2);
 }
+
+#[test]
+fn mouse_maps_expanded_tabs_and_carriage_returns_to_original_characters() {
+    for col in 1..5 {
+        assert_eq!(input_char_index_at("A\tB\r中", 20, 0, col), 1);
+    }
+    assert_eq!(input_char_index_at("A\tB\r中", 20, 0, 5), 2);
+    assert_eq!(input_char_index_at("A\tB\r中", 20, 0, 6), 3);
+    assert_eq!(input_char_index_at("A\tB\r中", 20, 0, 7), 4);
+    assert_eq!(input_char_index_at("A\tB\r中", 20, 0, 8), 4);
+    assert_eq!(input_char_index_at("A\tB", 4, 1, 0), 2);
+}
