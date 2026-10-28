@@ -22,7 +22,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "/dir",
-        summary: "切换当前工作目录。",
+        summary: "切换当前工作目录（仅本地模式，remote 会话不支持）。",
     },
     SlashCommandSpec {
         name: "/delete",
