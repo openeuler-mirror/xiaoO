@@ -125,7 +125,7 @@ The complete slash-command set (canonical names, `Tab`-completable):
 | `/skills` | List available skills |
 | `/sandbox` | Switch the local sandbox backend |
 | `/cron` | Manage cron jobs (view, configure, delete, enable/disable) |
-| `/dir <path>` | Switch the current workspace directory (alias: `/cd`) |
+| `/dir <path>` | Switch the current workspace directory (alias: `/cd`); local mode only — in remote mode the command is refused because the session's workspace is bound on the daemon at open time |
 | `/save [name]` | Save a manual checkpoint (auto-names when omitted) |
 | `/load [name]` | Open the manual/auto snapshot list, or load a named manual snapshot |
 | `/delete` | Delete the selected conversation from the current session |

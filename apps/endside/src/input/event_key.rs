@@ -849,6 +849,26 @@ impl App {
             return Ok(());
         }
         if first_token_is_dir_command(trimmed) {
+            self.state.chat_state.input.reset();
+            // Remote open/turn requests are always built with
+            // `workspace: None` (`remote_session_open_request_for` /
+            // `remote_turn_request`), and the daemon pins a session's
+            // workspace at open time, rejecting re-binding
+            // (`BootstrapConflict`). Applying the switch locally would only
+            // repaint the status panel while the daemon keeps its own
+            // workspace — so refuse the command instead of pretending it
+            // worked.
+            if self.gateway.remote_base_url().is_some() {
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(
+                        "Remote 模式下不支持 /cd 与 /dir，仅在本地模式下有效：远端会话的 workspace 由 daemon 在会话开启时绑定。如需切换目录，请先执行 /remote off。"
+                            .to_string(),
+                    ));
+                self.state.chat_state.stick_to_bottom = true;
+                return Ok(());
+            }
             match resolve_dir_command(trimmed, &self.state.workspace) {
                 Ok(path) => {
                     self.state.workspace = path;
@@ -862,7 +882,6 @@ impl App {
                             self.state.workspace.display()
                         )));
                     self.state.chat_state.stick_to_bottom = true;
-                    self.state.chat_state.input.reset();
                 }
                 Err(error) => {
                     self.state
@@ -870,7 +889,6 @@ impl App {
                         .messages
                         .push(crate::chat::Message::system(error));
                     self.state.chat_state.stick_to_bottom = true;
-                    self.state.chat_state.input.reset();
                 }
             }
             return Ok(());
