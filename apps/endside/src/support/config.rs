@@ -175,8 +175,6 @@ pub struct AgentsConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub id: String,
-    #[serde(default)]
-    pub workspace_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
