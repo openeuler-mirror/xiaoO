@@ -267,18 +267,23 @@ pub fn should_try_next_candidate(error: &LlmError) -> bool {
 
 /// Build a one-string error message summarizing why every URL candidate
 /// failed. The returned string is wrapped into `LlmError::ApiError` and
-/// ultimately written to `~/.xiaoo/log/error.log` by the TUI layer's
-/// `remote_input` handler (`apps/endside/src/support/error_log.rs`), so this
-/// function deliberately does NOT touch the log file itself to avoid
+/// ultimately written to the shared error log by the TUI layer's
+/// `remote_input` handler (`apps/endside/src/support/error_log.rs`), so
+/// this function deliberately does NOT touch the log file itself to avoid
 /// producing a duplicate `source=url_fallback` entry next to the
 /// `source=remote_input` one.
+///
+/// Each attempt URL passes through [`crate::error::redact_credentials`]:
+/// users can put credentials in a configured base_url's query string
+/// (single endpoint configured as a full `...?api-key=...` URL), and this
+/// summary is the one place those URLs reach callers and the shared log.
 pub fn build_url_fallback_error_message(attempts: &[UrlAttemptRecord]) -> String {
     let mut error_message = format!("All {} endpoint URL candidates failed:\n", attempts.len());
     for attempt in attempts {
         error_message.push_str(&format!(
             "  #{}: {} → {}\n",
             attempt.index + 1,
-            attempt.url,
+            crate::error::redact_credentials(&attempt.url),
             attempt.error
         ));
     }

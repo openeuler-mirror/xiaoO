@@ -154,6 +154,7 @@ impl LlmProvider for GeminiProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
+        let started = std::time::Instant::now();
         let model_name = normalize_model_name(&self.capabilities.model_name);
         let url = format!(
             "{}/v1beta/{}:streamGenerateContent?alt=sse&key={}",
@@ -183,6 +184,26 @@ impl LlmProvider for GeminiProvider {
             ));
         }
 
+        // Same gate as the other SSE providers: `?alt=sse` should always
+        // yield text/event-stream, so anything else is an error page or a
+        // misrouted endpoint; feeding it to the SSE parser would silently
+        // yield an empty stream.
+        let content_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !content_type.to_lowercase().starts_with("text/event-stream") {
+            let full_response = response.text().await.unwrap_or_default();
+            return Err(crate::error::map_protocol_mismatch(
+                &url,
+                status.as_u16(),
+                &headers,
+                format!("unexpected content type: {}", content_type),
+                started,
+                &full_response,
+            ));
+        }
+
         let mut full_text = String::new();
         let mut full_tool_calls: Vec<crate::wire_types::WireToolCall> = Vec::new();
         let mut final_usage = None;
@@ -191,20 +212,21 @@ impl LlmProvider for GeminiProvider {
         let mut decoder = StreamUtf8Decoder::default();
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
+        let mut bytes_received: usize = 0;
 
         while let Some(chunk_result) = byte_stream.next().await {
             let bytes = chunk_result.map_err(|e| {
-                crate::error::write_stream_error_log(
+                crate::error::map_stream_read_error(
                     &url,
-                    Some(&headers),
+                    status.as_u16(),
+                    &headers,
+                    &e,
+                    started,
+                    bytes_received,
                     &buffer,
-                    &e.to_string(),
-                    Some(status.as_u16()),
-                );
-                LlmError::StreamError {
-                    message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
-                }
+                )
             })?;
+            bytes_received += bytes.len();
             decoder.push(&bytes, &mut buffer);
 
             while let Some(pos) = buffer.find('\n') {

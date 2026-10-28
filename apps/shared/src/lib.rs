@@ -22,6 +22,10 @@ pub mod trace_support {
     };
 }
 
+/// 共享 error.log 路径约定的门面转发:权威实现在 agent-types,endside
+/// 受门面约束不能直接依赖底层 crate,必须经此转发获取。
+pub use agent_types::common::error_log_path;
+
 #[cfg(feature = "test-support")]
 #[path = "../../../tests/unit/shared/testing.rs"]
 pub mod testing;

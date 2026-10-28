@@ -9,7 +9,8 @@ use crate::convert::{
     wire_response_to_llm_response, wire_usage_to_usage,
 };
 use crate::error::{
-    map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error, LlmError,
+    map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error,
+    redact_credentials, LlmError,
 };
 use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::url_fallback::{
@@ -191,6 +192,9 @@ impl OpenAiFamilyProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
+        // Anchor for this attempt's elapsed_ms in the stream-error log;
+        // per-URL so fallback retries each report their own duration.
+        let started = std::time::Instant::now();
         let body = self.build_body(request, true)?;
         let body_str = serde_json::to_string(&body).unwrap_or_default();
 
@@ -220,17 +224,14 @@ impl OpenAiFamilyProvider {
 
         if !content_type.to_lowercase().starts_with("text/event-stream") {
             let full_response = response.text().await.unwrap_or_default();
-            crate::error::write_stream_error_log(
+            return Err(crate::error::map_protocol_mismatch(
                 url,
-                Some(&headers),
+                status.as_u16(),
+                &headers,
+                format!("unexpected content type: {}", content_type),
+                started,
                 &full_response,
-                &format!("unexpected content type: {}", content_type),
-                Some(status.as_u16()),
-            );
-            return Err(LlmError::ApiError(format!(
-                "unexpected content type: {} (详见 ~/.xiaoo/log/error.log)",
-                content_type
-            )));
+            ));
         }
 
         let mut full_text = String::new();
@@ -243,20 +244,21 @@ impl OpenAiFamilyProvider {
         let mut decoder = StreamUtf8Decoder::default();
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
+        let mut bytes_received: usize = 0;
 
         while let Some(chunk_result) = byte_stream.next().await {
             let bytes = chunk_result.map_err(|e| {
-                crate::error::write_stream_error_log(
+                crate::error::map_stream_read_error(
                     url,
-                    Some(&headers),
+                    status.as_u16(),
+                    &headers,
+                    &e,
+                    started,
+                    bytes_received,
                     &buffer,
-                    &e.to_string(),
-                    Some(status.as_u16()),
-                );
-                LlmError::StreamError {
-                    message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
-                }
+                )
             })?;
+            bytes_received += bytes.len();
             decoder.push(&bytes, &mut buffer);
 
             // Cursor-based SSE scanning: find each '\n' without rebuilding
@@ -389,28 +391,34 @@ impl OpenAiFamilyProvider {
             .and_then(|guard| guard.clone());
 
         if let Some(url) = cached_url {
+            // Masked copy for the tracing sites below: a configured
+            // base_url can carry credentials in its query string, and
+            // build_url_fallback_error_message already masks its copy —
+            // tracing output must not become the bypass. `url` itself
+            // stays raw because it drives the request and the cache.
+            let log_url = redact_credentials(&url);
             match &call {
                 EndpointCall::Complete => {
                     tracing::debug!(
-                        url,
+                        url = %log_url,
                         "Using cached endpoint URL from previous successful call"
                     );
                 }
                 EndpointCall::Stream(_) => {
-                    tracing::debug!(url, "Using cached endpoint URL for streaming request");
+                    tracing::debug!(url = %log_url, "Using cached endpoint URL for streaming request");
                 }
             }
 
             match self.try_endpoint(&url, request, &call).await {
                 Ok(response) => {
-                    tracing::debug!(url, "Cached URL succeeded{}", label);
+                    tracing::debug!(url = %log_url, "Cached URL succeeded{}", label);
                     return Ok(response);
                 }
                 Err(error) => {
                     if is_configuration_error(&error) {
                         tracing::error!(
                             error = error.to_string(),
-                            url,
+                            url = %log_url,
                             "Cached URL failed with configuration error{} - not retrying",
                             label
                         );
@@ -420,7 +428,7 @@ impl OpenAiFamilyProvider {
                     if is_retryable_network_error(&error) {
                         tracing::warn!(
                             error = error.to_string(),
-                            url,
+                            url = %log_url,
                             "Cached URL failed with retryable network error{} - will retry 3 times with 1s interval",
                             label
                         );
@@ -429,7 +437,7 @@ impl OpenAiFamilyProvider {
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
                             tracing::info!(
-                                url,
+                                url = %log_url,
                                 attempt,
                                 total_attempts = 3,
                                 "Retrying cached URL{}",
@@ -439,7 +447,7 @@ impl OpenAiFamilyProvider {
                             match self.try_endpoint(&url, request, &call).await {
                                 Ok(response) => {
                                     tracing::info!(
-                                        url,
+                                        url = %log_url,
                                         attempt,
                                         "✓ Cached URL retry succeeded{}",
                                         label
@@ -450,7 +458,7 @@ impl OpenAiFamilyProvider {
                                     if is_configuration_error(&retry_error) {
                                         tracing::error!(
                                             error = retry_error.to_string(),
-                                            url,
+                                            url = %log_url,
                                             attempt,
                                             "Retry failed with configuration error{} - stopping retries",
                                             label
@@ -461,7 +469,7 @@ impl OpenAiFamilyProvider {
                                     if attempt < 3 {
                                         tracing::warn!(
                                             error = retry_error.to_string(),
-                                            url,
+                                            url = %log_url,
                                             attempt,
                                             "Retry attempt failed{} - will retry again",
                                             label
@@ -469,7 +477,7 @@ impl OpenAiFamilyProvider {
                                     } else {
                                         tracing::error!(
                                             error = retry_error.to_string(),
-                                            url,
+                                            url = %log_url,
                                             attempt,
                                             "All 3 retry attempts failed{} - returning error",
                                             label
@@ -484,14 +492,14 @@ impl OpenAiFamilyProvider {
                         if matches!(error, LlmError::RateLimited { .. }) {
                             tracing::error!(
                                 error = error.to_string(),
-                                url,
+                                url = %log_url,
                                 "Rate limited{} - quota exhausted or policy triggered, not retrying",
                                 label
                             );
                         } else {
                             tracing::error!(
                                 error = error.to_string(),
-                                url,
+                                url = %log_url,
                                 "Cached URL failed with non-retryable error{} - returning error",
                                 label
                             );
@@ -514,10 +522,14 @@ impl OpenAiFamilyProvider {
         let mut attempts = Vec::new();
 
         for (idx, url) in final_urls.iter().enumerate() {
+            // Same masked copy as the cached-URL block above; `url` stays
+            // raw for the request itself and for UrlAttemptRecord (which
+            // build_url_fallback_error_message masks at render time).
+            let log_url = redact_credentials(url);
             match self.try_endpoint(url, request, &call).await {
                 Ok(response) => {
                     tracing::info!(
-                        url,
+                        url = %log_url,
                         attempt_number = idx + 1,
                         total_candidates = final_urls.len(),
                         "✓ URL fallback succeeded{} - caching this URL for future calls",
@@ -545,13 +557,13 @@ impl OpenAiFamilyProvider {
                             tracing::warn!(
                                 "Phase 1 candidate #{} failed: {} - trying next candidate",
                                 idx + 1,
-                                url
+                                log_url
                             );
                         } else {
                             tracing::warn!(
                                 "Phase 2 candidate #{} failed with endpoint error: {} - trying next",
                                 idx + 1,
-                                url
+                                log_url
                             );
                         }
                         continue;
@@ -560,7 +572,7 @@ impl OpenAiFamilyProvider {
                     if is_configuration_error(&error) {
                         tracing::error!(
                             error = error.to_string(),
-                            url,
+                            url = %log_url,
                             "Configuration/parameter error detected{} - not trying more URLs",
                             label
                         );
@@ -573,7 +585,7 @@ impl OpenAiFamilyProvider {
                     // "All N candidates failed" summary.
                     if !has_more_candidates && is_http_unauthorized_error(&error) {
                         tracing::error!(
-                            url,
+                            url = %log_url,
                             error = error.to_string(),
                             "All candidates returned HTTP 401{} - surfacing real auth error instead of wrapped URL fallback",
                             label
