@@ -201,6 +201,7 @@ fn app_with_models(count: usize) -> App {
         &config,
         PathBuf::from("/nonexistent/endside-overlay-test-config.toml"),
         PathBuf::from("/tmp/endside-overlay-test-workspace"),
+        None,
     )
     .expect("headless test app");
     // The dialog only receives keys in this mode; this case renders

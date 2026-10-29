@@ -12,6 +12,8 @@ use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::interaction_prompt::UserPromptResult;
 use crate::remote_sessions_service::record_remote_session;
 use crate::session_gateway::SessionTurnUpdate;
+use xiaoo_shared::config_identity::ConfigFileIdentity;
+use xiaoo_shared::daemon_protocol::response::GatewayHealthResponse;
 use xiaoo_shared::gateway::{
     RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
     RuntimeInteractionRequest, RuntimeOpenRequest, RuntimeTurnRequest,
@@ -224,10 +226,44 @@ impl GatewayRuntime {
         bearer_token_env: Option<String>,
     ) -> Result<String, String> {
         let base_url = normalize_base_url(&base_url);
-        let token = resolve_bearer_token(bearer_token_env.as_deref())?;
-        let client = self.http_client.clone();
-        let mut request = client.get(format!("{base_url}/api/v1/health"));
-        if let Some(token) = token.as_ref() {
+        self.check_remote_config_match(state, &base_url, bearer_token_env.as_deref())
+            .await?;
+        self.configure_remote(state, base_url.clone(), bearer_token_env);
+        Ok(format!("Remote connected: {base_url}"))
+    }
+
+    /// Entry guard for remote mode: health check plus the same-config
+    /// comparison. The session-switch path (`apply_remote_session_switch`)
+    /// can enter remote mode without [`Self::connect_remote`], so it calls
+    /// this first; on rejection the local state stays untouched.
+    pub async fn check_remote_config_match(
+        &self,
+        state: &AppState,
+        base_url: &str,
+        bearer_token_env: Option<&str>,
+    ) -> Result<(), String> {
+        let base_url = normalize_base_url(base_url);
+        let token = resolve_bearer_token(bearer_token_env)?;
+        let health_body = self.remote_health_body(&base_url, token.as_deref()).await?;
+        verify_remote_config_match(
+            state.config_identity.as_ref(),
+            &state.config_path,
+            &health_body,
+        )
+    }
+
+    /// GET `{base_url}/api/v1/health`, mapping transport failures,
+    /// non-2xx statuses, and body-read failures to `Err`. Read failures
+    /// must keep their own message: an empty-body fallback would make
+    /// `verify_remote_config_match` misreport a timeout or read error
+    /// as an unparsable (rejected) health response.
+    async fn remote_health_body(
+        &self,
+        base_url: &str,
+        token: Option<&str>,
+    ) -> Result<String, String> {
+        let mut request = self.http_client.get(format!("{base_url}/api/v1/health"));
+        if let Some(token) = token {
             request = request.bearer_auth(token);
         }
         let response = request
@@ -240,8 +276,9 @@ impl GatewayRuntime {
                 response.status()
             ));
         }
-        self.configure_remote(state, base_url.clone(), bearer_token_env);
-        Ok(format!("Remote connected: {base_url}"))
+        read_response_text_strict(response)
+            .await
+            .map_err(|error| format!("remote health check failed: {error}"))
     }
 
     pub async fn disconnect_remote(&mut self, state: &mut AppState) -> Result<(), String> {
@@ -296,6 +333,13 @@ impl GatewayRuntime {
 
     pub fn remote_base_url(&self) -> Option<&str> {
         self.remote.as_ref().map(|remote| remote.base_url.as_str())
+    }
+
+    /// Whether `base_url` is the daemon this runtime is configured for
+    /// (normalized, so session-record noise cannot defeat the comparison).
+    pub fn connected_to(&self, base_url: &str) -> bool {
+        let normalized = normalize_base_url(base_url);
+        self.remote_base_url() == Some(normalized.as_str())
     }
 
     pub(super) async fn start_remote_turn(
@@ -1024,6 +1068,92 @@ fn resolve_bearer_token(env_name: Option<&str>) -> Result<Option<String>, String
     Ok(Some(value))
 }
 
+/// Core of the `/remote` same-config constraint (rationale in
+/// `config_identity`): compare the daemon's startup identity from the
+/// health body against the TUI's startup snapshot — both judge "config
+/// as loaded", what drives the open/turn overrides, not what is on disk
+/// at connect time.
+///
+/// Compatibility: only daemons whose health JSON parses but predates
+/// `config_sha256` reporting pass through. Any other body fails closed:
+/// every daemon version answers this route with JSON, so a 200 carrying
+/// something else means a proxy or a different HTTP service sits at the
+/// URL — letting it through would silently skip the check and resurface
+/// the confusing merge errors this guard exists to prevent. Bodies that
+/// cannot be read at all are rejected earlier by `remote_health_body`.
+fn verify_remote_config_match(
+    local: Option<&ConfigFileIdentity>,
+    local_config_path: &std::path::Path,
+    health_body: &str,
+) -> Result<(), String> {
+    let health = serde_json::from_str::<GatewayHealthResponse>(health_body).map_err(|error| {
+        format!(
+            "remote health response is not the expected health JSON ({error}); \
+             the URL may point at a proxy or another HTTP service instead of \
+             an xiaoo daemon (body starts with: {})",
+            body_preview(health_body),
+        )
+    })?;
+    let Some(daemon_sha256) = health.config_sha256 else {
+        return Ok(());
+    };
+    // Fail closed: no startup identity would bypass the comparison.
+    // Normal startups always have one (`require_tui_bootstrap_config`),
+    // so name the remedy instead of a bare "cannot verify".
+    let Some(local) = local else {
+        return Err(format!(
+            "cannot verify config match: the TUI has no config identity for this session \
+             (no config file was loaded from {}); put the same content as the daemon's \
+             config there and restart the TUI, then reconnect",
+            local_config_path.display()
+        ));
+    };
+    let daemon = ConfigFileIdentity {
+        path: health
+            .config_path
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        sha256: daemon_sha256,
+    };
+    // Digest-only equality: same content under different paths passes
+    // (see ConfigFileIdentity's PartialEq).
+    if local != &daemon {
+        return Err(format!(
+            "config mismatch: TUI {} (sha256 {}) vs daemon {} (sha256 {}); \
+             must use the same config file — both sides hash the config they \
+             loaded at startup, so after making both files identical, restart \
+             the daemon (and the TUI if its config file changed after it \
+             started) and reconnect",
+            local.path,
+            digest_prefix(&local.sha256),
+            daemon.path,
+            digest_prefix(&daemon.sha256),
+        ));
+    }
+    Ok(())
+}
+
+/// Digest prefix for error messages; daemon-supplied digests can be
+/// shorter than 8 chars, where slicing would panic.
+fn digest_prefix(digest: &str) -> &str {
+    digest.get(..8).unwrap_or(digest)
+}
+
+/// Whitespace-collapsed, bounded preview of a health body for error
+/// messages: a 200 that is not the daemon's JSON is typically a proxy
+/// or portal HTML page, and a full dump would drown the diagnosis.
+fn body_preview(body: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let head = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{head}...")
+    } else {
+        head
+    }
+}
+
 /// Structured error for [`post_json`]: distinguishes a definitive daemon
 /// rejection (HTTP status preserved) from transient transport failures, so
 /// callers like the cancel-RPC retry loop can classify without re-parsing
@@ -1211,23 +1341,31 @@ fn format_remote_attached_error(info: &SessionAttachedInfo) -> String {
 /// is a generous upper bound.
 const RESPONSE_BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Read a response body as text, bounded by [`RESPONSE_BODY_READ_TIMEOUT`],
+/// with read failures and timeouts propagated as `Err`. Callers that must
+/// not mistake an unreadable body for absent content (the health probe
+/// feeding the same-config check) use this directly.
+async fn read_response_text_strict(response: reqwest::Response) -> Result<String, String> {
+    match tokio::time::timeout(RESPONSE_BODY_READ_TIMEOUT, response.text()).await {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(error)) => Err(format!("response body read failed: {error}")),
+        Err(_) => Err(format!(
+            "response body read timed out after {RESPONSE_BODY_READ_TIMEOUT:?} \
+             (daemon may be streaming an unbounded body)"
+        )),
+    }
+}
+
 /// Read a response body as text, bounded by [`RESPONSE_BODY_READ_TIMEOUT`].
 /// Returns the empty string on timeout / read error so callers'
 /// `format!("HTTP {status} {body}")` paths keep working without per-call-site
 /// error plumbing (the `send()` timeout already surfaces the "daemon
 /// unreachable" case; a body-read timeout is best-effort).
 async fn read_response_text_bounded(response: reqwest::Response) -> String {
-    match tokio::time::timeout(RESPONSE_BODY_READ_TIMEOUT, response.text()).await {
-        Ok(Ok(text)) => text,
-        Ok(Err(error)) => {
+    match read_response_text_strict(response).await {
+        Ok(text) => text,
+        Err(error) => {
             tracing::warn!(error = %error, "response body read failed; using empty body");
-            String::new()
-        }
-        Err(_) => {
-            tracing::warn!(
-                timeout = ?RESPONSE_BODY_READ_TIMEOUT,
-                "response body read timed out; using empty body (daemon may be streaming an unbounded body)"
-            );
             String::new()
         }
     }

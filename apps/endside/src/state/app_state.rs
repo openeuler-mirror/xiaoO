@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use xiaoo_api::chat::ReasoningEffort;
+use xiaoo_shared::config_identity::ConfigFileIdentity;
 use xiaoo_shared::session_diff::SessionDiffTracker;
 
 use crate::backend::GatewayBackendConfig;
@@ -456,6 +457,11 @@ pub struct AppState {
     pub active_agent_role: Option<String>,
     pub reasoning_effort: ReasoningEffort,
     pub config_path: PathBuf,
+    /// Startup snapshot of the loaded config content, compared by the
+    /// /remote same-config check against the daemon's (rationale in
+    /// `config_identity`). Refreshed when the TUI itself rewrites the
+    /// config (provider switch).
+    pub config_identity: Option<ConfigFileIdentity>,
     pub workspace: PathBuf,
     /// Session generation for model fetches: after a session rebuild, old
     /// in-flight results must be dropped — otherwise the previous session's
@@ -498,6 +504,7 @@ impl AppState {
         config: &Config,
         config_path: PathBuf,
         workspace: PathBuf,
+        config_identity: Option<ConfigFileIdentity>,
     ) -> Result<Self, anyhow::Error> {
         let input_history = load_input_history().unwrap_or_else(|error| {
             tracing::warn!("failed to load input history: {error:#}");
@@ -524,6 +531,7 @@ impl AppState {
             active_agent_role: None,
             reasoning_effort: config.llm.reasoning_effort,
             config_path,
+            config_identity,
             workspace: workspace.clone(),
             model_fetch_session: 0,
             model_fetch_inflight: std::collections::HashSet::new(),

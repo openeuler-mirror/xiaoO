@@ -222,13 +222,21 @@ impl Default for AgentsConfig {
 
 impl Config {
     pub fn load_from(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("failed to read config file {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("failed to parse config file {}", path.display()))
+        Ok(Self::load_from_with_content(path)?.0)
     }
 
-    pub fn save_to(&self, path: &Path) -> Result<()> {
+    /// Read and parse the config, returning the content from the same
+    /// read: the TUI's identity snapshot must hash the bytes that entered
+    /// memory (`ConfigFileIdentity::from_loaded_content`).
+    pub fn load_from_with_content(path: &Path) -> Result<(Self, String)> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config file {}", path.display()))?;
+        let config = toml::from_str(&content)
+            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+        Ok((config, content))
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create config directory {}", parent.display())
@@ -236,12 +244,11 @@ impl Config {
         }
         let mut persisted = self.clone();
         persisted.agent.remove(PLAN_AGENT_ID);
-        fs::write(
-            path,
-            toml::to_string_pretty(&persisted).context("failed to serialize config")?,
-        )
-        .with_context(|| format!("failed to write config file {}", path.display()))?;
-        Ok(())
+        let content = toml::to_string_pretty(&persisted).context("failed to serialize config")?;
+        fs::write(path, &content)
+            .with_context(|| format!("failed to write config file {}", path.display()))?;
+        // Written bytes let the caller refresh the identity snapshot.
+        Ok(content)
     }
 
     pub fn load_runtime_mcp_servers(

@@ -20,9 +20,13 @@ async fn resolve_visible_tool_names_requires_exact_tool_names() {
         },
     );
 
-    let mut state =
-        AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
-            .expect("app state should initialize");
+    let mut state = AppState::new_with_config(
+        &config,
+        PathBuf::from("config.toml"),
+        PathBuf::from("."),
+        None,
+    )
+    .expect("app state should initialize");
     state.active_agent_role = Some("code-reviewer".to_string());
 
     let visible = resolve_visible_tool_names(
@@ -50,9 +54,13 @@ fn tui_entry_context_carries_active_agent_role() {
             tools: BTreeMap::new(),
         },
     );
-    let mut state =
-        AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
-            .expect("app state should initialize");
+    let mut state = AppState::new_with_config(
+        &config,
+        PathBuf::from("config.toml"),
+        PathBuf::from("."),
+        None,
+    )
+    .expect("app state should initialize");
     state.active_agent_role = Some("plan".to_string());
 
     let entry = tui_entry_context(&state, None);
@@ -63,9 +71,13 @@ fn tui_entry_context_carries_active_agent_role() {
 #[test]
 fn tui_entry_context_carries_instance_id_for_remote() {
     let config = Config::default();
-    let mut state =
-        AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
-            .expect("app state should initialize");
+    let mut state = AppState::new_with_config(
+        &config,
+        PathBuf::from("config.toml"),
+        PathBuf::from("."),
+        None,
+    )
+    .expect("app state should initialize");
     state.active_agent_role = Some("plan".to_string());
 
     let entry = tui_entry_context(&state, Some("http://127.0.0.1:18080".to_string()));
