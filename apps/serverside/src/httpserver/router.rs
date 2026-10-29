@@ -32,6 +32,7 @@ use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::warn;
 use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
+use xiaoo_shared::config_identity::ConfigFileIdentity;
 use xiaoo_shared::daemon_protocol::response::{
     ChannelCatalogResponse, CronCatalogResponse, CronRunResponse, DaemonService,
     GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayFeatureCapabilities,
@@ -62,6 +63,14 @@ pub struct GatewayAppState {
     cron_scheduler: Option<Arc<CronScheduler>>,
     channel_manager: Option<Arc<ChannelManager>>,
     session_diff_trackers: SessionDiffTrackerMap,
+    /// Startup config identity reported via `/api/v1/health` for the
+    /// TUI's same-config check. Production always sets it; `None` is
+    /// test-only, and TUIs treat absence as old-daemon compatibility.
+    config_identity: Option<ConfigFileIdentity>,
+    /// Bearer-auth config mirrored from the router wiring so the
+    /// unauthenticated `/api/v1/health` handler can gate the
+    /// config-identity fields on it (rationale in [`health_check`]).
+    bearer_auth: Option<HttpBearerAuthConfig>,
 }
 
 /// Per-session `SessionDiffTracker` map. Shared between the request path
@@ -91,6 +100,8 @@ impl GatewayAppState {
             cron_scheduler: None,
             channel_manager: None,
             session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            config_identity: None,
+            bearer_auth: None,
         }
     }
 
@@ -131,6 +142,8 @@ impl GatewayAppState {
             cron_scheduler: None,
             channel_manager: None,
             session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            config_identity: None,
+            bearer_auth: None,
         })
     }
 
@@ -149,6 +162,10 @@ impl GatewayAppState {
 
     fn set_cron_scheduler(&mut self, cron_scheduler: Option<Arc<CronScheduler>>) {
         self.cron_scheduler = cron_scheduler;
+    }
+
+    pub fn set_config_identity(&mut self, config_identity: Option<ConfigFileIdentity>) {
+        self.config_identity = config_identity;
     }
 
     fn set_channel_interaction_timeout(&mut self, interaction_timeout_secs: u64) {
@@ -573,6 +590,8 @@ pub struct ChannelRouterOptions {
     pub cron_scheduler: Option<Arc<CronScheduler>>,
     pub channel_manager: Arc<ChannelManager>,
     pub security: HttpSecurityPolicy,
+    /// Startup config identity reported via `/api/v1/health`.
+    pub config_identity: Option<ConfigFileIdentity>,
 }
 
 pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
@@ -588,6 +607,7 @@ pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
         cron_scheduler,
         channel_manager,
         security,
+        config_identity,
     } = options;
     let mut state = GatewayAppState::with_channel_runtimes_and_control_plane(
         session_service,
@@ -597,6 +617,7 @@ pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
     state.set_channel_manager(channel_manager);
     state.set_channel_interaction_timeout(interaction_timeout_secs);
     state.set_cron_scheduler(cron_scheduler);
+    state.set_config_identity(config_identity);
     spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
     Ok(create_router_from_state(
         state,
@@ -607,11 +628,15 @@ pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
 }
 
 fn create_router_from_state(
-    state: GatewayAppState,
+    mut state: GatewayAppState,
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
     security: HttpSecurityPolicy,
 ) -> Router {
+    // `/api/v1/health` sits outside the auth layer (docker HEALTHCHECK)
+    // but gates the config-identity fields on this same config; see
+    // `health_check` for the disclosure rationale.
+    state.bearer_auth = bearer_auth.clone();
     let protected_runtime_routes = apply_http_bearer_auth(
         Router::new()
             .route("/api/v1/runtimes", get(handle_runtime_catalog))
@@ -685,6 +710,9 @@ fn create_router_from_state(
     }
 }
 
+/// Callers here pass loose args, unlike the channel variant's options
+/// struct; restructuring just for clippy's threshold is not worth it.
+#[allow(clippy::too_many_arguments)]
 pub fn create_router_with_control_plane_and_auth(
     session_service: Arc<dyn SessionService>,
     session_control_plane: Arc<dyn SessionControlPlane>,
@@ -693,11 +721,13 @@ pub fn create_router_with_control_plane_and_auth(
     cron_scheduler: Option<Arc<CronScheduler>>,
     channel_manager: Arc<ChannelManager>,
     security: HttpSecurityPolicy,
+    config_identity: Option<ConfigFileIdentity>,
 ) -> Router {
     let mut state =
         GatewayAppState::with_control_plane(session_service, session_control_plane.clone());
     state.set_cron_scheduler(cron_scheduler);
     state.set_channel_manager(channel_manager);
+    state.set_config_identity(config_identity);
     spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
     create_router_from_state(state, bearer_auth, rate_limit, security)
 }
@@ -923,10 +953,35 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
         .into_response()
 }
 
-async fn health_check() -> Json<GatewayHealthResponse> {
+/// Unauthenticated (docker HEALTHCHECK depends on it), so anonymous
+/// callers get only `status`/`version`. The config identity (canonical
+/// path + content digest) is disclosed only when bearer auth is disabled
+/// or the request carries a valid token: auth-disabled deployments are
+/// loopback-bound (non-loopback binds require auth to start), where a
+/// local caller could read the config file itself, so disclosure adds
+/// nothing; on auth-enabled deployments the fields would otherwise leak
+/// the daemon user's home path and a config fingerprint to the network.
+/// The TUI's health probe sends the token, so its same-config check is
+/// unaffected; a TUI without a valid token has its first RPC rejected
+/// with 401 anyway.
+async fn health_check(
+    State(state): State<Arc<GatewayAppState>>,
+    headers: HeaderMap,
+) -> Json<GatewayHealthResponse> {
+    let authenticated = match &state.bearer_auth {
+        None => true,
+        Some(auth) => matches!(parse_bearer_token(&headers), Ok(token) if auth.matches(token)),
+    };
+    let identity = if authenticated {
+        state.config_identity.clone()
+    } else {
+        None
+    };
     Json(GatewayHealthResponse {
         status: GatewayHealthStatus::Ok,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        config_path: identity.as_ref().map(|id| id.path.clone()),
+        config_sha256: identity.as_ref().map(|id| id.sha256.clone()),
     })
 }
 

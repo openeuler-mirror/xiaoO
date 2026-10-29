@@ -22,6 +22,7 @@ use tokio::time::{sleep, timeout, Duration};
 use tower::util::ServiceExt;
 use xiaoo_api::events::LoopEventSink;
 use xiaoo_shared::backend::{BackendInfo, BackendLineageInfo};
+use xiaoo_shared::config_identity::ConfigFileIdentity;
 use xiaoo_shared::cron::{CronExpression, CronJobConfig};
 use xiaoo_shared::gateway::{
     AppTurnRequest, AppTurnResult, SessionControlPlane, SessionService, SessionServiceError,
@@ -90,6 +91,7 @@ async fn sandbox_catalog_is_authenticated_and_redacted() {
         None,
         Arc::new(ChannelManager::new(None, None)),
         HttpSecurityPolicy::default(),
+        None,
     );
 
     let unauthorized = router
@@ -135,6 +137,7 @@ async fn runtime_exec_interruption_returns_partial_output() {
         None,
         Arc::new(ChannelManager::new(None, None)),
         HttpSecurityPolicy::default(),
+        None,
     );
 
     let response = router
@@ -975,6 +978,7 @@ async fn require_lease_holder_returns_409_with_structured_body() {
         None,
         Arc::new(ChannelManager::new(None, None)),
         HttpSecurityPolicy::default(),
+        None,
     );
 
     let response = router
@@ -1035,6 +1039,8 @@ impl super::GatewayAppState {
             cron_scheduler: None,
             channel_manager: None,
             session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            config_identity: None,
+            bearer_auth: None,
         }
     }
 }
@@ -1050,4 +1056,58 @@ pub fn create_router_with_auth(
         rate_limit,
         HttpSecurityPolicy::default(),
     )
+}
+
+/// Health reports the startup config identity when set.
+#[tokio::test(flavor = "current_thread")]
+async fn health_reports_config_identity_when_set() {
+    let mut state = GatewayAppState::new(Arc::new(FakeSessionService::new("unused")));
+    state.set_config_identity(Some(ConfigFileIdentity {
+        path: "/etc/xiaoo/config.toml".to_string(),
+        sha256: "deadbeef".to_string(),
+    }));
+    let router = create_router_from_state(state, None, None, HttpSecurityPolicy::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("health route should respond");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body).expect("health response should be JSON");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["config_path"], "/etc/xiaoo/config.toml");
+    assert_eq!(payload["config_sha256"], "deadbeef");
+}
+
+/// Without an identity the fields must be omitted entirely: the TUI keys
+/// old-daemon compatibility on field absence.
+#[tokio::test(flavor = "current_thread")]
+async fn health_omits_config_identity_when_unset() {
+    let router = create_router_with_auth(Arc::new(FakeSessionService::new("unused")), None, None);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("health route should respond");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body).expect("health response should be JSON");
+    assert!(payload.get("config_path").is_none());
+    assert!(payload.get("config_sha256").is_none());
 }
