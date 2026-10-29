@@ -10,32 +10,35 @@ use regex::Regex;
 use reqwest::StatusCode;
 use serde_json::Value;
 
+mod redaction;
+pub(crate) use redaction::ErrorRedactor;
+
 pub(crate) fn map_reqwest_error(err: reqwest::Error) -> LlmError {
-    // Gemini embeds its API key in the URL query string and reqwest's
-    // Display renders the full URL ("error sending request for url (...)"),
-    // so every message built from a reqwest error must pass through
-    // redact_credentials before it reaches a caller.
-    let error_message = redact_credentials(&err.to_string());
-    let cause_chain = redact_credentials(&render_error_chain(&err));
+    let redactor = ErrorRedactor::new(err.url().map(|url| url.as_str()).unwrap_or(""), "");
+    redactor.error(map_reqwest_error_raw(err))
+}
+
+pub(crate) fn map_reqwest_error_raw(err: reqwest::Error) -> LlmError {
+    let cause_chain = render_error_chain(&err);
     if err.is_timeout() {
         LlmError::HttpError(format!(
             "Request timeout: {} | cause chain: {}",
-            error_message, cause_chain
+            err, cause_chain
         ))
     } else if err.is_connect() {
         LlmError::HttpError(format!(
             "Connection failed: {} | cause chain: {}",
-            error_message, cause_chain
+            err, cause_chain
         ))
     } else if err.is_decode() {
         LlmError::StreamError {
             message: format!(
                 "error decoding response body: {} | cause chain: {}",
-                error_message, cause_chain
+                err, cause_chain
             ),
         }
     } else {
-        LlmError::HttpError(format!("{} | cause chain: {}", error_message, cause_chain))
+        LlmError::HttpError(format!("{} | cause chain: {}", err, cause_chain))
     }
 }
 
@@ -66,32 +69,6 @@ fn render_error_chain(err: &dyn std::error::Error) -> String {
     } else {
         chain.join(" -> ")
     }
-}
-
-/// Mask credential-like query-parameter values (`key=`, `token=`, ...) in
-/// arbitrary text. Gemini embeds its API key in the URL query string and
-/// reqwest's `Display` renders the full URL into error messages, so
-/// anything derived from a reqwest error or a provider URL must pass
-/// through here before it reaches error.log or a caller-visible
-/// `LlmError` — including the URL-fallback summary built from
-/// user-configured endpoint URLs. Server-controlled response text needs
-/// the same mask (an error page or SSE error event can echo the request
-/// URL back), which is why [`write_stream_error_log`] applies it at the
-/// persistence boundary.
-pub(crate) fn redact_credentials(text: &str) -> String {
-    static REDACTION_RE: OnceLock<Regex> = OnceLock::new();
-    REDACTION_RE
-        .get_or_init(|| {
-            // \b keeps unrelated words ("monkey=...") from matching; the
-            // longer alternatives must come first so "api_key" is not
-            // partially matched as "key".
-            Regex::new(
-                r#"(?i)\b((?:api[_-]?key|access[_-]?token|token|key|secret|password|signature)=)[^&\s)\]}'"]+"#,
-            )
-            .expect("valid credential redaction regex")
-        })
-        .replace_all(text, "${1}***")
-        .into_owned()
 }
 
 pub(crate) fn map_serde_error(err: serde_json::Error) -> LlmError {
@@ -263,8 +240,128 @@ fn overflow_patterns() -> &'static [Regex] {
 static OVERFLOW_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
 static NO_BODY_OVERFLOW_RE: OnceLock<Regex> = OnceLock::new();
 
+/// 记录 LLM 流式请求失败的详细信息到 error.log（完整记录，不截断）
+pub(crate) fn write_stream_error_log(
+    url: &str,
+    response_headers: Option<&reqwest::header::HeaderMap>,
+    partial_response_buffer: &str,
+    error_message: &str,
+    http_status: Option<u16>,
+) {
+    let mut redactor = ErrorRedactor::new(url, "");
+    if let Some(headers) = response_headers {
+        redactor.headers(headers);
+    }
+    write_redacted_stream_error_log(
+        url,
+        response_headers,
+        partial_response_buffer,
+        error_message,
+        http_status,
+        &redactor,
+    );
+}
+
+pub(crate) fn write_redacted_stream_error_log(
+    url: &str,
+    response_headers: Option<&reqwest::header::HeaderMap>,
+    partial_response_buffer: &str,
+    error_message: &str,
+    http_status: Option<u16>,
+    redactor: &ErrorRedactor,
+) {
+    let url = redactor.url(url);
+    let partial_response_buffer = redactor.diagnostic(partial_response_buffer);
+    let error_message = redactor.diagnostic(error_message);
+    let log_path = error_log_path();
+
+    if let Some(parent) = log_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!("Failed to create error log directory: {}", e);
+            return;
+        }
+    }
+
+    match open_error_log(&log_path) {
+        Ok(mut file) => {
+            let timestamp = Local::now().to_rfc3339();
+
+            writeln!(file).ok();
+            writeln!(file, "{}", "=".repeat(60)).ok();
+            writeln!(file, "===== {} source=llm_stream_error =====", timestamp).ok();
+            writeln!(file, "{}", "=".repeat(60)).ok();
+
+            writeln!(file).ok();
+            writeln!(file, "[Basic Info]").ok();
+            writeln!(file, "URL: {}", url).ok();
+            if let Some(status) = http_status {
+                writeln!(file, "HTTP Status: {}", status).ok();
+            }
+            writeln!(file, "Error: {}", error_message).ok();
+
+            if let Some(headers) = response_headers {
+                writeln!(file).ok();
+                writeln!(file, "[Key Headers]").ok();
+
+                let essential_keys = ["content-type", "transfer-encoding"];
+                let debug_keys = [
+                    "x-request-id",
+                    "retry-after",
+                    "x-ratelimit-limit",
+                    "x-ratelimit-remaining",
+                    "x-ratelimit-reset",
+                    "openai-model",
+                ];
+
+                for (key, value) in headers.iter() {
+                    let key_str = key.as_str();
+                    if essential_keys.contains(&key_str) || debug_keys.contains(&key_str) {
+                        let value_str = value.to_str().unwrap_or("<binary>");
+                        writeln!(file, "  {}: {}", key, redactor.diagnostic(value_str)).ok();
+                    }
+                }
+            }
+
+            writeln!(file).ok();
+            writeln!(file, "[Response Body]").ok();
+            writeln!(file, "Length: {} bytes", partial_response_buffer.len()).ok();
+            if !partial_response_buffer.is_empty() {
+                writeln!(file, "{}", partial_response_buffer).ok();
+            }
+
+            writeln!(file).ok();
+            writeln!(file, "{}", "=".repeat(60)).ok();
+            writeln!(file).ok();
+        }
+        Err(e) => {
+            tracing::error!("Failed to write stream error log: {}", e);
+        }
+    }
+}
+
+fn create_error_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn open_error_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let file = create_error_log(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
 /// Structured details of a failed streaming LLM request, written to
-/// error.log by [`write_stream_error_log`] as one complete block.
+/// error.log by [`write_structured_stream_error_log`] as one complete block.
 ///
 /// reqwest's top-level `Display` for body-read failures is the generic
 /// "error decoding response body"; the actual root cause (read timeout,
@@ -274,15 +371,9 @@ static NO_BODY_OVERFLOW_RE: OnceLock<Regex> = OnceLock::new();
 /// bytes arrived, and why did it die" without re-reading provider source
 /// code after the fact.
 ///
-/// Sanitization: owned free-text fields are masked by
-/// [`redact_credentials`] at construction (in [`map_stream_read_error`]
-/// and [`map_protocol_mismatch`]). The borrowed SSE buffer cannot be
-/// masked there — masking returns an owned String — so
-/// [`write_stream_error_log`] masks it at the persistence boundary, where
-/// an error page or SSE error event echoing the credential-bearing
-/// request URL gets caught. With both boundaries covered, neither the log
-/// nor the caller-facing `LlmError` built from the report leaks
-/// query-string credentials (Gemini embeds its API key there).
+/// Free-text fields are sanitized with the request-scoped redactor before
+/// returning an error. Headers and the borrowed stream buffer are sanitized
+/// when the report is persisted.
 struct StreamErrorReport<'a> {
     url: String,
     http_status: u16,
@@ -321,6 +412,7 @@ struct StreamErrorReport<'a> {
 /// identically instead of hand-rolling the report/log/message trio.
 pub(crate) fn map_stream_read_error(
     url: &str,
+    redactor: &ErrorRedactor,
     http_status: u16,
     response_headers: &reqwest::header::HeaderMap,
     error: &reqwest::Error,
@@ -329,17 +421,17 @@ pub(crate) fn map_stream_read_error(
     unconsumed_line_buffer: &str,
 ) -> LlmError {
     let report = StreamErrorReport {
-        url: redact_credentials(url),
+        url: redactor.url(url),
         http_status,
         response_headers,
-        error_message: redact_credentials(&error.to_string()),
-        cause_chain: redact_credentials(&render_error_chain(error)),
+        error_message: redactor.diagnostic(&error.to_string()).into_owned(),
+        cause_chain: redactor.diagnostic(&render_error_chain(error)).into_owned(),
         timed_out: error.is_timeout(),
         elapsed_ms: started.elapsed().as_millis() as u64,
         bytes_received,
         unconsumed_line_buffer,
     };
-    let message = match write_stream_error_log(&report) {
+    let message = match write_structured_stream_error_log(&report, redactor) {
         Some(log_path) => format!(
             "{} | cause chain: {} (详见 {})",
             report.error_message,
@@ -369,6 +461,7 @@ pub(crate) fn map_stream_read_error(
 /// timeout flag is meaningless.
 pub(crate) fn map_protocol_mismatch(
     url: &str,
+    redactor: &ErrorRedactor,
     http_status: u16,
     response_headers: &reqwest::header::HeaderMap,
     error_message: String,
@@ -376,17 +469,17 @@ pub(crate) fn map_protocol_mismatch(
     body: &str,
 ) -> LlmError {
     let report = StreamErrorReport {
-        url: redact_credentials(url),
+        url: redactor.url(url),
         http_status,
         response_headers,
-        error_message: redact_credentials(&error_message),
+        error_message: redactor.diagnostic(&error_message).into_owned(),
         cause_chain: String::new(),
         timed_out: false,
         elapsed_ms: started.elapsed().as_millis() as u64,
         bytes_received: body.len(),
         unconsumed_line_buffer: body,
     };
-    let message = match write_stream_error_log(&report) {
+    let message = match write_structured_stream_error_log(&report, redactor) {
         Some(log_path) => format!("{} (详见 {})", report.error_message, log_path.display()),
         None => report.error_message,
     };
@@ -399,7 +492,10 @@ pub(crate) fn map_protocol_mismatch(
 /// that is missing the report — XIAOO_ERROR_LOG may also have redirected
 /// the file away from the default per-user location, so the returned path
 /// is the real one, not a hardcoded default.
-fn write_stream_error_log(report: &StreamErrorReport<'_>) -> Option<PathBuf> {
+fn write_structured_stream_error_log(
+    report: &StreamErrorReport<'_>,
+    redactor: &ErrorRedactor,
+) -> Option<PathBuf> {
     let log_path = error_log_path();
 
     if let Some(parent) = log_path.parent() {
@@ -409,7 +505,7 @@ fn write_stream_error_log(report: &StreamErrorReport<'_>) -> Option<PathBuf> {
         }
     }
 
-    let mut file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+    let mut file = match open_error_log(&log_path) {
         Ok(file) => file,
         Err(e) => {
             tracing::error!("Failed to write stream error log: {}", e);
@@ -465,7 +561,7 @@ fn write_stream_error_log(report: &StreamErrorReport<'_>) -> Option<PathBuf> {
         let key_str = key.as_str();
         if essential_keys.contains(&key_str) || debug_keys.contains(&key_str) {
             let value_str = value.to_str().unwrap_or("<binary>");
-            line!("  {}: {}", key, value_str);
+            line!("  {}: {}", key, redactor.diagnostic(value_str));
         }
     }
 
@@ -476,21 +572,12 @@ fn write_stream_error_log(report: &StreamErrorReport<'_>) -> Option<PathBuf> {
     // note).
     line!("Unconsumed bytes: {}", report.unconsumed_line_buffer.len());
     if !report.unconsumed_line_buffer.is_empty() {
-        line!("{}", redact_credentials(report.unconsumed_line_buffer));
+        line!("{}", redactor.diagnostic(report.unconsumed_line_buffer));
     }
 
     line!();
     line!("{}", "=".repeat(60));
     line!();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600))
-        {
-            tracing::warn!("Failed to set error.log permissions: {}", e);
-        }
-    }
 
     if let Some(e) = first_write_error {
         tracing::error!("Failed to write stream error log: {}", e);

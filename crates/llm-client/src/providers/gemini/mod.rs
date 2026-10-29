@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use crate::convert::{parse_tool_arguments, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
-use crate::error::{map_api_status_error, map_reqwest_error, LlmError};
+use crate::error::{map_api_status_error, map_reqwest_error_raw as map_reqwest_error, LlmError};
 use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::wire_types::{ParsedChunk, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -58,95 +58,106 @@ impl LlmProvider for GeminiProvider {
             "{}/v1beta/{}:generateContent?key={}",
             self.base_url, model_name, self.api_key
         );
-        let body = build_gemini_request_body(request, &self.capabilities.model_name);
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
+        let result = async {
+            let body = build_gemini_request_body(request, &self.capabilities.model_name);
+            let body_str = serde_json::to_string(&body).unwrap_or_default();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            let request = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .build()
+                .map_err(map_reqwest_error)?;
+            redactor.headers(request.headers());
+            let response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(map_reqwest_error)?;
 
-        let status = response.status();
-        if !status.is_success() {
+            let status = response.status();
             let headers = response.headers().clone();
-            let resp_body = response.text().await.unwrap_or_default();
-            return Err(map_api_status_error(
-                status,
-                &resp_body,
-                &body_str,
-                Some(&headers),
-            ));
+            redactor.headers(&headers);
+            if !status.is_success() {
+                let resp_body = response.text().await.unwrap_or_default();
+                return Err(map_api_status_error(
+                    status,
+                    &resp_body,
+                    &body_str,
+                    Some(&headers),
+                ));
+            }
+
+            let gemini_response: GeminiResponseBody =
+                response.json().await.map_err(map_reqwest_error)?;
+            let parts = gemini_response
+                .candidates
+                .as_ref()
+                .and_then(|c| c.first())
+                .and_then(|c| c.content.as_ref())
+                .map(|c| c.parts.as_slice())
+                .unwrap_or(&[]);
+
+            let content = extract_gemini_text(parts);
+            let tool_calls = extract_gemini_tool_calls(parts);
+
+            let finish_reason = gemini_response
+                .candidates
+                .as_ref()
+                .and_then(|c| c.first())
+                .and_then(|c| c.finish_reason.clone());
+
+            let stop_reason = match finish_reason.as_deref() {
+                Some("STOP") => StopReason::EndTurn,
+                Some("MAX_TOKENS") => StopReason::MaxTokens,
+                _ => StopReason::EndTurn,
+            };
+
+            let (prompt_tokens, completion_tokens) = gemini_response
+                .usage_metadata
+                .as_ref()
+                .map(|u| {
+                    (
+                        u.prompt_token_count.unwrap_or(0) as usize,
+                        u.candidates_token_count.unwrap_or(0) as usize,
+                    )
+                })
+                .unwrap_or((0, 0));
+
+            let tool_use_blocks: Vec<ToolUseBlock> = tool_calls
+                .unwrap_or_default()
+                .iter()
+                .map(|tc| ToolUseBlock {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.function.name.clone(),
+                    input: parse_tool_arguments(&tc.function.arguments),
+                })
+                .collect();
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: if tool_use_blocks.is_empty() {
+                        content
+                    } else {
+                        None
+                    },
+                    reasoning_content: None,
+                    tool_calls: tool_use_blocks,
+                    usage: Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens: prompt_tokens + completion_tokens,
+                        cached_tokens: 0,
+                    },
+                    stop_reason,
+                },
+                kv_cache_chunk_hashes: vec![],
+            })
         }
-
-        let gemini_response: GeminiResponseBody =
-            response.json().await.map_err(map_reqwest_error)?;
-        let parts = gemini_response
-            .candidates
-            .as_ref()
-            .and_then(|c| c.first())
-            .and_then(|c| c.content.as_ref())
-            .map(|c| c.parts.as_slice())
-            .unwrap_or(&[]);
-
-        let content = extract_gemini_text(parts);
-        let tool_calls = extract_gemini_tool_calls(parts);
-
-        let finish_reason = gemini_response
-            .candidates
-            .as_ref()
-            .and_then(|c| c.first())
-            .and_then(|c| c.finish_reason.clone());
-
-        let stop_reason = match finish_reason.as_deref() {
-            Some("STOP") => StopReason::EndTurn,
-            Some("MAX_TOKENS") => StopReason::MaxTokens,
-            _ => StopReason::EndTurn,
-        };
-
-        let (prompt_tokens, completion_tokens) = gemini_response
-            .usage_metadata
-            .as_ref()
-            .map(|u| {
-                (
-                    u.prompt_token_count.unwrap_or(0) as usize,
-                    u.candidates_token_count.unwrap_or(0) as usize,
-                )
-            })
-            .unwrap_or((0, 0));
-
-        let tool_use_blocks: Vec<ToolUseBlock> = tool_calls
-            .unwrap_or_default()
-            .iter()
-            .map(|tc| ToolUseBlock {
-                call_id: tc.id.clone(),
-                tool_name: tc.function.name.clone(),
-                input: parse_tool_arguments(&tc.function.arguments),
-            })
-            .collect();
-
-        Ok(LlmResponse {
-            message: AssistantMessage {
-                text: if tool_use_blocks.is_empty() {
-                    content
-                } else {
-                    None
-                },
-                reasoning_content: None,
-                tool_calls: tool_use_blocks,
-                usage: Usage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                    cached_tokens: 0,
-                },
-                stop_reason,
-            },
-            kv_cache_chunk_hashes: vec![],
-        })
+        .await;
+        redactor.error_result(result)
     }
 
     async fn complete_stream(
@@ -160,174 +171,183 @@ impl LlmProvider for GeminiProvider {
             "{}/v1beta/{}:streamGenerateContent?alt=sse&key={}",
             self.base_url, model_name, self.api_key
         );
-        let body = build_gemini_request_body(request, &self.capabilities.model_name);
-        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
+        let result = async {
+            let body = build_gemini_request_body(request, &self.capabilities.model_name);
+            let body_str = serde_json::to_string(&body).unwrap_or_default();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            let request = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .build()
+                .map_err(map_reqwest_error)?;
+            redactor.headers(request.headers());
+            let response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(map_reqwest_error)?;
 
-        let status = response.status();
-        let headers = response.headers().clone();
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(map_api_status_error(
-                status,
-                &error_body,
-                &body_str,
-                Some(&headers),
-            ));
-        }
+            let status = response.status();
+            let headers = response.headers().clone();
+            redactor.headers(&headers);
+            if !status.is_success() {
+                let error_body = response.text().await.unwrap_or_default();
+                return Err(map_api_status_error(
+                    status,
+                    &error_body,
+                    &body_str,
+                    Some(&headers),
+                ));
+            }
 
-        // Same gate as the other SSE providers: `?alt=sse` should always
-        // yield text/event-stream, so anything else is an error page or a
-        // misrouted endpoint; feeding it to the SSE parser would silently
-        // yield an empty stream.
-        let content_type = headers
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !content_type.to_lowercase().starts_with("text/event-stream") {
-            let full_response = response.text().await.unwrap_or_default();
-            return Err(crate::error::map_protocol_mismatch(
-                &url,
-                status.as_u16(),
-                &headers,
-                format!("unexpected content type: {}", content_type),
-                started,
-                &full_response,
-            ));
-        }
-
-        let mut full_text = String::new();
-        let mut full_tool_calls: Vec<crate::wire_types::WireToolCall> = Vec::new();
-        let mut final_usage = None;
-        let mut final_stop_reason = StopReason::EndTurn;
-
-        let mut decoder = StreamUtf8Decoder::default();
-        let mut buffer = String::new();
-        let mut byte_stream = response.bytes_stream();
-        let mut bytes_received: usize = 0;
-
-        while let Some(chunk_result) = byte_stream.next().await {
-            let bytes = chunk_result.map_err(|e| {
-                crate::error::map_stream_read_error(
+            let content_type = headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !content_type.to_lowercase().starts_with("text/event-stream") {
+                let full_response = response.text().await.unwrap_or_default();
+                return Err(crate::error::map_protocol_mismatch(
                     &url,
+                    &redactor,
                     status.as_u16(),
                     &headers,
-                    &e,
+                    format!("unexpected content type: {}", content_type),
                     started,
-                    bytes_received,
-                    &buffer,
-                )
-            })?;
-            bytes_received += bytes.len();
-            decoder.push(&bytes, &mut buffer);
-
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].to_string();
-                buffer = buffer[pos + 1..].to_string();
-                if line.is_empty() {
-                    continue;
-                }
-
-                let data = line.strip_prefix("data: ").unwrap_or(&line).trim();
-                if data.is_empty() || data == "[DONE]" {
-                    continue;
-                }
-
-                let gemini_resp: GeminiResponseBody = match serde_json::from_str(data) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-
-                let parts = gemini_resp
-                    .candidates
-                    .as_ref()
-                    .and_then(|c| c.first())
-                    .and_then(|c| c.content.as_ref())
-                    .map(|c| c.parts.as_slice())
-                    .unwrap_or(&[]);
-
-                let content = extract_gemini_text(parts);
-                let tool_call_deltas = extract_gemini_tool_call_deltas(parts);
-
-                if let Some(ref c) = content {
-                    full_text.push_str(c);
-                }
-
-                let finish_reason = gemini_resp
-                    .candidates
-                    .as_ref()
-                    .and_then(|c| c.first())
-                    .and_then(|c| c.finish_reason.clone());
-
-                if let Some(ref r) = finish_reason {
-                    final_stop_reason = match r.as_str() {
-                        "STOP" => StopReason::EndTurn,
-                        "MAX_TOKENS" => StopReason::MaxTokens,
-                        _ => StopReason::EndTurn,
-                    };
-                }
-
-                let usage = gemini_resp.usage_metadata.as_ref().map(|u| WireUsage {
-                    prompt_tokens: u.prompt_token_count.unwrap_or(0),
-                    completion_tokens: u.candidates_token_count.unwrap_or(0),
-                    total_tokens: u.prompt_token_count.unwrap_or(0)
-                        + u.candidates_token_count.unwrap_or(0),
-                    prompt_tokens_details: None,
-                });
-                if let Some(ref u) = usage {
-                    final_usage = Some(wire_usage_to_usage(u));
-                }
-
-                let parsed = ParsedChunk {
-                    content,
-                    reasoning: None,
-                    finish_reason,
-                    usage,
-                    tool_calls: tool_call_deltas,
-                    kv_transfer_params: None,
-                };
-
-                super::openai_family::accumulate_tool_call_deltas_pub(
-                    &mut full_tool_calls,
-                    &parsed,
-                );
-                on_chunk(parsed_chunk_to_stream_chunk(&parsed));
+                    &full_response,
+                ));
             }
-        }
 
-        decoder.finish(&mut buffer);
+            let mut full_text = String::new();
+            let mut full_tool_calls: Vec<crate::wire_types::WireToolCall> = Vec::new();
+            let mut final_usage = None;
+            let mut final_stop_reason = StopReason::EndTurn;
 
-        let tool_use_blocks: Vec<ToolUseBlock> = full_tool_calls
-            .iter()
-            .map(|tc| ToolUseBlock {
-                call_id: tc.id.clone(),
-                tool_name: tc.function.name.clone(),
-                input: parse_tool_arguments(&tc.function.arguments),
-            })
-            .collect();
+            let mut decoder = StreamUtf8Decoder::default();
+            let mut buffer = String::new();
+            let mut byte_stream = response.bytes_stream();
+            let mut bytes_received: usize = 0;
 
-        Ok(LlmResponse {
-            message: AssistantMessage {
-                text: if full_text.is_empty() {
-                    None
-                } else {
-                    Some(full_text)
+            while let Some(chunk_result) = byte_stream.next().await {
+                let bytes = chunk_result.map_err(|e| {
+                    crate::error::map_stream_read_error(
+                        &url,
+                        &redactor,
+                        status.as_u16(),
+                        &headers,
+                        &e,
+                        started,
+                        bytes_received,
+                        &buffer,
+                    )
+                })?;
+                bytes_received += bytes.len();
+                decoder.push(&bytes, &mut buffer);
+
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].to_string();
+                    buffer = buffer[pos + 1..].to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    let data = line.strip_prefix("data: ").unwrap_or(&line).trim();
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
+                    }
+
+                    let gemini_resp: GeminiResponseBody = match serde_json::from_str(data) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+
+                    let parts = gemini_resp
+                        .candidates
+                        .as_ref()
+                        .and_then(|c| c.first())
+                        .and_then(|c| c.content.as_ref())
+                        .map(|c| c.parts.as_slice())
+                        .unwrap_or(&[]);
+
+                    let content = extract_gemini_text(parts);
+                    let tool_call_deltas = extract_gemini_tool_call_deltas(parts);
+
+                    if let Some(ref c) = content {
+                        full_text.push_str(c);
+                    }
+
+                    let finish_reason = gemini_resp
+                        .candidates
+                        .as_ref()
+                        .and_then(|c| c.first())
+                        .and_then(|c| c.finish_reason.clone());
+
+                    if let Some(ref r) = finish_reason {
+                        final_stop_reason = match r.as_str() {
+                            "STOP" => StopReason::EndTurn,
+                            "MAX_TOKENS" => StopReason::MaxTokens,
+                            _ => StopReason::EndTurn,
+                        };
+                    }
+
+                    let usage = gemini_resp.usage_metadata.as_ref().map(|u| WireUsage {
+                        prompt_tokens: u.prompt_token_count.unwrap_or(0),
+                        completion_tokens: u.candidates_token_count.unwrap_or(0),
+                        total_tokens: u.prompt_token_count.unwrap_or(0)
+                            + u.candidates_token_count.unwrap_or(0),
+                        prompt_tokens_details: None,
+                    });
+                    if let Some(ref u) = usage {
+                        final_usage = Some(wire_usage_to_usage(u));
+                    }
+
+                    let parsed = ParsedChunk {
+                        content,
+                        reasoning: None,
+                        finish_reason,
+                        usage,
+                        tool_calls: tool_call_deltas,
+                        kv_transfer_params: None,
+                    };
+
+                    super::openai_family::accumulate_tool_call_deltas_pub(
+                        &mut full_tool_calls,
+                        &parsed,
+                    );
+                    on_chunk(parsed_chunk_to_stream_chunk(&parsed));
+                }
+            }
+
+            decoder.finish(&mut buffer);
+
+            let tool_use_blocks: Vec<ToolUseBlock> = full_tool_calls
+                .iter()
+                .map(|tc| ToolUseBlock {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.function.name.clone(),
+                    input: parse_tool_arguments(&tc.function.arguments),
+                })
+                .collect();
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: if full_text.is_empty() {
+                        None
+                    } else {
+                        Some(full_text)
+                    },
+                    reasoning_content: None,
+                    tool_calls: tool_use_blocks,
+                    usage: final_usage.unwrap_or_default(),
+                    stop_reason: final_stop_reason,
                 },
-                reasoning_content: None,
-                tool_calls: tool_use_blocks,
-                usage: final_usage.unwrap_or_default(),
-                stop_reason: final_stop_reason,
-            },
-            kv_cache_chunk_hashes: vec![],
-        })
+                kv_cache_chunk_hashes: vec![],
+            })
+        }
+        .await;
+        redactor.error_result(result)
     }
 
     fn capabilities(&self) -> &ProviderCapabilities {
