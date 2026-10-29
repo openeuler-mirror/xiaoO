@@ -1,22 +1,29 @@
 # Remote TUI Guide
 
-Remote TUI lets one machine run the XiaoO gateway daemon while another machine runs the terminal UI.
+Remote TUI lets the `xiaoo` TUI attach to an `xiaoo-daemon` process **running on the same server**.
 
-- **Machine A** runs `xiaoo-daemon` and owns the runtime, LLM provider, tools, hooks, workspace, and operation backend.
-- **Machine B** runs `xiaoo` and connects to Machine A with `/remote`.
-- Both machines use the same codebase and binaries; only the startup mode is different.
+- The server runs `xiaoo-daemon` and owns the runtime, LLM provider, tools, hooks, workspace, and operation backend.
+- The same server runs `xiaoo` and connects to the daemon with `/remote`.
+- Both use the same codebase and binaries; only the startup mode is different.
+
+`/remote` enforces the same-server constraint: every entry into remote mode
+compares the daemon's host identity (reported via `/api/v1/health`) against
+the TUI's own machine and rejects a daemon on another server at connect time
+(see section 3). Remote TUI across machines is not supported — for multi-node
+deployment use [xGovernor](https://atomgit.com/openeuler/xGovernor) instead
+of `xiaoo-daemon`.
 
 ---
 
 ## 1. Architecture
 
 ```
-Machine B                         Machine A
-xiaoo                         xiaoo-daemon
----------                         ----------------
-TUI input/rendering   HTTP/SSE    Gateway runtime APIs
-/remote commands   ----------->   Agent loop
-Interaction prompt  <---------->  Tools / hooks / workspace
+One server
+xiaoo                          xiaoo-daemon
+---------                      ----------------
+TUI input/rendering   HTTP/SSE  Gateway runtime APIs
+/remote commands   ---------->  Agent loop
+Interaction prompt  <---------- Tools / hooks / workspace
 ```
 
 Local TUI remains the default. Remote mode is opt-in:
@@ -24,15 +31,28 @@ Local TUI remains the default. Remote mode is opt-in:
 - `Local`: TUI opens runtimes and runs the agent loop in the local process.
 - `Remote`: TUI sends turns to the daemon and renders the daemon's SSE events.
 
-In remote mode, all tool execution happens on Machine A. The workspace shown in the TUI status bar is marked as remote to avoid confusing it with Machine B's local directory.
+In remote mode, all tool execution happens in the daemon process. The workspace shown in the TUI status bar is marked as remote to avoid confusing it with the TUI's local directory.
+
+"Same server" means the same machine identity: the check compares
+`/etc/machine-id` (falling back to hostname). A daemon inside a container has
+its own machine-id, so a TUI running on the host is rejected — for
+containerized deployments run the TUI inside the same container as the daemon
+(see [docker_deploy.md](./docker_deploy.md)).
 
 ---
 
-## 2. Start Machine A
+## 2. Start the Daemon
 
-Start the daemon on Machine A. Remote mode binds a non-loopback interface, so a
-bearer token is required first — the daemon refuses to start on a non-loopback
-address without one:
+Start the daemon on the same server as the TUI. The default loopback bind is
+the common shape for remote TUI:
+
+```bash
+xiaoo-daemon --config ~/.config/xiaoo/config.toml
+```
+
+A non-loopback bind is still allowed (the daemon also serves non-TUI clients
+such as channel webhooks on the same port) but requires a bearer token first —
+the daemon refuses to start on a non-loopback address without one:
 
 ```toml
 # ~/.config/xiaoo/config.toml
@@ -51,25 +71,28 @@ xiaoo-daemon \
 Health check:
 
 ```bash
-curl http://A:18080/api/v1/health
+curl http://127.0.0.1:18080/api/v1/health
 ```
 
 The health response reports the daemon's startup config identity
-(`config_path` + `config_sha256`). The TUI compares `config_sha256`
-against a snapshot of the config content it loaded at startup and refuses
-to enter remote mode on mismatch — see section 3.
+(`config_path` + `config_sha256`) and its host identity (`host_identity`,
+the machine ID of the server it runs on, falling back to hostname). The TUI
+compares `config_sha256` against a snapshot of the config content it loaded
+at startup, and `host_identity` against its own machine — refusing to enter
+remote mode on either mismatch; see section 3.
 
 Disclosure policy for those identity fields: `/api/v1/health` itself is
 unauthenticated (docker HEALTHCHECK depends on it), but the identity
 fields are returned only when bearer auth is disabled or the request
 carries a valid token. With auth disabled the daemon is loopback-bound
 (non-loopback binds require auth to start), where any local caller could
-read the config file itself, so disclosure adds nothing; on auth-enabled
-deployments the fields would otherwise leak the daemon user's home path
-and a config content fingerprint to anonymous network callers. The TUI's
-health probe sends the bearer token, so the same-config check is not
-affected; anonymous callers (including `docker HEALTHCHECK`) get
-`status` and `version` only.
+read the config file and `/etc/machine-id` itself, so disclosure adds
+nothing; on auth-enabled deployments the fields would otherwise leak the
+daemon user's home path, a config content fingerprint, and a trackable
+host fingerprint to anonymous network callers. The TUI's health probe
+sends the bearer token, so the same-config and same-host checks are not
+affected; anonymous callers (including `docker HEALTHCHECK`) get `status`
+and `version` only.
 
 If bearer auth is configured, protected session/chat routes require:
 
@@ -79,7 +102,7 @@ If bearer auth is configured, protected session/chat routes require:
 
 ---
 
-## 3. Start Machine B
+## 3. Start the TUI
 
 Start the TUI normally:
 
@@ -87,7 +110,22 @@ Start the TUI normally:
 xiaoo
 ```
 
-Both sides must use **the same config file**. The TUI sends local config
+**Same host.** Every entry into remote mode — `/remote <url>`, `auto_connect`,
+and activating a recorded remote session from the `/remote` dialog — verifies
+that the daemon runs on the same server: the daemon reports `host_identity`
+via `/api/v1/health`, the TUI resolves its own machine identity with the same
+rules (`/etc/machine-id`, falling back to hostname), and a mismatch refuses
+to enter remote mode:
+
+```text
+daemon runs on a different host (local=b0e8f34a…, daemon=7f3ac219…); /remote requires xiaoo and xiaoo-daemon on the same server — for multi-node deployment use xGovernor instead (https://atomgit.com/openeuler/xGovernor)
+```
+
+Container boundaries count as different hosts (a container has its own
+`/etc/machine-id`). Daemons older than host-identity reporting omit the field
+and the check is skipped (compatibility).
+
+**Same config.** Both sides must use **the same config file**. The TUI sends local config
 overrides (`llm` overrides, `entry.runtime_profile_id`) with every
 open/turn request, and the daemon merges them with its own config; when
 the two configs differ, those merges fail with errors that do not point
@@ -104,7 +142,7 @@ remote mode on mismatch:
 config mismatch: TUI /home/B/.config/xiaoo/config.toml (sha256 3f2a1b9c) vs daemon /home/A/.config/xiaoo/config.toml (sha256 9d1c04e2); must use the same config file — both sides hash the config they loaded at startup, so after making both files identical, restart the daemon (and the TUI if its config file changed after it started) and reconnect
 ```
 
-Copy Machine A's `config.toml` to the same content on Machine B before
+Copy the daemon-side `config.toml` to the same content on the TUI side before
 connecting. The digest comparison covers `config.toml` only (not
 `--mcp-config`). Note that both sides hash the config as loaded at
 startup: if either config file is edited or re-copied after that side
@@ -115,22 +153,22 @@ is not the daemon's JSON (an HTML error page from an intermediary proxy,
 for example) fails the connect: every daemon version answers this route
 with JSON, so anything else means the URL does not reach a daemon.
 
-Connect to Machine A:
+Connect to the daemon:
 
 ```text
-/remote http://A:18080
+/remote http://127.0.0.1:18080
 ```
 
-If Machine A uses bearer auth, configure Machine B's TUI config:
+If the daemon uses bearer auth, configure the TUI config:
 
 ```toml
 [tui.remote]
-url = "http://A:18080"
+url = "http://127.0.0.1:18080"
 bearer_token_env = "XIAOO_REMOTE_TOKEN"
 auto_connect = false
 ```
 
-Then export the same token value on Machine B:
+Then export the same token value before starting the TUI:
 
 ```bash
 export XIAOO_REMOTE_TOKEN="change-me"
@@ -138,10 +176,10 @@ xiaoo
 ```
 
 When `auto_connect = true`, TUI enters remote backend mode on startup using the
-configured URL, running the same health check and config-match verification as
-`/remote <url>` (a mismatch is surfaced as an error message and the TUI stays
-local). When `auto_connect = false`, the config only supplies the bearer token
-env var and default remote settings; use `/remote <url>` manually.
+configured URL, running the same health check and same-host / config-match
+verification as `/remote <url>` (a mismatch is surfaced as an error message and
+the TUI stays local). When `auto_connect = false`, the config only supplies the
+bearer token env var and default remote settings; use `/remote <url>` manually.
 
 ---
 
@@ -149,8 +187,8 @@ env var and default remote settings; use `/remote <url>` manually.
 
 | Command | Description |
 |---------|-------------|
-| `/remote` | Open the remote-session dialog (no argument required); activating a recorded session runs the same health check and config-match verification as `/remote <base_url>` |
-| `/remote <base_url>` | Connect to a remote gateway daemon, for example `/remote http://A:18080`; refuses to connect when the daemon's config file differs from the TUI's (see section 3) |
+| `/remote` | Open the remote-session dialog (no argument required); activating a recorded session runs the same health check and same-host / config-match verification as `/remote <base_url>` |
+| `/remote <base_url>` | Connect to a gateway daemon on this server, for example `/remote http://127.0.0.1:18080`; refuses to connect when the daemon runs on a different host or its config file differs from the TUI's (see section 3) |
 | `/remote status` | Show current backend, remote URL, session-open state, and health result |
 | `/remote off` | Close the remote session and switch back to local backend |
 | `/remote close` | Close the remote session **on the daemon** (destroys it server-side), unlike `off` which only detaches |
@@ -160,7 +198,7 @@ Bare `/remote` (no argument) opens the session dialog rather than connecting,
 and `/remote close` is handled in
 `apps/endside/src/input/event_key.rs`.
 
-After `/remote <base_url>` succeeds, new turns go through Machine A's daemon. The status bar shows `Remote: <base_url>`.
+After `/remote <base_url>` succeeds, new turns go through the daemon. The status bar shows `Remote: <base_url>`.
 
 ---
 
@@ -258,18 +296,18 @@ catalogue and document the additions in this section.
 
 ## 6. Operational Notes
 
-- Machine A's config controls the LLM provider, model, workspace, tools, hooks, LSP, and operation backend.
-- Machine B's local provider/model config is still used for normal local mode and for TUI bootstrap, but remote turns execute with Machine A's daemon config.
+- The daemon's config controls the LLM provider, model, workspace, tools, hooks, LSP, and operation backend.
+- The TUI's local provider/model config is still used for normal local mode and for TUI bootstrap, but remote turns execute with the daemon's config.
 - Use bearer auth for any daemon bound to a non-loopback interface.
 - For untrusted networks, prefer an SSH tunnel or TLS-terminating reverse proxy in front of the daemon.
-- Remote runtime state is kept in the daemon's in-memory control-plane store. Restarting Machine A's daemon loses active remote runtimes in the current implementation.
+- Remote runtime state is kept in the daemon's in-memory control-plane store. Restarting the daemon loses active remote runtimes in the current implementation.
 - **Subagent support.** The daemon binds the same `SubagentControl`
   implementation (`CoreBackedSessionService`) as the local TUI, so
-  `spawn_subagent` / `join_subagent` tools work in remote mode out of
-  the box. Subagent lane lifecycle (`turn_start` → `tool_call` →
-  `loop_end`) and tool-card running state are forwarded via SSE so the
+  `spawn_subagent` / `join_subagent` tools work in remote mode out of the
+  box. Subagent lane lifecycle (`turn_start` → `tool_call` → `loop_end`)
+  and tool-card running state are forwarded via SSE so the
   TUI renders subagent lanes with parity to local mode. Configure
-  `[subagent.<id>]` role presets on Machine A; role `prompt` / `tools` /
+  `[subagent.<id>]` role presets on the daemon; role `prompt` / `tools` /
   `max_turns` are applied at spawn time.
 
 ---
@@ -277,18 +315,22 @@ catalogue and document the additions in this section.
 ## 7. Current Limitations
 
 - `/cancel` is wired through the HTTP/TUI path, but hard cancellation depends on the gateway/core exposing the active loop cancellation token through the session supervisor.
-- Remote mode does not sync files from Machine A to Machine B. Tool results and file-change summaries are streamed, but filesystem operations happen only on Machine A.
+- Remote mode does not sync files from the daemon to the TUI. Tool results and file-change summaries are streamed, but filesystem operations happen only where the daemon runs.
 - Remote TUI is not a separate lightweight client package; it is the same `xiaoo` binary running with a remote backend.
+- **Single server only.** `/remote` rejects a daemon running on another
+  server (host-identity mismatch). Multi-node deployment is out of scope for
+  `xiaoo-daemon` — use
+  [xGovernor](https://atomgit.com/openeuler/xGovernor) for that topology.
 
 ---
 
 ## 8. Quick Checklist
 
-1. Machine A has daemon config and provider credentials.
-2. Machine A configures `[http].bearer_token_env` and starts
-   `xiaoo-daemon --host 0.0.0.0 --port 18080` (a non-loopback bind requires the token).
-3. Machine B can reach `http://A:18080/api/v1/health`.
-4. Machine B exports `XIAOO_REMOTE_TOKEN` with the same token.
-5. Machine B starts `xiaoo`.
-6. In TUI, run `/remote http://A:18080`.
-7. Send a message and confirm the status bar shows `Remote: http://A:18080`.
+1. The daemon has its config and provider credentials.
+2. Optionally configure `[http].bearer_token_env` (mandatory for a
+   non-loopback bind) and start `xiaoo-daemon --port 18080`.
+3. On the same server, the TUI can reach `http://127.0.0.1:18080/api/v1/health`.
+4. Export `XIAOO_REMOTE_TOKEN` with the same token if bearer auth is used.
+5. Start `xiaoo` on the same server.
+6. In TUI, run `/remote http://127.0.0.1:18080`.
+7. Send a message and confirm the status bar shows `Remote: http://127.0.0.1:18080`.

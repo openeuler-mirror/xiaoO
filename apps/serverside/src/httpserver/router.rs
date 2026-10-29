@@ -634,8 +634,8 @@ fn create_router_from_state(
     security: HttpSecurityPolicy,
 ) -> Router {
     // `/api/v1/health` sits outside the auth layer (docker HEALTHCHECK)
-    // but gates the config-identity fields on this same config; see
-    // `health_check` for the disclosure rationale.
+    // but gates the config-identity and host-identity fields on this
+    // same config; see `health_check` for the disclosure rationale.
     state.bearer_auth = bearer_auth.clone();
     let protected_runtime_routes = apply_http_bearer_auth(
         Router::new()
@@ -955,15 +955,17 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
 
 /// Unauthenticated (docker HEALTHCHECK depends on it), so anonymous
 /// callers get only `status`/`version`. The config identity (canonical
-/// path + content digest) is disclosed only when bearer auth is disabled
-/// or the request carries a valid token: auth-disabled deployments are
+/// path + content digest) and the host identity (machine ID / hostname
+/// fingerprint) are disclosed only when bearer auth is disabled or the
+/// request carries a valid token: auth-disabled deployments are
 /// loopback-bound (non-loopback binds require auth to start), where a
-/// local caller could read the config file itself, so disclosure adds
-/// nothing; on auth-enabled deployments the fields would otherwise leak
-/// the daemon user's home path and a config fingerprint to the network.
-/// The TUI's health probe sends the token, so its same-config check is
-/// unaffected; a TUI without a valid token has its first RPC rejected
-/// with 401 anyway.
+/// local caller could read the config file and `/etc/machine-id`
+/// itself, so disclosure adds nothing; on auth-enabled deployments the
+/// fields would otherwise leak the daemon user's home path, a config
+/// fingerprint, and a trackable host fingerprint to the network.
+/// The TUI's health probe sends the token, so its same-config and
+/// same-host checks are unaffected; a TUI without a valid token has its
+/// first RPC rejected with 401 anyway.
 async fn health_check(
     State(state): State<Arc<GatewayAppState>>,
     headers: HeaderMap,
@@ -977,11 +979,17 @@ async fn health_check(
     } else {
         None
     };
+    let host_identity = if authenticated {
+        xiaoo_shared::host_identity::local_host_identity()
+    } else {
+        None
+    };
     Json(GatewayHealthResponse {
         status: GatewayHealthStatus::Ok,
         version: env!("CARGO_PKG_VERSION").to_string(),
         config_path: identity.as_ref().map(|id| id.path.clone()),
         config_sha256: identity.as_ref().map(|id| id.sha256.clone()),
+        host_identity,
     })
 }
 

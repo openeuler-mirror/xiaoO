@@ -1111,3 +1111,86 @@ async fn health_omits_config_identity_when_unset() {
     assert!(payload.get("config_path").is_none());
     assert!(payload.get("config_sha256").is_none());
 }
+
+/// Health reports the daemon's host identity (machine ID / hostname,
+/// resolved by the shared `host_identity` module) so the TUI's same-host
+/// check compares like with like. The helper caches per process, so the
+/// test asserts against the same value the handler read.
+#[tokio::test(flavor = "current_thread")]
+async fn health_reports_host_identity() {
+    let router = create_router_with_auth(Arc::new(FakeSessionService::new("unused")), None, None);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("health route should respond");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body).expect("health response should be JSON");
+    match xiaoo_shared::host_identity::local_host_identity() {
+        Some(identity) => assert_eq!(payload["host_identity"], serde_json::json!(identity)),
+        // No identity source on this machine → the field is omitted
+        // entirely, which the TUI treats as old-daemon compatibility.
+        None => assert!(payload.get("host_identity").is_none()),
+    }
+}
+
+/// On auth-enabled daemons the host identity follows the same disclosure
+/// policy as the config identity: a machine fingerprint must not leak to
+/// anonymous network callers, while a valid token gets it (the TUI's
+/// health probe sends one).
+#[tokio::test(flavor = "current_thread")]
+async fn health_gates_host_identity_on_bearer_auth() {
+    let router = create_router_with_auth(
+        Arc::new(FakeSessionService::new("unused")),
+        Some(HttpBearerAuthConfig::new("secret-token")),
+        None,
+    );
+
+    let anonymous = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("health route should respond");
+    let body = to_bytes(anonymous.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body).expect("health response should be JSON");
+    assert!(payload.get("host_identity").is_none());
+
+    let authenticated = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .header("authorization", "Bearer secret-token")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("health route should respond");
+    let body = to_bytes(authenticated.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body).expect("health response should be JSON");
+    if xiaoo_shared::host_identity::local_host_identity().is_some() {
+        assert!(
+            payload.get("host_identity").is_some(),
+            "authenticated health must disclose the host identity"
+        );
+    }
+}

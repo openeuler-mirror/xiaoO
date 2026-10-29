@@ -255,6 +255,11 @@ runtime API 可执行命令并读写文件，因此默认只绑回环。若要�
 `--bearer-token-env`）；未配置时 daemon 拒绝在非回环地址上启动。详见
 [docs/daemon_config.md](./docs/daemon_config.md)。
 
+TUI 的 `/remote` 要求 daemon 与 TUI 部署在**同一台服务器**上（连接时的
+健康检查会比对两侧主机标识，非同机直接拒绝）。多节点部署请使用
+[xGovernor](https://atomgit.com/openeuler/xGovernor) 代替 `xiaoo-daemon`，
+详见 [docs/remote_tui.md](./docs/remote_tui.md)。
+
 HTTP 请求可在 JSON body 的 `entry` 对象中通过 `runtime_profile_id` 选择 Agent 角色预设：
 
 ```json

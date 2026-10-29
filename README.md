@@ -262,6 +262,12 @@ by default. To expose it on another interface you must configure a bearer token
 the daemon refuses to start on a non-loopback address without one. See
 [docs/daemon_config.md](./docs/daemon_config.md).
 
+The TUI's `/remote` requires the daemon to run on the **same server** as the
+TUI (the connect-time health check compares host identities and rejects a
+daemon on another machine). For multi-node deployment use
+[xGovernor](https://atomgit.com/openeuler/xGovernor) instead of `xiaoo-daemon`;
+see [docs/remote_tui.md](./docs/remote_tui.md).
+
 HTTP requests can select an agent role preset by passing `runtime_profile_id` inside the `entry` object of the JSON body:
 
 ```json
