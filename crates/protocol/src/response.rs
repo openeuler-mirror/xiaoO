@@ -60,6 +60,16 @@ pub struct GatewayHealthResponse {
     pub status: GatewayHealthStatus,
     /// Daemon package version.
     pub version: String,
+    /// Canonical path of the daemon's startup config file. Omitted by
+    /// older daemons; on auth-enabled daemons also omitted for requests
+    /// without a valid bearer token (disclosure decision in the daemon's
+    /// `health_check`). TUIs treat absence as old-daemon compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    /// SHA-256 digest of the daemon's startup config file, compared by
+    /// the TUI's same-config check. Omitted like [`Self::config_path`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_sha256: Option<String>,
 }
 
 /// Feature flags returned by `/api/v1/capabilities`.

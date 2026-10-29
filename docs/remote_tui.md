@@ -54,6 +54,19 @@ Health check:
 curl http://A:18080/api/v1/health
 ```
 
+The health response reports the daemon's startup config identity
+(`config_path` + `config_sha256`).
+
+Disclosure policy for those identity fields: `/api/v1/health` itself is
+unauthenticated (docker HEALTHCHECK depends on it), but the identity
+fields are returned only when bearer auth is disabled or the request
+carries a valid token. With auth disabled the daemon is loopback-bound
+(non-loopback binds require auth to start), where any local caller could
+read the config file itself, so disclosure adds nothing; on auth-enabled
+deployments the fields would otherwise leak the daemon user's home path
+and a config content fingerprint to anonymous network callers. Anonymous
+callers (including `docker HEALTHCHECK`) get `status` and `version` only.
+
 If bearer auth is configured, protected session/chat routes require:
 
 ```bash

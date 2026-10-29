@@ -544,12 +544,20 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
     xiaoo_shared::llm_secrets::init_llm_secrets(&config_path)?;
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = DaemonConfig::load_with_mcp_config(
+    let (config, config_content) = DaemonConfig::load_with_mcp_config_with_content(
         &config_path,
         mcp_config_path.as_deref(),
         &workspace,
         dirs::home_dir().as_deref(),
     )?;
+    // Identity from the same read that produced the config: a re-read
+    // could pick up an edit this daemon never merged.
+    let config_identity = Some(
+        xiaoo_shared::config_identity::ConfigFileIdentity::from_loaded_content(
+            &config_path,
+            config_content.as_bytes(),
+        ),
+    );
     let mcp_server_config = config.resolve_mcp_server_config()?;
     let hooker_config = config.app.hooker.clone();
     let bearer_auth = match bearer_token_env {
@@ -694,6 +702,7 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
                 cron_scheduler.clone(),
                 channel_manager.clone(),
                 security.clone(),
+                config_identity.clone(),
             )
         } else {
             create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
@@ -707,6 +716,7 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
                     cron_scheduler: cron_scheduler.clone(),
                     channel_manager: channel_manager.clone(),
                     security,
+                    config_identity,
                 },
             )
             .map_err(anyhow::Error::new)

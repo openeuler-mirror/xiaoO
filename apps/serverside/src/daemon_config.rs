@@ -479,6 +479,13 @@ pub struct DaemonConfig {
 
 impl DaemonConfig {
     pub fn load_from(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::load_from_with_content(path)?.0)
+    }
+
+    /// Read and parse the config, returning the content from the same
+    /// read — `run_daemon` hashes it into the identity reported via
+    /// `/api/v1/health` (see `ConfigFileIdentity::from_loaded_content`).
+    fn load_from_with_content(path: impl AsRef<Path>) -> Result<(Self, String)> {
         let config_path = path.as_ref().to_path_buf();
         let content = fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read config {}", config_path.display()))?;
@@ -491,7 +498,7 @@ impl DaemonConfig {
             .with_context(|| format!("invalid agents config {}", config_path.display()))?;
         install_builtin_agent_roles(&mut app.agent)
             .with_context(|| format!("invalid config {}", config_path.display()))?;
-        Ok(Self { app, config_path })
+        Ok((Self { app, config_path }, content))
     }
 
     pub fn load_with_mcp_config(
@@ -500,7 +507,18 @@ impl DaemonConfig {
         workspace: &Path,
         home: Option<&Path>,
     ) -> Result<Self> {
-        let mut config = Self::load_from(path)?;
+        Ok(Self::load_with_mcp_config_with_content(path, explicit_path, workspace, home)?.0)
+    }
+
+    /// [`Self::load_with_mcp_config`], also returning the config content
+    /// for the startup identity (`run_daemon`).
+    pub fn load_with_mcp_config_with_content(
+        path: impl AsRef<Path>,
+        explicit_path: Option<&Path>,
+        workspace: &Path,
+        home: Option<&Path>,
+    ) -> Result<(Self, String)> {
+        let (mut config, content) = Self::load_from_with_content(path)?;
         let json_source = resolve_json_config_path(explicit_path, workspace, home);
         let json_servers = load_json_servers(explicit_path, workspace, home)
             .context("failed to load MCP JSON config")?;
@@ -512,7 +530,7 @@ impl DaemonConfig {
             json_source.as_deref().unwrap_or(&fallback_json_source),
         )
         .context("failed to merge MCP server configs")?;
-        Ok(config)
+        Ok((config, content))
     }
 
     pub fn resolve_agent(&self) -> Result<ResolvedAgentConfig> {
