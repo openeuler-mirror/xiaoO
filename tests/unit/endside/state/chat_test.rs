@@ -571,3 +571,18 @@ fn replace_provider_models_returns_false_for_unknown_provider() {
         "未命中时不得改动任何 provider（失败路径不写列表由此保证）"
     );
 }
+
+#[test]
+fn history_preserves_multiline_controls_and_restores_draft() {
+    let mut chat = ChatState::default();
+    let entry = "\t中\r\n文\t ";
+    let draft = "A\tB\r";
+    chat.set_input_history(vec![entry.to_string()]);
+    chat.input = Input::from(draft);
+    for _ in 0..2 {
+        assert!(chat.previous_input_history());
+        assert_eq!(chat.input.value().as_bytes(), entry.as_bytes());
+        assert!(chat.next_input_history());
+        assert_eq!(chat.input.value().as_bytes(), draft.as_bytes());
+    }
+}

@@ -240,3 +240,50 @@ async fn rendering_measures_the_list_viewport() {
     assert!(first.contains("model-00"), "首屏从第一项开始");
     assert!(!first.contains("model-14"), "首屏放不下第二屏的内容");
 }
+
+#[test]
+fn input_controls_render_without_terminal_control_bytes() {
+    let normal = Style::default();
+    let selected = Style::default().bg(ratatui::style::Color::Blue);
+    let text = build_input_text_with_selection("A\t中\r\nB", &(1..4), normal, selected);
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 3));
+    Widget::render(
+        Paragraph::new(text).wrap(Wrap { trim: false }),
+        buffer.area,
+        &mut buffer,
+    );
+    assert_eq!(buffer[(0, 0)].symbol(), "A");
+    for col in 1..5 {
+        assert_eq!(buffer[(col, 0)].symbol(), " ");
+        assert_eq!(buffer[(col, 0)].bg, ratatui::style::Color::Blue);
+    }
+    assert_eq!(buffer[(5, 0)].symbol(), "中");
+    assert_eq!(buffer[(7, 0)].symbol(), " ");
+    assert_eq!(buffer[(0, 1)].symbol(), "B");
+    assert!(buffer
+        .content
+        .iter()
+        .all(|cell| !cell.symbol().chars().any(char::is_control)));
+}
+
+#[test]
+fn preserved_controls_cursor_matches_expanded_paragraph_across_wraps() {
+    for value in ["A\tB", "中\t文\rX\nY", "\tA\t", "A\r\nB"] {
+        let display = value.replace('\t', "    ").replace('\r', " ");
+        for width in [2, 4, 7, 20] {
+            let mut offset = 0;
+            for (index, ch) in value.chars().enumerate() {
+                assert_eq!(
+                    calculate_visual_cursor_position(value, index, width),
+                    calculate_visual_cursor_position(&display, offset, width)
+                );
+                offset += if ch == '\t' { 4 } else { 1 };
+            }
+            assert_eq!(
+                calculate_visual_cursor_position(value, value.chars().count(), width),
+                calculate_visual_cursor_position(&display, offset, width)
+            );
+            assert_matches_ratatui(&display, width);
+        }
+    }
+}

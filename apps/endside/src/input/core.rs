@@ -18,35 +18,24 @@ pub trait EventHandler {
     fn handle_event(&mut self, event: &Event);
 }
 
-/// Normalize text destined for an input value: expand tabs to four spaces
-/// and drop every control character other than '\n'.
-///
-/// The TUI cell grid cannot host raw control characters. A literal tab in a
-/// rendered cell is written to the terminal as a raw 0x09 byte, which the
-/// terminal interprets as a tab-stop jump (typically 8 columns). That
-/// desynchronizes ratatui's 1-column advance from the real cursor position:
-/// every following character printed without an explicit `MoveTo` lands in
-/// the wrong column, and the columns the tab jumped over are never
-/// repainted — stale content that only the next full repaint clears (the
-/// "garbled input box + history-switch leftovers" symptom). Expanding tabs
-/// keeps the indentation semantics while staying renderable. The remaining
-/// control characters (backspace, vertical tab, DEL, C1 controls, …) are
-/// equally unrenderable and simply dropped. '\n' is kept: it is the
-/// explicit newline (Ctrl+J / bracketed-paste line separator).
+/// Keep supported multiline text intact while excluding terminal controls.
 pub(crate) fn normalize_input_text(text: &str) -> String {
-    if !text.chars().any(|ch| ch.is_control() && ch != '\n') {
-        return text.to_string();
-    }
-    let mut output = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '\t' => output.push_str("    "),
-            '\n' => output.push('\n'),
-            _ if ch.is_control() => {}
-            _ => output.push(ch),
-        }
-    }
-    output
+    text.chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .collect()
+}
+
+/// Project input onto terminal cells without changing the submitted value.
+/// TAB occupies four spaces; CR occupies one space rather than moving the
+/// terminal cursor. LF remains an explicit line break.
+pub(crate) fn input_display_text(text: &str) -> String {
+    text.chars()
+        .flat_map(|ch| match ch {
+            '\t' => "    ".chars().collect::<Vec<_>>(),
+            '\r' => vec![' '],
+            _ => vec![ch],
+        })
+        .collect()
 }
 
 impl Input {
@@ -82,7 +71,7 @@ impl Input {
         if is_secret {
             "*".repeat(self.value.chars().count())
         } else {
-            self.value.clone()
+            input_display_text(&self.value)
         }
     }
 
@@ -90,7 +79,11 @@ impl Input {
         self.value
             .chars()
             .take(self.cursor)
-            .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+            .map(|ch| match ch {
+                '\t' => 4,
+                '\r' => 1,
+                _ => UnicodeWidthChar::width(ch).unwrap_or(0),
+            })
             .sum()
     }
 
@@ -185,17 +178,7 @@ impl Input {
     }
 
     fn insert_char(&mut self, ch: char) {
-        // Tabs and other control characters cannot live in the TUI cell grid
-        // (see `normalize_input_text` for the full rationale): expand tabs to
-        // four spaces to preserve indentation, drop the remaining control
-        // characters, keep '\n' as the explicit newline.
-        if ch == '\t' {
-            for _ in 0..4 {
-                self.insert_char(' ');
-            }
-            return;
-        }
-        if ch != '\n' && ch.is_control() {
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
             return;
         }
         // If there's a selection, replace it.

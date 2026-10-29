@@ -1,4 +1,17 @@
+use super::supplement_caret_offset;
 use super::wrap_text_to_lines;
+use crate::input::Input;
+
+#[test]
+fn supplement_caret_follows_masked_chars_for_secret_and_projection_otherwise() {
+    // Secret masking renders one '*' per character, so the caret offset is
+    // the character index; the plaintext projection expands TAB to four
+    // cells, so the caret offset is the visual cursor there.
+    let mut input = Input::from("A\tB");
+    input.set_cursor(3);
+    assert_eq!(supplement_caret_offset(&input, true), 3);
+    assert_eq!(supplement_caret_offset(&input, false), 6);
+}
 
 #[test]
 fn preserves_hard_newlines() {

@@ -560,7 +560,7 @@ impl App {
 
     async fn submit_editing_input(&mut self) -> Result<()> {
         let user_input = self.state.chat_state.input.value().to_string();
-        if user_input.trim().is_empty() {
+        if user_input.is_empty() {
             return Ok(());
         }
 

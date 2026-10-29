@@ -715,49 +715,18 @@ fn visual_line_char_at_display_col(line: &Line<'_>, target_disp: usize) -> usize
     char_idx
 }
 
-/// Map a click inside the input content area to a character index of
-/// `value`. Visual lines break at `\n` and at every `max_width` display
-/// columns (a simplified approximation of the wrap used by the renderer —
-/// word-boundary wrapping is not modelled; for typical input lengths the
-/// difference is immaterial). `target_row`/`target_col` are relative to the
-/// input content area (row 0, col 0 = first cell).
+/// Map a cell in the input projection back to its original character index.
 fn input_char_index_at(
     value: &str,
     max_width: usize,
     target_row: usize,
     target_col: usize,
 ) -> usize {
-    let max_width = max_width.max(1);
-    let mut row = 0usize;
-    let mut col = 0usize;
-    let mut char_idx = 0usize;
-    for ch in value.chars() {
-        if ch == '\n' {
-            if row == target_row {
-                return char_idx;
-            }
-            row += 1;
-            col = 0;
-            char_idx += 1;
-            continue;
-        }
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
-        if col + w > max_width && col > 0 {
-            row += 1;
-            col = 0;
-        }
-        if row > target_row {
-            return char_idx;
-        }
-        // The character occupies display columns [col, col + w); a click
-        // inside that span (or at its left edge) maps to this character.
-        if row == target_row && col + w > target_col {
-            return char_idx;
-        }
-        col += w;
-        char_idx += 1;
-    }
-    char_idx
+    let positions = crate::render::overlay::input_visual_positions(value, max_width.max(1));
+    positions
+        .iter()
+        .rposition(|&position| position <= (target_row, target_col))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

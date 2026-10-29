@@ -952,3 +952,31 @@ fn outcomes_from_a_previous_session_are_dropped() {
         "当代结果必须正常应用"
     );
 }
+
+#[tokio::test]
+async fn pasted_multiline_text_is_queued_without_trimming() {
+    let home = tempfile::tempdir().expect("temporary history HOME");
+    let previous = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
+    let mut app = test_app();
+    app.state.chat_state.is_loading = true;
+    for (text, submitted) in [(" \t中\r\n文\t ", " \t中\n文\t "), ("\t\r\n", "\t\n")] {
+        app.state.chat_state.input.reset();
+        app.handle_paste_event(text).expect("paste");
+        app.submit_editing_input().await.expect("submit");
+        assert_eq!(
+            app.state
+                .chat_state
+                .pending_turns
+                .back()
+                .unwrap()
+                .prompt
+                .as_bytes(),
+            submitted.as_bytes()
+        );
+    }
+    match previous {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+}
