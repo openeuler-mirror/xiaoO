@@ -28,6 +28,16 @@ pub(crate) struct LocalExec {
     _state: Arc<LocalBackendState>,
 }
 
+fn spawn_wait_timed_out() -> ExecResult {
+    ExecResult {
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        exit_code: None,
+        timed_out: true,
+        stopped_early: false,
+    }
+}
+
 impl LocalExec {
     pub(crate) fn new(state: Arc<LocalBackendState>) -> Self {
         Self { _state: state }
@@ -40,14 +50,16 @@ impl OperationExec for LocalExec {
         self._state.default_shell.as_deref()
     }
 
-    async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
+    async fn exec(&self, mut request: ExecRequest) -> Result<ExecResult, OperationError> {
         let stream_auth = self._state.policy.requires_stdin();
         let stdin = if stream_auth {
             std::process::Stdio::piped()
         } else {
             std::process::Stdio::null()
         };
-        let mut child = self.spawn_child(&request, stdin)?;
+        let Some(mut child) = self.spawn_with_budget(&mut request, stdin).await? else {
+            return Ok(spawn_wait_timed_out());
+        };
 
         #[cfg(unix)]
         let pgid = child.id().unwrap_or(0) as i32;
@@ -184,7 +196,7 @@ impl OperationExec for LocalExec {
     /// buffer-then-sink (AUTH stdin is incompatible with stdout streaming).
     async fn exec_streaming(
         &self,
-        request: ExecRequest,
+        mut request: ExecRequest,
         sink: Arc<dyn LineSink>,
     ) -> Result<ExecResult, OperationError> {
         let stream_auth = self._state.policy.requires_stdin();
@@ -196,7 +208,12 @@ impl OperationExec for LocalExec {
             return exec_streaming_via_exec(self, request, sink).await;
         }
 
-        let mut child = self.spawn_child(&request, std::process::Stdio::null())?;
+        let Some(mut child) = self
+            .spawn_with_budget(&mut request, std::process::Stdio::null())
+            .await?
+        else {
+            return Ok(spawn_wait_timed_out());
+        };
 
         #[cfg(unix)]
         let pgid = child.id().unwrap_or(0) as i32;
@@ -321,13 +338,37 @@ struct AuthEvent {
 }
 
 impl LocalExec {
+    async fn spawn_with_budget(
+        &self,
+        request: &mut ExecRequest,
+        stdin: std::process::Stdio,
+    ) -> Result<Option<tokio::process::Child>, OperationError> {
+        let Some(ms) = request.timeout_ms else {
+            return self.spawn_child(request, stdin, None).await;
+        };
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_millis(ms);
+        let result = timeout(
+            Duration::from_millis(ms),
+            self.spawn_child(request, stdin, Some(deadline)),
+        )
+        .await;
+        request.timeout_ms =
+            Some(ms.saturating_sub(start.elapsed().as_millis().min(u64::MAX as u128) as u64));
+        match result {
+            Ok(child) => child,
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Build the command (spec, cwd, env, stdio, process group) and spawn
     /// the child. Shared by `exec` and `exec_streaming` to avoid divergence.
-    fn spawn_child(
+    async fn spawn_child(
         &self,
         request: &ExecRequest,
         stdin: std::process::Stdio,
-    ) -> Result<tokio::process::Child, OperationError> {
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Option<tokio::process::Child>, OperationError> {
         let command_spec = build_command_spec(request)?;
         let command_cwd = if let Some(cwd) = request.cwd.as_ref() {
             let cwd = self._state.backend_path_to_host(cwd)?;
@@ -376,11 +417,13 @@ impl LocalExec {
         {
             command.process_group(0);
         }
-        command
-            .spawn()
-            .map_err(|error| OperationError::ExecutionFailed {
+        match process_coordination::spawn_tokio_with_deadline(&mut command, deadline).await {
+            Ok(child) => Ok(Some(child)),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => Ok(None),
+            Err(error) => Err(OperationError::ExecutionFailed {
                 message: error.to_string(),
-            })
+            }),
+        }
     }
 
     /// Streaming execution for dyn-sandbox: the sandbox keeps the process alive

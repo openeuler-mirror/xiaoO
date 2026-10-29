@@ -290,15 +290,15 @@ pub(super) fn handle_skill_command(command: SkillCommands) {
                 let tmp = std::env::temp_dir().join(&skill_name);
                 let _ = std::fs::remove_dir_all(&tmp);
                 println!("Cloning {} ...", source);
-                let status = std::process::Command::new("git")
-                    .args([
+                let status = xiaoo_shared::process_support::status_blocking(
+                    std::process::Command::new("git").args([
                         "clone",
                         "--depth",
                         "1",
                         &source,
                         tmp.to_str().unwrap_or("."),
-                    ])
-                    .status();
+                    ]),
+                );
                 match status {
                     Ok(s) if s.success() => {}
                     Ok(s) => {
@@ -548,6 +548,7 @@ fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io:
         if entry.file_type()?.is_dir() {
             copy_dir_recursive(&entry.path(), &dst)?;
         } else {
+            let _permit = xiaoo_shared::process_support::write_permit_blocking();
             std::fs::copy(entry.path(), dst)?;
         }
     }

@@ -39,3 +39,6 @@ pub use runtime_checkpoint::{
     RuntimeReadFileResult, RuntimeRecord, RuntimeResumeRequest, RuntimeResumeResult,
     RuntimeWriteFileRequest, RuntimeWriteFileResult,
 };
+
+/// Application entry points for executable writes and process creation.
+pub mod process_support;

@@ -71,3 +71,27 @@ fn keeps_workspace_relative_args_unchanged() {
         ".xiaoo/tools/echo_payload.sh"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn expired_ready_admission_does_not_complete_custom_tool() {
+    use std::future::Future;
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = test_executor(temp.path().to_path_buf());
+    executor.timeout_ms = 20;
+    let writer = process_coordination::write_permit().await;
+    let call = FinalToolCall::default();
+    let mut result =
+        Box::pin(executor.invoke_process_with_context(&call, temp.path(), "agent", "model", None));
+    std::future::poll_fn(|cx| {
+        assert!(result.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    drop(writer);
+    assert!(matches!(
+        result.await,
+        Err(ToolExecutionError::Timeout { timeout_ms: 20 })
+    ));
+}

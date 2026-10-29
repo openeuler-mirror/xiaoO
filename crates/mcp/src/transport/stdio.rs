@@ -76,10 +76,19 @@ impl StdioTransport {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd.spawn().map_err(|e| McpError::SpawnFailed {
-            command: command.to_string(),
-            error: e.to_string(),
-        })?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let mut child = process_coordination::spawn_tokio_with_deadline(&mut cmd, Some(deadline))
+            .await
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    McpError::Timeout { timeout_ms }
+                } else {
+                    McpError::SpawnFailed {
+                        command: command.to_string(),
+                        error: error.to_string(),
+                    }
+                }
+            })?;
 
         let stdin = child.stdin.take().ok_or_else(|| McpError::SpawnFailed {
             command: command.to_string(),

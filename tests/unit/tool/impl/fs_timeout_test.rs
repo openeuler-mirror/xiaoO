@@ -37,3 +37,20 @@ async fn inner_error_takes_precedence_over_implicit_deadline() {
     let result = timed("op", 10_000, fut).await;
     assert_eq!(result.unwrap_err(), "fail");
 }
+
+#[tokio::test]
+async fn timed_backend_calls_expose_the_deadline_to_nested_creation() {
+    assert!(process_coordination::current_deadline().is_none());
+    assert_eq!(
+        timed("nested", 1000, async {
+            let deadline =
+                process_coordination::current_deadline().expect("internal deadline context");
+            assert!(deadline > tokio::time::Instant::now());
+            Ok::<u32, &str>(42)
+        })
+        .await
+        .unwrap(),
+        42
+    );
+    assert!(process_coordination::current_deadline().is_none());
+}

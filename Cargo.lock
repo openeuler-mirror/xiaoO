@@ -1289,6 +1289,7 @@ dependencies = [
  "agent-contracts",
  "agent-types",
  "async-trait",
+ "process-coordination",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1860,6 +1861,8 @@ dependencies = [
  "agent-contracts",
  "agent-types",
  "async-trait",
+ "operation_backend",
+ "process-coordination",
  "serde",
  "serde_json",
  "tempfile",
@@ -1914,6 +1917,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures-util",
+ "process-coordination",
  "reqwest",
  "serde",
  "serde_json",
@@ -2251,6 +2255,7 @@ dependencies = [
  "base64",
  "glob",
  "libc",
+ "process-coordination",
  "regex",
  "serde",
  "serde_json",
@@ -2469,6 +2474,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "process-coordination"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tokio",
 ]
 
 [[package]]
@@ -3859,6 +3872,7 @@ dependencies = [
  "lsp",
  "mcp",
  "operation_backend",
+ "process-coordination",
  "regex",
  "reqwest",
  "rustls-native-certs",
@@ -4934,6 +4948,7 @@ dependencies = [
  "operation_backend",
  "parking_lot",
  "pbkdf2",
+ "process-coordination",
  "prompt",
  "protocol",
  "rand 0.8.7",

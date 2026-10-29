@@ -9,9 +9,13 @@
 #   2. 测试卫生门禁    tests-hygiene — scripts/check-tests-hygiene.sh
 #      — src 中无内联测试，test 门控仅剩指向仓库根 tests/ 的 #[path] 声明，
 #        tests/ 命名合规（规则见 tests/README.md）。
-#   3. 文档门禁        scripts/check-docs.sh
+#   3. 子进程创建门禁  scripts/check-process-creation.py
+#      — 实际 spawn/status/output 调用只允许在内部协调叶子创建进程。
+#   4. 创建门禁词法回归 tests/unit/process_coordination/creation_gate_test.py
+#      — 字符、原始字符串、嵌套注释与生命周期的词法负例。
+#   5. 文档门禁        scripts/check-docs.sh
 #      — 全仓 .md 的相对链接必须可达（纯链接检查，见该脚本头注释）。
-#   4. 代码格式门禁    scripts/check-fmt.sh
+#   6. 代码格式门禁    scripts/check-fmt.sh
 #      — cargo fmt --check：全部 workspace 源码排版须与 cargo fmt 一致，
 #        提交前在仓库根运行 cargo fmt 修复（见该脚本头注释）。
 #   5. Dockerfile COPY 覆盖门禁    scripts/check-dockerfile-copy-coverage.sh
@@ -109,6 +113,8 @@ done
 STEPS=(
     "门面纪律门禁|scripts/check-facade.sh"
     "tests-hygiene|bash scripts/check-tests-hygiene.sh"
+    "process-creation|python3 scripts/check-process-creation.py"
+    "process-creation-lexer|python3 -B tests/unit/process_coordination/creation_gate_test.py"
     "文档门禁|bash scripts/check-docs.sh"
     "代码格式门禁|bash scripts/check-fmt.sh"
     "Dockerfile COPY 覆盖门禁|bash scripts/check-dockerfile-copy-coverage.sh"

@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+process-coordination = { path = "../process-coordination" }
 agent-types = { path = "../agent-types" }
 agent-contracts = { path = "../agent-contracts" }
 async-trait.workspace = true
@@ -19,3 +20,4 @@ url = "2"
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
+operation_backend = { path = "../operation_backend" }
