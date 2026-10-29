@@ -14,9 +14,6 @@ fn bubblewrap_exec_enforces_filesystem_policy() {
     if !has_bwrap() {
         return;
     }
-    // Serialize against the process-group unit tests: `exec` registers real
-    // child pgids in the shared global registry, and `kill_all_process_groups`
-    // would otherwise clear it (and signal our children) mid-test.
     let _guard = crate::test_support::process_group_test_lock()
         .lock()
         .unwrap();

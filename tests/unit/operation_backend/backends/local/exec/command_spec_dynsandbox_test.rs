@@ -107,11 +107,10 @@ fn install_fake_linux_dynsandbox() -> &'static PathBuf {
         let _ = std::fs::remove_dir_all(root.as_path());
         std::fs::create_dir_all(root.as_path()).unwrap();
         let bin = root.join("dyn-sandbox");
-        std::fs::write(
+        crate::test_support::write_script(
             bin.as_path(),
             "#!/bin/sh\necho \"AUTH_REQ:shadow:/etc/shadow\" >&2\nIFS= read -r response\necho \"verdict:$response\"\nexit 0\n",
-        )
-        .unwrap();
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

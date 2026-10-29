@@ -128,7 +128,7 @@ fn local_exec_state(workspace: &std::path::Path) -> Arc<LocalBackendState> {
 #[cfg(unix)]
 fn write_dummy_wrapper(dir: &std::path::Path) -> std::path::PathBuf {
     let wrapper = dir.join("dummy-wrapper.sh");
-    std::fs::write(
+    crate::test_support::write_script(
         &wrapper,
         concat!(
             "#!/bin/sh\n",
@@ -147,8 +147,7 @@ fn write_dummy_wrapper(dir: &std::path::Path) -> std::path::PathBuf {
             "fi\n",
             "exec \"$@\"\n",
         ),
-    )
-    .expect("write wrapper script");
+    );
     make_executable(&wrapper);
     wrapper
 }
@@ -273,13 +272,31 @@ fn dummy_wrapper_propagates_nonzero_exit_code() {
 
 #[cfg(unix)]
 #[test]
+fn dummy_wrappers_remain_executable_during_concurrent_spawns() {
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..256 {
+                let status = std::process::Command::new("true")
+                    .status()
+                    .expect("spawn concurrent command");
+                assert!(status.success());
+            }
+        });
+        for _ in 0..64 {
+            dummy_wrapper_propagates_nonzero_exit_code();
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn timeout_kills_the_wrapped_process_group() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     // A wrapper that never execs: simulates a hung wrapper process tree.
     let wrapper = temp.path().join("hang-wrapper.sh");
-    std::fs::write(&wrapper, "#!/bin/sh\nsleep 300\n").unwrap();
+    crate::test_support::write_script(&wrapper, "#!/bin/sh\nsleep 300\n");
     make_executable(&wrapper);
 
     let exec = LocalExec::new(local_exec_state(&workspace));

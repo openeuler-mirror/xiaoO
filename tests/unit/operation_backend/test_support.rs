@@ -18,3 +18,15 @@ pub(crate) fn process_group_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
+
+/// Keep writable fixture descriptors out of this multithreaded test process.
+#[cfg(unix)]
+pub(crate) fn write_script(path: &std::path::Path, content: &str) {
+    let status = std::process::Command::new("/bin/sh")
+        .args(["-c", "printf '%s' \"$1\" > \"$2\"", "write-script"])
+        .arg(content)
+        .arg(path)
+        .status()
+        .expect("run script writer");
+    assert!(status.success(), "write script fixture");
+}
