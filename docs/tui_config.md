@@ -51,7 +51,10 @@ wiring in `apps/endside/src/gateway_api/runtime_request.rs`.
 
 ### [tui.remote] - Remote TUI Configuration
 
-Remote TUI allows TUI to connect to remote daemon, enabling cross-machine collaboration.
+Remote TUI allows the TUI to attach to an `xiaoo-daemon` process running on
+the **same server**; a daemon on another host is rejected at connect time.
+For multi-node deployment use
+[xGovernor](https://atomgit.com/openeuler/xGovernor) instead of `xiaoo-daemon`.
 
 Detailed usage instructions: [remote_tui.md](./remote_tui.md)
 
@@ -59,7 +62,7 @@ Detailed usage instructions: [remote_tui.md](./remote_tui.md)
 
 ```toml
 [tui.remote]
-url = "http://daemon-host:18080"     # Remote daemon URL
+url = "http://127.0.0.1:18080"        # Daemon URL (same server as the TUI)
 bearer_token_env = "XIAOO_REMOTE_TOKEN"  # Bearer token environment variable
 auto_connect = false                 # Whether to auto-connect on startup
 ```
@@ -69,29 +72,30 @@ auto_connect = false                 # Whether to auto-connect on startup
 ```toml
 # Manual connection (default): the TUI connects only when you run /remote <url>
 [tui.remote]
-url = "http://192.168.1.100:18080"
+url = "http://127.0.0.1:18080"
 bearer_token_env = "XIAOO_REMOTE_TOKEN"
 auto_connect = false
 
 # Auto-connect on startup: swap the values below into the [tui.remote] table
 # above (a TOML file cannot contain the same table twice):
-#   url = "http://daemon.example.com:18080"
+#   url = "http://127.0.0.1:18080"
 #   bearer_token_env = "XIAOO_REMOTE_TOKEN"
 #   auto_connect = true
 ```
 
 #### Usage Flow
 
-1. **Daemon side configuration** (Machine A):
+1. **Daemon side configuration** (same server, optional bearer auth for a
+   non-loopback bind):
    ```toml
    [http]
    bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
    ```
 
-2. **TUI side configuration** (Machine B):
+2. **TUI side configuration**:
    ```toml
    [tui.remote]
-   url = "http://daemon-host:18080"
+   url = "http://127.0.0.1:18080"
    bearer_token_env = "XIAOO_REMOTE_TOKEN"
    ```
 
@@ -103,7 +107,7 @@ auto_connect = false
 
 4. **Connect in TUI**:
    - Auto-connect: When `auto_connect = true`, TUI connects automatically on startup
-   - Manual connect: Input `/remote http://daemon-host:18080`
+   - Manual connect: Input `/remote http://127.0.0.1:18080`
 
 #### Command Description
 
@@ -114,7 +118,7 @@ The complete slash-command set (canonical names, `Tab`-completable):
 
 | Command | Description |
 |------|------|
-| `/remote <url>` | Connect to remote daemon |
+| `/remote <url>` | Connect to a daemon on this server; refuses a daemon on a different host |
 | `/remote` | Open the remote-session history dialog (no argument) |
 | `/remote status` | Show connection status |
 | `/remote off` | Disconnect and return to local mode |

@@ -157,6 +157,12 @@ docker run --rm -it \
   xiaoo:latest xiaoo
 ```
 
+> `/remote` 要求 TUI 与 daemon 同机：容器各有独立的 `/etc/machine-id`，
+> 所以在另一个容器里起的 TUI 连不上本容器的 daemon（连接时即被拒）。
+> 要在容器拓扑里用 `/remote`，进 daemon 所在容器 exec `xiaoo`。多节点
+> 部署请改用
+> [xGovernor](https://atomgit.com/openeuler/xGovernor)。
+
 ### CLI 一次性执行
 
 ```bash

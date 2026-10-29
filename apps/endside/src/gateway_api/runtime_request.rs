@@ -535,30 +535,11 @@ impl GatewayRuntime {
 }
 
 /// Best-effort hostname for the daemon's lease-holder display. `None` if
-/// unresolved — purely informational.
+/// unresolved — purely informational. Resolution lives in the shared
+/// `host_identity` module so the lease display and the same-host check
+/// cannot drift apart.
 pub(crate) fn hostname() -> Option<String> {
-    #[cfg(unix)]
-    {
-        std::fs::read_to_string("/etc/hostname")
-            .ok()
-            .and_then(trim_non_empty)
-            .or_else(|| std::env::var("HOSTNAME").ok().and_then(trim_non_empty))
-    }
-    #[cfg(not(unix))]
-    {
-        std::env::var("COMPUTERNAME").ok().and_then(trim_non_empty)
-    }
-}
-
-/// Trim whitespace and drop if empty, so a blank source falls through to the
-/// next one.
-fn trim_non_empty(value: String) -> Option<String> {
-    let trimmed = value.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
+    xiaoo_shared::host_identity::local_hostname()
 }
 
 pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfig {

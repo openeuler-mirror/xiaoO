@@ -283,6 +283,14 @@ fn health_body_with_sha256(sha256: &str) -> String {
     )
 }
 
+/// Health body of a daemon that reports both its config digest and the
+/// identity of the machine it runs on.
+fn health_body_with_sha256_and_host(sha256: &str, host_identity: &str) -> String {
+    format!(
+        r#"{{"status":"ok","version":"0.1.0","config_path":"/etc/xiaoo/config.toml","config_sha256":"{sha256}","host_identity":"{host_identity}"}}"#
+    )
+}
+
 /// Daemon digest matches the local config → connect succeeds.
 #[tokio::test]
 async fn connect_remote_accepts_matching_config() {
@@ -407,6 +415,91 @@ async fn connect_remote_fails_closed_when_local_config_unreadable() {
     );
 }
 
+/// Daemon reporting a different host → refused before entering remote
+/// mode, even though the config digests match. Machines where no local
+/// identity can be resolved take the fail-closed branch instead — both
+/// outcomes must reject the connect.
+#[tokio::test]
+async fn connect_remote_rejects_daemon_on_different_host() {
+    let (_dir, config_path) = temp_config_with("[llm]\nmodel = \"m\"\n");
+    let identity =
+        xiaoo_shared::config_identity::ConfigFileIdentity::from_path(&config_path).unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let _health = server
+        .mock("GET", "/api/v1/health")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(health_body_with_sha256_and_host(
+            &identity.sha256,
+            "other-machine",
+        ))
+        .create_async()
+        .await;
+
+    let mut state = AppState::new(config_path.clone(), PathBuf::from("."))
+        .expect("test app state should initialize");
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let error = runtime
+        .connect_remote(&mut state, server.url(), None)
+        .await
+        .expect_err("daemon on another host must be rejected");
+    match xiaoo_shared::host_identity::local_host_identity() {
+        Some(local) => {
+            assert!(
+                error.starts_with("daemon runs on a different host"),
+                "error should name the host mismatch, got: {error}"
+            );
+            assert!(
+                error.contains(&format!("local={local}")),
+                "error should show the local identity, got: {error}"
+            );
+            assert!(
+                error.contains("daemon=other-machine"),
+                "error should show the daemon identity, got: {error}"
+            );
+        }
+        None => assert!(
+            error.contains("cannot verify same-host"),
+            "unresolvable local identity must fail closed, got: {error}"
+        ),
+    }
+    assert!(
+        runtime.remote_base_url().is_none(),
+        "refusal must not leave remote config behind"
+    );
+}
+
+/// Daemon reporting the local machine's identity → connects. Skipped on
+/// machines where no local identity can be resolved at all: that branch
+/// is covered by the fail-closed case above.
+#[tokio::test]
+async fn connect_remote_accepts_daemon_on_same_host() {
+    let Some(local) = xiaoo_shared::host_identity::local_host_identity() else {
+        eprintln!("skipping: no local host identity on this machine");
+        return;
+    };
+    let (_dir, config_path) = temp_config_with("[llm]\nmodel = \"m\"\n");
+    let identity =
+        xiaoo_shared::config_identity::ConfigFileIdentity::from_path(&config_path).unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let _health = server
+        .mock("GET", "/api/v1/health")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(health_body_with_sha256_and_host(&identity.sha256, &local))
+        .create_async()
+        .await;
+
+    let mut state = AppState::new(config_path.clone(), PathBuf::from("."))
+        .expect("test app state should initialize");
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    runtime
+        .connect_remote(&mut state, server.url(), None)
+        .await
+        .expect("same-host daemon with matching config should connect");
+    assert_eq!(runtime.remote_base_url(), Some(server.url().as_str()));
+}
+
 /// Pure-function decision table for all verification paths.
 #[test]
 fn verify_remote_config_match_decision_table() {
@@ -459,4 +552,42 @@ fn verify_remote_config_match_decision_table() {
     let error = verify_remote_config_match(None, &missing, &health_body_with_sha256("abc123"))
         .expect_err("missing startup identity must fail closed");
     assert!(error.contains("cannot verify config match"));
+}
+
+/// Decision table for the same-host constraint on its own, with both
+/// identities as inputs (the caller resolves the local one).
+#[test]
+fn verify_same_host_decision_table() {
+    use super::verify_same_host;
+
+    // Daemon reports the local identity → Ok.
+    verify_same_host(Some("host-a"), Some("host-a")).expect("same host should pass");
+
+    // Different identity → Err naming both sides and the remedy.
+    let error = verify_same_host(Some("host-a"), Some("host-b"))
+        .expect_err("different host must be rejected");
+    assert!(
+        error.starts_with("daemon runs on a different host"),
+        "error should name the host mismatch, got: {error}"
+    );
+    assert!(
+        error.contains("local=host-b") && error.contains("daemon=host-a"),
+        "error should show both identities, got: {error}"
+    );
+    assert!(
+        error.contains("xGovernor"),
+        "error should point at the multi-node remedy, got: {error}"
+    );
+
+    // Old daemon without host_identity → Ok regardless of local resolution.
+    verify_same_host(None, Some("host-b")).expect("old daemon must pass");
+    verify_same_host(None, None).expect("old daemon must pass without local identity");
+
+    // Daemon reports an identity but local resolution failed → fail closed.
+    let error = verify_same_host(Some("host-a"), None)
+        .expect_err("unresolvable local identity must fail closed");
+    assert!(
+        error.contains("cannot verify same-host"),
+        "error should explain the fail-closed path, got: {error}"
+    );
 }

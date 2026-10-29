@@ -70,6 +70,11 @@ pub struct GatewayHealthResponse {
     /// the TUI's same-config check. Omitted like [`Self::config_path`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_sha256: Option<String>,
+    /// Identity of the host the daemon runs on (machine ID, falling back
+    /// to hostname; resolved by `xiaoo_shared::host_identity`). Compared
+    /// by the TUI's same-host check. Omitted like [`Self::config_path`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_identity: Option<String>,
 }
 
 /// Feature flags returned by `/api/v1/capabilities`.

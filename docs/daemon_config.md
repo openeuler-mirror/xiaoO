@@ -670,6 +670,11 @@ These endpoints are protected by HTTP Bearer auth when `[http]` auth is configur
 Because they can execute commands (`/api/v1/runtimes/exec`) and read/write files,
 authentication is fail-closed: when no bearer token is configured the daemon only
 accepts a loopback bind and refuses to start on a non-loopback address.
+Note that the TUI's `/remote` additionally requires the daemon to run on the
+same server as the TUI (host-identity check at connect time; multi-node
+deployments should use
+[xGovernor](https://atomgit.com/openeuler/xGovernor) instead — see
+[remote_tui.md](./remote_tui.md)).
 LLM provider settings are resolved per runtime/turn: request payloads may pass an
 optional `llm` object, and omitted fields fall back to `[llm]` in the daemon
 config. The daemon does not require the LLM API key at process startup.

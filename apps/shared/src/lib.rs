@@ -7,6 +7,7 @@ pub mod custom_tool_support;
 pub mod daemon_protocol;
 pub mod gateway;
 pub mod hook_support;
+pub mod host_identity;
 pub mod llm_secrets;
 pub mod lsp_support;
 pub mod mcp_support;

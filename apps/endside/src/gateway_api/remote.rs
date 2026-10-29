@@ -1094,6 +1094,13 @@ fn verify_remote_config_match(
             body_preview(health_body),
         )
     })?;
+    // Host first: pointing at a daemon on another server is the more
+    // fundamental mistake, and its error should not be masked by a config
+    // digest that would almost certainly differ too.
+    verify_same_host(
+        health.host_identity.as_deref(),
+        xiaoo_shared::host_identity::local_host_identity().as_deref(),
+    )?;
     let Some(daemon_sha256) = health.config_sha256 else {
         return Ok(());
     };
@@ -1128,6 +1135,35 @@ fn verify_remote_config_match(
             digest_prefix(&local.sha256),
             daemon.path,
             digest_prefix(&daemon.sha256),
+        ));
+    }
+    Ok(())
+}
+
+/// Core of the `/remote` same-host constraint (rationale in
+/// `xiaoo_shared::host_identity`): the daemon reports the identity of the
+/// machine it runs on; the TUI resolves its own with the same rules and
+/// refuses to enter remote mode on mismatch. `None` on the daemon side is
+/// an old daemon predating `host_identity` reporting — pass through.
+/// `None` locally fails closed: without a local identity the comparison
+/// cannot run, and letting it through would silently skip the check.
+fn verify_same_host(daemon: Option<&str>, local: Option<&str>) -> Result<(), String> {
+    let Some(daemon_host) = daemon else {
+        return Ok(());
+    };
+    let Some(local_host) = local else {
+        return Err(
+            "cannot verify same-host: this machine's identity (/etc/machine-id or \
+             hostname) could not be resolved; refusing to enter remote mode"
+                .to_string(),
+        );
+    };
+    if local_host != daemon_host {
+        return Err(format!(
+            "daemon runs on a different host (local={local_host}, daemon={daemon_host}); \
+             /remote requires xiaoo and xiaoo-daemon on the same server — for \
+             multi-node deployment use xGovernor instead \
+             (https://atomgit.com/openeuler/xGovernor)"
         ));
     }
     Ok(())
