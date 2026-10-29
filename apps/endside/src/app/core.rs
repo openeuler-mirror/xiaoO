@@ -8,6 +8,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::time::sleep_until;
+use xiaoo_shared::config_identity::ConfigFileIdentity;
 
 use crate::app_state::AppState;
 use crate::config::Config;
@@ -60,8 +61,9 @@ impl App {
         config: &Config,
         config_path: PathBuf,
         workspace: PathBuf,
+        config_identity: Option<ConfigFileIdentity>,
     ) -> Result<Self, anyhow::Error> {
-        let state = AppState::new_with_config(config, config_path, workspace)?;
+        let state = AppState::new_with_config(config, config_path, workspace, config_identity)?;
         let gateway = GatewayRuntime::new(state.client_id.clone());
         let (model_fetch_tx, model_fetch_rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
@@ -812,6 +814,9 @@ impl App {
     /// configure the remote backend, restore the prior transcript from the
     /// daemon, persist the remote-session record, and push `system_message`.
     ///
+    /// Entering remote mode (or switching daemons) first passes the same
+    /// config check as `/remote <url>`; on rejection nothing is reset.
+    ///
     /// The daemon's `open_session` call is wrapped in a `tokio::time::timeout`
     /// so an unreachable daemon cannot block the TUI event loop
     /// indefinitely — on timeout we log and continue with an empty
@@ -823,6 +828,26 @@ impl App {
         bearer_token_env: Option<String>,
         system_message: String,
     ) {
+        // Session activation can enter remote mode without connect_remote,
+        // so guard here too — except when staying on the already-connected
+        // daemon, where the config was checked at entry and re-checking
+        // would add a failure mode to hook-driven switches.
+        if !self.gateway.connected_to(&base_url) {
+            if let Err(error) = self
+                .gateway
+                .check_remote_config_match(&self.state, &base_url, bearer_token_env.as_deref())
+                .await
+            {
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::error(format!(
+                        "Remote connect failed: {error}"
+                    )));
+                self.state.chat_state.stick_to_bottom = true;
+                return;
+            }
+        }
         self.gateway.reset_for_new_session(&mut self.state);
         self.state.reset_for_new_session();
         self.state.session_id = session_id.clone();

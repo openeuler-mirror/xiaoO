@@ -12,6 +12,7 @@ use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use xiaoo_api::chat::ReasoningEffort;
+use xiaoo_shared::config_identity::ConfigFileIdentity;
 
 #[test]
 fn runtime_status_light_is_idle_by_default() {
@@ -33,9 +34,13 @@ fn agent_tab_labels_allow_core_in_configured_order() {
         "Core".to_string(),
         "baize".to_string(),
     ];
-    let mut state =
-        AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
-            .expect("app state should initialize");
+    let mut state = AppState::new_with_config(
+        &config,
+        PathBuf::from("config.toml"),
+        PathBuf::from("."),
+        None,
+    )
+    .expect("app state should initialize");
 
     assert_eq!(
         state.agent_tab_labels(),
@@ -646,6 +651,9 @@ fn table_horiz_scroll_step_uses_the_table_viewport() {
 
 impl super::AppState {
     pub fn new(config_path: PathBuf, workspace: PathBuf) -> Result<Self, anyhow::Error> {
+        // Best-effort identity: remote tests compare the temp file's real
+        // digest; a missing file exercises the fail-closed branch.
+        let config_identity = ConfigFileIdentity::from_path(&config_path).ok();
         Ok(Self {
             theme: Theme::default(),
             chat_state: build_chat_state(&Config::default()),
@@ -664,6 +672,7 @@ impl super::AppState {
             active_agent_role: None,
             reasoning_effort: Config::default().llm.reasoning_effort,
             config_path,
+            config_identity,
             workspace: workspace.clone(),
             model_fetch_session: 0,
             model_fetch_inflight: std::collections::HashSet::new(),

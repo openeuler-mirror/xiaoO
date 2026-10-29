@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use xiaoo_shared::backend::ProcessGroupCleanupGuard;
+use xiaoo_shared::config_identity::ConfigFileIdentity;
 pub use xiaoo_shared::{backend, gateway};
 
 mod app;
@@ -79,8 +80,11 @@ where
     T: Into<OsString>,
 {
     let config_arg = parse_config_path_from(args)?;
-    let config = load_tui_config(&config_arg)?;
+    let loaded = load_tui_config(&config_arg)?;
     config::init_llm_secrets(&config_arg.path)?;
+    // Identity pairs with the config from the same read (see
+    // load_tui_config).
+    let (config, config_identity) = loaded.unzip();
     let mut config = config::require_tui_bootstrap_config(config, &config_arg.path)?;
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     config.load_runtime_mcp_servers(
@@ -89,7 +93,7 @@ where
         dirs::home_dir().as_deref(),
         &config_arg.path,
     )?;
-    run_tui(config, config_arg.path, workspace).await
+    run_tui(config, config_arg.path, workspace, config_identity).await
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -194,14 +198,18 @@ where
     })
 }
 
-fn load_tui_config(config_arg: &ConfigArg) -> Result<Option<config::Config>> {
+/// Load the config and its identity snapshot from a single read: the
+/// snapshot must hash the bytes that actually entered memory.
+fn load_tui_config(config_arg: &ConfigArg) -> Result<Option<(config::Config, ConfigFileIdentity)>> {
     if !config_arg.path.exists() {
         if config_arg.explicit {
             bail!("config file not found: {}", config_arg.path.display());
         }
         return Ok(None);
     }
-    config::Config::load_from(&config_arg.path).map(Some)
+    let (config, content) = config::Config::load_from_with_content(&config_arg.path)?;
+    let identity = ConfigFileIdentity::from_loaded_content(&config_arg.path, content.as_bytes());
+    Ok(Some((config, identity)))
 }
 
 fn print_usage(program: &std::ffi::OsStr) {
@@ -235,7 +243,12 @@ fn default_config_path() -> Result<PathBuf> {
     }
 }
 
-async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBuf) -> Result<()> {
+async fn run_tui(
+    config: config::Config,
+    config_path: PathBuf,
+    workspace: PathBuf,
+    config_identity: Option<ConfigFileIdentity>,
+) -> Result<()> {
     let (validation_errors, validation_warnings) =
         validate_config_for_tui(&config, &config_path).await;
 
@@ -277,8 +290,9 @@ async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBu
     let _ = io::stdout().flush();
     let _ = execute!(io::stdout(), EnableBracketedPaste);
 
-    let mut app = app::App::new_with_config(&config, config_path.clone(), workspace)
-        .context("failed to initialize TUI app state")?;
+    let mut app =
+        app::App::new_with_config(&config, config_path.clone(), workspace, config_identity)
+            .context("failed to initialize TUI app state")?;
 
     for error in validation_errors {
         app.state
@@ -307,18 +321,24 @@ async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBu
         .filter(|remote| remote.auto_connect)
     {
         if !remote.url.trim().is_empty() {
-            app.gateway.configure_remote(
-                &mut app.state,
-                remote.url.clone(),
-                remote.bearer_token_env.clone(),
-            );
-            app.state
-                .chat_state
-                .messages
-                .push(crate::chat::Message::system(format!(
-                    "Remote backend configured: {}",
-                    remote.url.trim()
-                )));
+            // auto_connect goes through connect_remote like a manual
+            // `/remote <url>`: configure_remote alone would skip the
+            // same-config check.
+            let message = match app
+                .gateway
+                .connect_remote(
+                    &mut app.state,
+                    remote.url.clone(),
+                    remote.bearer_token_env.clone(),
+                )
+                .await
+            {
+                Ok(message) => crate::chat::Message::system(message),
+                Err(error) => {
+                    crate::chat::Message::error(format!("Remote connect failed: {error}"))
+                }
+            };
+            app.state.chat_state.messages.push(message);
         }
     }
 

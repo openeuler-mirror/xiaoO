@@ -272,6 +272,7 @@ fn test_app() -> App {
         &config,
         PathBuf::from("/nonexistent/endside-test-config.toml"),
         PathBuf::from("/tmp/endside-test-workspace"),
+        None,
     )
     .expect("App::new_with_config must build a headless test app")
 }
@@ -584,6 +585,7 @@ fn test_app_with_llm(provider: &str, model: &str, api_base: &str) -> App {
         &config,
         PathBuf::from("/nonexistent/endside-test-config.toml"),
         PathBuf::from("/tmp/endside-test-workspace"),
+        None,
     )
     .expect("App::new_with_config must build a headless test app")
 }

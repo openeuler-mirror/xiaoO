@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 use std::sync::Arc;
+use xiaoo_shared::config_identity::ConfigFileIdentity;
 
 use crate::app_state::AppState;
 use crate::chat::ModelInfo;
@@ -114,8 +115,16 @@ fn persist_active_provider_selection_internal(
     cfg.llm.model = model.clone();
     cfg.llm.api_key_env = api_key_env.clone();
     cfg.llm.api_base = api_base.clone();
-    if let Err(error) = cfg.save_to(&state.config_path) {
-        tracing::warn!("Failed to save config: {}", error);
+    match cfg.save_to(&state.config_path) {
+        Ok(content) => {
+            // Keep the snapshot in step with the rewrite, else /remote
+            // compares the pre-switch digest.
+            state.config_identity = Some(ConfigFileIdentity::from_loaded_content(
+                &state.config_path,
+                content.as_bytes(),
+            ));
+        }
+        Err(error) => tracing::warn!("Failed to save config: {}", error),
     }
 
     let agent_config = Arc::make_mut(&mut state.agent_config);

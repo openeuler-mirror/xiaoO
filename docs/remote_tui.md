@@ -55,7 +55,9 @@ curl http://A:18080/api/v1/health
 ```
 
 The health response reports the daemon's startup config identity
-(`config_path` + `config_sha256`).
+(`config_path` + `config_sha256`). The TUI compares `config_sha256`
+against a snapshot of the config content it loaded at startup and refuses
+to enter remote mode on mismatch — see section 3.
 
 Disclosure policy for those identity fields: `/api/v1/health` itself is
 unauthenticated (docker HEALTHCHECK depends on it), but the identity
@@ -64,8 +66,10 @@ carries a valid token. With auth disabled the daemon is loopback-bound
 (non-loopback binds require auth to start), where any local caller could
 read the config file itself, so disclosure adds nothing; on auth-enabled
 deployments the fields would otherwise leak the daemon user's home path
-and a config content fingerprint to anonymous network callers. Anonymous
-callers (including `docker HEALTHCHECK`) get `status` and `version` only.
+and a config content fingerprint to anonymous network callers. The TUI's
+health probe sends the bearer token, so the same-config check is not
+affected; anonymous callers (including `docker HEALTHCHECK`) get
+`status` and `version` only.
 
 If bearer auth is configured, protected session/chat routes require:
 
@@ -82,6 +86,34 @@ Start the TUI normally:
 ```bash
 xiaoo
 ```
+
+Both sides must use **the same config file**. The TUI sends local config
+overrides (`llm` overrides, `entry.runtime_profile_id`) with every
+open/turn request, and the daemon merges them with its own config; when
+the two configs differ, those merges fail with errors that do not point
+at the config (e.g. `unknown agent role preset`, `missing required API
+key environment variable`). To prevent this, every entry into remote
+mode — `/remote <url>`, `auto_connect`, and activating a recorded remote
+session from the `/remote` dialog — verifies that the daemon's startup
+config SHA-256 (reported via `/api/v1/health`) matches the TUI's own
+startup snapshot of its config content (re-snapshotted when the TUI
+itself rewrites the config, e.g. a provider switch), and refuses to enter
+remote mode on mismatch:
+
+```text
+config mismatch: TUI /home/B/.config/xiaoo/config.toml (sha256 3f2a1b9c) vs daemon /home/A/.config/xiaoo/config.toml (sha256 9d1c04e2); must use the same config file — both sides hash the config they loaded at startup, so after making both files identical, restart the daemon (and the TUI if its config file changed after it started) and reconnect
+```
+
+Copy Machine A's `config.toml` to the same content on Machine B before
+connecting. The digest comparison covers `config.toml` only (not
+`--mcp-config`). Note that both sides hash the config as loaded at
+startup: if either config file is edited or re-copied after that side
+started, restart that side (the daemon and/or the TUI) so it compares the
+current content. Daemons older than config-identity reporting omit the
+fields and the check is skipped (compatibility). A health response that
+is not the daemon's JSON (an HTML error page from an intermediary proxy,
+for example) fails the connect: every daemon version answers this route
+with JSON, so anything else means the URL does not reach a daemon.
 
 Connect to Machine A:
 
@@ -105,7 +137,11 @@ export XIAOO_REMOTE_TOKEN="change-me"
 xiaoo
 ```
 
-When `auto_connect = true`, TUI enters remote backend mode on startup using the configured URL. When `auto_connect = false`, the config only supplies the bearer token env var and default remote settings; use `/remote <url>` manually.
+When `auto_connect = true`, TUI enters remote backend mode on startup using the
+configured URL, running the same health check and config-match verification as
+`/remote <url>` (a mismatch is surfaced as an error message and the TUI stays
+local). When `auto_connect = false`, the config only supplies the bearer token
+env var and default remote settings; use `/remote <url>` manually.
 
 ---
 
@@ -113,8 +149,8 @@ When `auto_connect = true`, TUI enters remote backend mode on startup using the 
 
 | Command | Description |
 |---------|-------------|
-| `/remote` | Open the remote-session dialog (no argument required) |
-| `/remote <base_url>` | Connect to a remote gateway daemon, for example `/remote http://A:18080` |
+| `/remote` | Open the remote-session dialog (no argument required); activating a recorded session runs the same health check and config-match verification as `/remote <base_url>` |
+| `/remote <base_url>` | Connect to a remote gateway daemon, for example `/remote http://A:18080`; refuses to connect when the daemon's config file differs from the TUI's (see section 3) |
 | `/remote status` | Show current backend, remote URL, session-open state, and health result |
 | `/remote off` | Close the remote session and switch back to local backend |
 | `/remote close` | Close the remote session **on the daemon** (destroys it server-side), unlike `off` which only detaches |

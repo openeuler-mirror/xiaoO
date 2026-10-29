@@ -263,3 +263,200 @@ fn post_json_error_display_shapes() {
         "HTTP 404 Not Found {\"error\":\"session not found: s1\"}"
     );
 }
+
+// ── Same-config verification at /remote connect time ───────────────────────
+//
+// Decision paths: digests match (allow) / differ (reject), old daemon
+// without identity (allow), missing local identity (reject — fail
+// closed), unparsable body (reject — fail closed).
+
+fn temp_config_with(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, content).expect("write temp config");
+    (dir, path)
+}
+
+fn health_body_with_sha256(sha256: &str) -> String {
+    format!(
+        r#"{{"status":"ok","version":"0.1.0","config_path":"/etc/xiaoo/config.toml","config_sha256":"{sha256}"}}"#
+    )
+}
+
+/// Daemon digest matches the local config → connect succeeds.
+#[tokio::test]
+async fn connect_remote_accepts_matching_config() {
+    let (_dir, config_path) = temp_config_with("[llm]\nmodel = \"m\"\n");
+    let identity =
+        xiaoo_shared::config_identity::ConfigFileIdentity::from_path(&config_path).unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let _health = server
+        .mock("GET", "/api/v1/health")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(health_body_with_sha256(&identity.sha256))
+        .create_async()
+        .await;
+
+    let mut state = AppState::new(config_path.clone(), PathBuf::from("."))
+        .expect("test app state should initialize");
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    runtime
+        .connect_remote(&mut state, server.url(), None)
+        .await
+        .expect("matching config should connect");
+    assert_eq!(runtime.remote_base_url(), Some(server.url().as_str()));
+}
+
+/// Digest mismatch → refused, with paths, digest prefixes and restart
+/// guidance in the error.
+#[tokio::test]
+async fn connect_remote_rejects_config_mismatch() {
+    let (_dir, config_path) = temp_config_with("[llm]\nmodel = \"m\"\n");
+    let mut server = mockito::Server::new_async().await;
+    let _health = server
+        .mock("GET", "/api/v1/health")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(health_body_with_sha256("0000deadbeef"))
+        .create_async()
+        .await;
+
+    let mut state = AppState::new(config_path.clone(), PathBuf::from("."))
+        .expect("test app state should initialize");
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let error = runtime
+        .connect_remote(&mut state, server.url(), None)
+        .await
+        .expect_err("config mismatch must be rejected");
+
+    assert!(
+        error.starts_with("config mismatch:"),
+        "error should name the mismatch, got: {error}"
+    );
+    assert!(error.contains("must use the same config file"));
+    assert!(error.contains("/etc/xiaoo/config.toml"));
+    assert!(
+        error.contains(config_path.display().to_string().as_str()),
+        "error should show the local config path"
+    );
+    assert!(
+        error.contains("(sha256 0000dead"),
+        "error should show the daemon digest prefix for diffing, got: {error}"
+    );
+    assert!(
+        error.contains("restart the daemon"),
+        "error should explain that the daemon holds a startup snapshot, got: {error}"
+    );
+    assert!(
+        runtime.remote_base_url().is_none(),
+        "refusal must not leave remote config behind"
+    );
+}
+
+/// Health response from an old daemon without identity fields → allowed.
+#[tokio::test]
+async fn connect_remote_allows_daemon_without_config_identity() {
+    let (_dir, config_path) = temp_config_with("[llm]\nmodel = \"m\"\n");
+    let mut server = mockito::Server::new_async().await;
+    let _health = server
+        .mock("GET", "/api/v1/health")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"status":"ok","version":"0.0.9"}"#)
+        .create_async()
+        .await;
+
+    let mut state =
+        AppState::new(config_path, PathBuf::from(".")).expect("test app state should initialize");
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    runtime
+        .connect_remote(&mut state, server.url(), None)
+        .await
+        .expect("old daemons without config identity must still connect");
+}
+
+/// Unreadable local config file at startup → fail closed.
+#[tokio::test]
+async fn connect_remote_fails_closed_when_local_config_unreadable() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let missing = dir.path().join("deleted-config.toml");
+    let mut server = mockito::Server::new_async().await;
+    let _health = server
+        .mock("GET", "/api/v1/health")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(health_body_with_sha256("0000deadbeef"))
+        .create_async()
+        .await;
+
+    let mut state = AppState::new(missing.clone(), PathBuf::from("."))
+        .expect("test app state should initialize");
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let error = runtime
+        .connect_remote(&mut state, server.url(), None)
+        .await
+        .expect_err("unreadable local config must fail closed");
+    assert!(
+        error.contains("cannot verify config match"),
+        "error should explain the failure, got: {error}"
+    );
+    assert!(
+        runtime.remote_base_url().is_none(),
+        "refusal must not leave remote config behind"
+    );
+}
+
+/// Pure-function decision table for all verification paths.
+#[test]
+fn verify_remote_config_match_decision_table() {
+    use super::verify_remote_config_match;
+    let (_dir, config_path) = temp_config_with("[llm]\nmodel = \"m\"\n");
+    let identity =
+        xiaoo_shared::config_identity::ConfigFileIdentity::from_path(&config_path).unwrap();
+
+    // Matching digest → Ok.
+    verify_remote_config_match(
+        Some(&identity),
+        &config_path,
+        &health_body_with_sha256(&identity.sha256),
+    )
+    .expect("matching digest should pass");
+
+    // Mismatching digest → Err naming both paths.
+    let error = verify_remote_config_match(
+        Some(&identity),
+        &config_path,
+        &health_body_with_sha256("abc123"),
+    )
+    .expect_err("mismatching digest must fail");
+    assert!(error.contains("config mismatch"));
+    assert!(error.contains("/etc/xiaoo/config.toml"));
+
+    // Old daemon without identity fields → Ok.
+    verify_remote_config_match(
+        Some(&identity),
+        &config_path,
+        r#"{"status":"ok","version":"0.0.9"}"#,
+    )
+    .expect("old daemon must pass");
+
+    // Unparsable health body → Err (fail closed: every daemon version
+    // returns JSON, so this means a proxy or another service at the URL).
+    let error = verify_remote_config_match(Some(&identity), &config_path, "not-json")
+        .expect_err("unparsable health body must fail closed");
+    assert!(
+        error.contains("not the expected health JSON"),
+        "error should name the parse failure, got: {error}"
+    );
+    assert!(
+        error.contains("not-json"),
+        "error should quote the body preview for diagnosis, got: {error}"
+    );
+
+    // Missing startup identity → Err (fail closed).
+    let missing = PathBuf::from("/nonexistent/endside-test-config.toml");
+    let error = verify_remote_config_match(None, &missing, &health_body_with_sha256("abc123"))
+        .expect_err("missing startup identity must fail closed");
+    assert!(error.contains("cannot verify config match"));
+}
