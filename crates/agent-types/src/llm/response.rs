@@ -43,6 +43,8 @@ pub struct LlmResponse {
 
 #[derive(Clone, Debug)]
 pub struct StreamChunk {
+    /// Discard output from the previous failed attempt.
+    pub reset: bool,
     pub delta_text: Option<String>,
     pub delta_reasoning: Option<String>,
     pub delta_tool_call: Option<ToolUseBlock>,

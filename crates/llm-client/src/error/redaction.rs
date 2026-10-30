@@ -237,6 +237,7 @@ impl ErrorRedactor {
     pub(crate) fn error(&self, mut error: LlmError) -> LlmError {
         let message = match &mut error {
             LlmError::RequestFailed { message }
+            | LlmError::RetryExhausted { message, .. }
             | LlmError::HttpError(message)
             | LlmError::ApiError(message)
             | LlmError::ParseError(message)

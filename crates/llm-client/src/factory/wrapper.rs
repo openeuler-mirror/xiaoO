@@ -13,7 +13,6 @@ use agent_types::llm::{
 use async_trait::async_trait;
 use hook::{resolve_hook_point_category, HookPointCategory};
 use serde_json::json;
-use tokio::time::{sleep, Duration};
 
 use super::trace::{
     begin_trace_span, effective_request_trace_fields, end_trace_span, error_trace_fields,
@@ -520,22 +519,7 @@ fn hook_invoke_metadata(hook_span: &TraceSpanHandle) -> HookInvokeMetadata {
 
 impl LlmProviderWrapper {
     async fn complete_with_retry(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-        let mut attempts = 0;
-        loop {
-            match self.inner.complete(request).await {
-                Ok(response) => return Ok(response),
-                Err(error) => {
-                    let Some(delay_ms) = retry_delay_ms(&error) else {
-                        return Err(error);
-                    };
-                    if attempts >= 1 {
-                        return Err(error);
-                    }
-                    attempts += 1;
-                    sleep(Duration::from_millis(delay_ms)).await;
-                }
-            }
-        }
+        crate::request_policy::run(|_| self.inner.complete(request)).await
     }
 
     async fn complete_stream_with_retry(
@@ -543,22 +527,18 @@ impl LlmProviderWrapper {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        let mut attempts = 0;
-        loop {
-            match self.inner.complete_stream(request, on_chunk).await {
-                Ok(response) => return Ok(response),
-                Err(error) => {
-                    let Some(delay_ms) = retry_delay_ms(&error) else {
-                        return Err(error);
-                    };
-                    if attempts >= 1 {
-                        return Err(error);
-                    }
-                    attempts += 1;
-                    sleep(Duration::from_millis(delay_ms)).await;
-                }
+        crate::request_policy::run(|attempt| {
+            if attempt > 0 {
+                on_chunk(StreamChunk {
+                    reset: true,
+                    delta_text: None,
+                    delta_reasoning: None,
+                    delta_tool_call: None,
+                });
             }
-        }
+            self.inner.complete_stream(request, on_chunk)
+        })
+        .await
     }
 
     pub async fn complete_scoped(
@@ -814,7 +794,8 @@ impl LlmProviderWrapper {
                 Err(LlmError::Cancelled)
             }
             ScopedCallOutcome::Response(Err(error)) => {
-                if runtime_view.is_some() {
+                // Exhaustion remains terminal even when a hook offers recovery.
+                if runtime_view.is_some() && !matches!(error, LlmError::RetryExhausted { .. }) {
                     match self
                         .run_error_hook_sequence(runtime_view, effective_request_ref, &error)
                         .await
@@ -949,16 +930,6 @@ fn finish_trace_fields(
     match stream_stats.map(stream_trace_fields_of) {
         Some(stream_fields) => merge_trace_fields(merged, stream_fields),
         None => merged,
-    }
-}
-
-fn retry_delay_ms(error: &LlmError) -> Option<u64> {
-    match error {
-        LlmError::RateLimited { retry_after_ms, .. } if *retry_after_ms > 0 => {
-            Some(*retry_after_ms)
-        }
-        LlmError::StreamError { .. } => Some(1000),
-        _ => None,
     }
 }
 

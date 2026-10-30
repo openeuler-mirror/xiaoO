@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use async_trait::async_trait;
 use futures::StreamExt;
 
@@ -23,7 +21,7 @@ impl OllamaProvider {
     pub(crate) fn new(base_url: String, model: String) -> Self {
         Self {
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(300))
+                .timeout(crate::request_policy::REQUEST_TIMEOUT)
                 .danger_accept_invalid_certs(crate::http::tls_verification_disabled())
                 .build()
                 .unwrap_or_else(crate::http::client_build_failed),

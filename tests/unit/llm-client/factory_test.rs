@@ -925,7 +925,7 @@ mod wrapper_tests {
         let mock = MockLlmProvider::err(LlmError::Timeout);
         let wrapper = wrapper_with_hooks(mock, vec![], "agent");
         let err = wrapper.complete(&make_request("hi")).await.unwrap_err();
-        assert!(matches!(err, LlmError::Timeout));
+        assert!(matches!(err, LlmError::RetryExhausted { attempts: 6, .. }));
     }
 
     #[tokio::test]
@@ -1067,9 +1067,9 @@ mod wrapper_tests {
         assert_eq!(result.message.text.as_deref(), Some("stream-modified"));
     }
 
-    /// Stream: error-hook Recover returns the fallback instead of propagating the stream error.
+    /// Retry exhaustion remains terminal even when a hook offers recovery.
     #[tokio::test]
-    async fn stream_error_hook_recover_returns_fallback() {
+    async fn stream_retry_exhaustion_cannot_be_recovered_by_hook() {
         let mock = MockLlmProvider::err(LlmError::StreamError {
             message: "broken pipe".to_string(),
         });
@@ -1081,8 +1081,11 @@ mod wrapper_tests {
         let result = wrapper
             .complete_stream(&make_request("hi"), &|_| {})
             .await
-            .unwrap();
-        assert_eq!(result.message.text.as_deref(), Some("stream-fallback"));
+            .unwrap_err();
+        assert!(matches!(
+            result,
+            LlmError::RetryExhausted { attempts: 6, .. }
+        ));
     }
 
     /// Stream: without a runtime view, errors propagate directly.
@@ -1094,7 +1097,7 @@ mod wrapper_tests {
             .complete_stream(&make_request("hi"), &|_| {})
             .await
             .unwrap_err();
-        assert!(matches!(err, LlmError::Timeout));
+        assert!(matches!(err, LlmError::RetryExhausted { attempts: 6, .. }));
     }
 
     #[tokio::test]
@@ -1115,5 +1118,38 @@ mod wrapper_tests {
 
         assert_eq!(result.message.text.as_deref(), Some("stream-recovered"));
         assert_eq!(mock.call_count(), 2);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn hung_stream_exhausts_budget_and_resets_each_retry() {
+        let wrapper = wrapper_without_runtime(PendingStreamProvider::new());
+        let resets = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let error = wrapper
+            .complete_stream(&make_request("hi"), &|chunk| {
+                if chunk.reset {
+                    resets.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            LlmError::RetryExhausted { attempts: 6, .. }
+        ));
+        assert_eq!(resets.load(Ordering::SeqCst), 5);
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(120));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_during_retry_stops_the_remaining_budget() {
+        let wrapper = wrapper_without_runtime(PendingStreamProvider::new());
+        let started = tokio::time::Instant::now();
+        let error = wrapper
+            .complete_stream_scoped_with_cancel(None, &make_request("hi"), &|_| {}, async {
+                tokio::time::sleep(std::time::Duration::from_secs(21)).await;
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, LlmError::Cancelled));
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(21));
     }
 }

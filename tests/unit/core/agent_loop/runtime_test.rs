@@ -28,11 +28,13 @@ impl LlmProvider for StreamingTestProvider {
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
         on_chunk(StreamChunk {
+            reset: false,
             delta_text: Some("Hello".to_string()),
             delta_reasoning: None,
             delta_tool_call: None,
         });
         on_chunk(StreamChunk {
+            reset: false,
             delta_text: Some(" world".to_string()),
             delta_reasoning: None,
             delta_tool_call: None,
@@ -123,6 +125,7 @@ impl LlmProvider for SequentialUsageProvider {
         };
 
         on_chunk(StreamChunk {
+            reset: false,
             delta_text: Some(text.clone()),
             delta_reasoning: None,
             delta_tool_call: None,
@@ -554,11 +557,13 @@ impl LlmProvider for PendingStreamProvider {
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
         on_chunk(StreamChunk {
+            reset: false,
             delta_text: Some("Partial answer before ".to_string()),
             delta_reasoning: None,
             delta_tool_call: None,
         });
         on_chunk(StreamChunk {
+            reset: false,
             delta_text: Some("Esc was pressed".to_string()),
             delta_reasoning: None,
             delta_tool_call: None,
@@ -677,4 +682,34 @@ async fn cancel_before_stream_starts_yields_cancelled_without_partial() {
         }
         _ => panic!("expected Cancelled outcome, got a different variant"),
     }
+}
+
+#[tokio::test]
+async fn retry_exhaustion_ends_turn_until_new_user_input() {
+    struct FailingThenHealthyProvider {
+        calls: std::sync::atomic::AtomicUsize, healthy: StreamingTestProvider,
+    }
+    #[async_trait]
+    impl LlmProvider for FailingThenHealthyProvider {
+        async fn complete(&self, _: &LlmRequest) -> Result<LlmResponse, LlmError> { unreachable!() }
+        async fn complete_stream(&self, request: &LlmRequest,
+            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync)) -> Result<LlmResponse, LlmError> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 6 {
+                return Err(LlmError::Timeout);
+            }
+            self.healthy.complete_stream(request, on_chunk).await
+        }
+        fn capabilities(&self) -> &ProviderCapabilities { self.healthy.capabilities() }
+    }
+    let raw = Arc::new(FailingThenHealthyProvider {
+        calls: std::sync::atomic::AtomicUsize::new(0), healthy: StreamingTestProvider::new(),
+    });
+    let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(raw.clone(), None, None)));
+    let mut state = LoopState::new(uuid::Uuid::new_v4().to_string());
+    let error = run_agent_loop(&runtime, &mut state, AgentLoopInput::new("first"))
+        .await.err().expect("turn must fail");
+    assert!(error.to_string().contains("6 attempts"));
+    assert_eq!(raw.calls.load(std::sync::atomic::Ordering::SeqCst), 6);
+    run_agent_loop(&runtime, &mut state, AgentLoopInput::new("try again")).await.unwrap();
+    assert_eq!(raw.calls.load(std::sync::atomic::Ordering::SeqCst), 7);
 }

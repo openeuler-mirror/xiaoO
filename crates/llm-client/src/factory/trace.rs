@@ -99,6 +99,7 @@ pub(super) fn trace_outcome_for_error(error: &LlmError) -> TraceOutcome {
 pub(super) fn llm_error_kind(error: &LlmError) -> &'static str {
     match error {
         LlmError::RequestFailed { .. } => "request_failed",
+        LlmError::RetryExhausted { .. } => "retry_exhausted",
         LlmError::HttpError(_) => "http_error",
         LlmError::ApiError(_) => "api_error",
         LlmError::ParseError(_) => "parse_error",

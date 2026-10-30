@@ -33,7 +33,6 @@ use tool::{tool_filter_from_specs, EmptyToolRegistry};
 
 use crate::runtime_support::{EmptySkillRegistry, NoopRuntimeView};
 
-include!("agent_loop/basics_test.rs");
 include!("agent_loop/runtime_test.rs");
 include!("agent_loop/tools_test.rs");
 include!("agent_loop/streaming_test.rs");

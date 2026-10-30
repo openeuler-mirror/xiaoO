@@ -284,6 +284,9 @@ impl PluginLlmHookerAdaptor {
                 "type": "timeout",
                 "message": "timeout",
             }),
+            LlmError::RetryExhausted { attempts, message } => json!({
+                "type": "retry_exhausted", "attempts": attempts, "message": message,
+            }),
             LlmError::Cancelled => json!({
                 "type": "cancelled",
                 "message": "cancelled",

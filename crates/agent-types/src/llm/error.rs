@@ -42,6 +42,9 @@ pub enum LlmError {
     #[error("timeout")]
     Timeout,
 
+    #[error("LLM request failed after {attempts} attempts (20s per attempt): {message}")]
+    RetryExhausted { attempts: u32, message: String },
+
     #[error("cancelled")]
     Cancelled,
 }

@@ -1,5 +1,6 @@
 pub mod attach;
 pub mod config;
+mod deadline;
 pub mod entry;
 pub mod skills;
 

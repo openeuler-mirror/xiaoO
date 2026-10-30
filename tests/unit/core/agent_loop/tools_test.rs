@@ -38,6 +38,7 @@ impl LlmProvider for EmptyCallIdToolCallProvider {
         };
 
         on_chunk(StreamChunk {
+            reset: false,
             delta_text: Some("trying to use a tool".to_string()),
             delta_reasoning: None,
             delta_tool_call: None,

@@ -65,6 +65,9 @@ impl LoopEventSink for SseLoopEventSink {
             last_len.insert(agent_id.0.clone(), text.len());
             if prev < text.len() {
                 text[prev..].to_string()
+            } else if text.len() < prev {
+                // Tell remote clients to discard the failed attempt's output.
+                String::new()
             } else {
                 return;
             }
@@ -86,6 +89,9 @@ impl LoopEventSink for SseLoopEventSink {
             last_len.insert(agent_id.0.clone(), text.len());
             if prev < text.len() {
                 text[prev..].to_string()
+            } else if text.len() < prev {
+                // Tell remote clients to discard the failed attempt's output.
+                String::new()
             } else {
                 return;
             }

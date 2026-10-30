@@ -1,46 +1,4 @@
 #[test]
-fn transient_backoff_grows_exponentially_without_retry_after() {
-    assert_eq!(transient_backoff(0, 0), Duration::from_millis(4_000));
-    assert_eq!(transient_backoff(1, 0), Duration::from_millis(8_000));
-    assert_eq!(transient_backoff(2, 0), Duration::from_millis(16_000));
-    assert_eq!(transient_backoff(3, 0), Duration::from_millis(32_000));
-}
-
-#[test]
-fn transient_backoff_is_clamped_to_the_ceiling() {
-    assert_eq!(transient_backoff(10, 0), Duration::from_millis(60_000));
-    assert_eq!(
-        transient_backoff(u32::MAX, 0),
-        Duration::from_millis(60_000)
-    );
-}
-
-#[test]
-fn transient_backoff_honors_retry_after_within_the_ceiling() {
-    assert_eq!(transient_backoff(3, 5_000), Duration::from_millis(5_000));
-    assert_eq!(transient_backoff(0, 120_000), Duration::from_millis(60_000));
-}
-
-#[test]
-fn is_transient_retries_network_and_throttle_errors_only() {
-    assert!(is_transient(&LlmError::HttpError(
-        "error sending request for url".into()
-    )));
-    assert!(is_transient(&LlmError::Timeout));
-    assert!(is_transient(&LlmError::RateLimited {
-        retry_after_ms: 0,
-        message: String::new(),
-    }));
-
-    assert!(!is_transient(&LlmError::AuthError {
-        message: String::new(),
-    }));
-    assert!(!is_transient(&LlmError::ApiError("HTTP 400".into())));
-    assert!(!is_transient(&LlmError::ContextLengthExceeded {
-        message: String::new(),
-    }));
-}
-
 fn assistant_with_tool_calls(calls: &[(&str, &str)]) -> AssistantMessage {
     AssistantMessage {
         text: None,

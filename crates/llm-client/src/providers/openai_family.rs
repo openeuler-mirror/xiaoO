@@ -1,5 +1,4 @@
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -15,8 +14,8 @@ use crate::error::{
 use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::url_fallback::{
     build_base_url_candidates, build_final_candidates, build_url_fallback_error_message,
-    is_configuration_error, is_http_unauthorized_error, is_retryable_network_error,
-    should_try_next_candidate, UrlAttemptRecord,
+    is_configuration_error, is_http_unauthorized_error, should_try_next_candidate,
+    UrlAttemptRecord,
 };
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -74,8 +73,8 @@ impl OpenAiFamilyProvider {
             crate::provider_registry::ProtocolFamily::OpenAiCompatible.static_context_window();
         Self {
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(300))
-                .connect_timeout(Duration::from_secs(30))
+                .timeout(crate::request_policy::REQUEST_TIMEOUT)
+                .connect_timeout(crate::request_policy::REQUEST_TIMEOUT)
                 .danger_accept_invalid_certs(skip_tls_verify)
                 .http1_only()
                 .build()
@@ -388,8 +387,7 @@ impl OpenAiFamilyProvider {
     }
 
     /// Shared endpoint selection flow for `complete` and `complete_stream`:
-    /// try the cached endpoint URL first (retrying up to 3 times on
-    /// retryable network errors), then walk the URL-fallback candidates
+    /// try the cached endpoint URL once, then walk the URL-fallback candidates
     /// until one succeeds. `call` selects the endpoint request style and
     /// only affects log wording beyond that.
     async fn run_with_url_fallback(
@@ -411,117 +409,8 @@ impl OpenAiFamilyProvider {
                 .and_then(|guard| guard.clone());
 
             if let Some(url) = cached_url {
-                match &call {
-                    EndpointCall::Complete => {
-                        tracing::debug!(
-                            url = %redactor.url(&url),
-                            "Using cached endpoint URL from previous successful call"
-                        );
-                    }
-                    EndpointCall::Stream(_) => {
-                        tracing::debug!(url = %redactor.url(&url), "Using cached endpoint URL for streaming request");
-                    }
-                }
-
-                match self.try_endpoint(&url, request, &call, &mut redactor).await {
-                    Ok(response) => {
-                        tracing::debug!(url = %redactor.url(&url), "Cached URL succeeded{}", label);
-                        return Ok(response);
-                    }
-                    Err(error) => {
-                        if is_configuration_error(&error) {
-                            tracing::error!(
-                                error = %redactor.error(error.clone()),
-                                url = %redactor.url(&url),
-                                "Cached URL failed with configuration error{} - not retrying",
-                                label
-                            );
-                            return Err(error);
-                        }
-
-                        if is_retryable_network_error(&error) {
-                            tracing::warn!(
-                                error = %redactor.error(error.clone()),
-                                url = %redactor.url(&url),
-                                "Cached URL failed with retryable network error{} - will retry 3 times with 1s interval",
-                                label
-                            );
-
-                            for attempt in 1..=3 {
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-                                tracing::info!(
-                                    url = %redactor.url(&url),
-                                    attempt,
-                                    total_attempts = 3,
-                                    "Retrying cached URL{}",
-                                    label
-                                );
-
-                                match self.try_endpoint(&url, request, &call, &mut redactor).await {
-                                    Ok(response) => {
-                                        tracing::info!(
-                                            url = %redactor.url(&url),
-                                            attempt,
-                                            "✓ Cached URL retry succeeded{}",
-                                            label
-                                        );
-                                        return Ok(response);
-                                    }
-                                    Err(retry_error) => {
-                                        if is_configuration_error(&retry_error) {
-                                            tracing::error!(
-                                                error = %redactor.error(retry_error.clone()),
-                                                url = %redactor.url(&url),
-                                                attempt,
-                                                "Retry failed with configuration error{} - stopping retries",
-                                                label
-                                            );
-                                            return Err(retry_error);
-                                        }
-
-                                        if attempt < 3 {
-                                            tracing::warn!(
-                                                error = %redactor.error(retry_error.clone()),
-                                                url = %redactor.url(&url),
-                                                attempt,
-                                                "Retry attempt failed{} - will retry again",
-                                                label
-                                            );
-                                        } else {
-                                            tracing::error!(
-                                                error = %redactor.error(retry_error.clone()),
-                                                url = %redactor.url(&url),
-                                                attempt,
-                                                "All 3 retry attempts failed{} - returning error",
-                                                label
-                                            );
-                                            return Err(retry_error);
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            // Non-retryable error: RateLimited or other issues
-                            if matches!(error, LlmError::RateLimited { .. }) {
-                                tracing::error!(
-                                    error = %redactor.error(error.clone()),
-                                    url = %redactor.url(&url),
-                                    "Rate limited{} - quota exhausted or policy triggered, not retrying",
-                                    label
-                                );
-                            } else {
-                                tracing::error!(
-                                    error = %redactor.error(error.clone()),
-                                    url = %redactor.url(&url),
-                                    "Cached URL failed with non-retryable error{} - returning error",
-                                    label
-                                );
-                            }
-                            return Err(error);
-                        }
-                    }
-                }
+                // The wrapper owns the retry budget, including cached endpoints.
+                return self.try_endpoint(&url, request, &call, &mut redactor).await;
             }
 
             tracing::info!(
@@ -553,6 +442,14 @@ impl OpenAiFamilyProvider {
                         return Ok(response);
                     }
                     Err(error) => {
+                        // Transport failures return to the shared retry policy;
+                        // they must not cause additional endpoint probes.
+                        match error {
+                            LlmError::HttpError(message) => return Err(LlmError::HttpError(
+                                format!("{message} | endpoint: {}", redactor.url(url)))),
+                            LlmError::Timeout | LlmError::StreamError { .. } | LlmError::IoError(_) => return Err(error),
+                            _ => {}
+                        }
                         attempts.push(UrlAttemptRecord {
                             index: idx,
                             url: url.clone(),
@@ -603,6 +500,7 @@ impl OpenAiFamilyProvider {
                             return Err(error);
                         }
 
+                        if !should_try_next_candidate(&error) { return Err(error); }
                         let error_msg = build_url_fallback_error_message(&attempts);
                         return Err(LlmError::ApiError(error_msg));
                     }
