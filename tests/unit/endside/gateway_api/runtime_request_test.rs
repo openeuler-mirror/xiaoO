@@ -128,56 +128,24 @@ fn trusted_window_accepts_max_tokens_below_window() {
         "glm-5.2",
         std::path::Path::new("/tmp/config.toml"),
     );
-    assert_eq!(outcome, Ok(None));
+    assert_eq!(outcome, Ok(()));
 }
 
 #[test]
 fn estimated_window_never_rejects_even_when_max_tokens_exceeds_it() {
     // The static estimate can undershoot the real window; rejecting on it
     // would block a working config whenever probing is offline or slow.
-    let notice = evaluate_max_tokens_against_window(
-        ResolvedWindow::Estimated {
-            window: 128_000,
-            fresh: true,
-        },
+    let outcome = evaluate_max_tokens_against_window(
+        ResolvedWindow::Estimated { window: 128_000 },
         200_000,
         "glm-5.2",
         std::path::Path::new("/tmp/config.toml"),
-    )
-    .expect("an estimate must not reject the turn");
-    assert!(notice.is_some_and(|text| text.contains("estimated window 128000")));
-}
-
-#[test]
-fn fresh_fallback_carries_notice_but_cache_hits_stay_silent() {
-    let path = std::path::Path::new("/tmp/config.toml");
-    let fresh = evaluate_max_tokens_against_window(
-        ResolvedWindow::Estimated {
-            window: 128_000,
-            fresh: true,
-        },
-        8_192,
-        "glm-5.2",
-        path,
     );
-    assert!(fresh
-        .expect("a fresh fallback carries the estimate notice")
-        .is_some());
-
-    let stale = evaluate_max_tokens_against_window(
-        ResolvedWindow::Estimated {
-            window: 128_000,
-            fresh: false,
-        },
-        8_192,
-        "glm-5.2",
-        path,
-    );
-    assert_eq!(stale, Ok(None));
+    assert_eq!(outcome, Ok(()));
 }
 
 #[tokio::test]
-async fn probe_success_within_deadline_resolves_trusted() {
+async fn probe_success_within_budget_resolves_trusted() {
     let resolved = resolve_window_with_probe(
         unique_cache_key("probe-success"),
         Some(128_000),
@@ -189,7 +157,7 @@ async fn probe_success_within_deadline_resolves_trusted() {
 }
 
 #[tokio::test]
-async fn failed_probe_falls_back_to_fresh_estimate() {
+async fn failed_probe_falls_back_to_static_estimate() {
     let resolved = resolve_window_with_probe(
         unique_cache_key("probe-none"),
         Some(128_000),
@@ -199,17 +167,14 @@ async fn failed_probe_falls_back_to_fresh_estimate() {
     .await;
     assert_eq!(
         resolved,
-        Some(ResolvedWindow::Estimated {
-            window: 128_000,
-            fresh: true
-        })
+        Some(ResolvedWindow::Estimated { window: 128_000 })
     );
 }
 
 #[tokio::test]
-async fn static_cache_hit_is_a_silent_estimate() {
-    let key = unique_cache_key("cache-hit-static");
-    // Prime the entry with a fresh fallback first.
+async fn negative_result_hit_reuses_estimate_without_reprobing() {
+    let key = unique_cache_key("cache-hit-negative");
+    // Prime the entry with a negative probe result first.
     let _ = resolve_window_with_probe(
         key.clone(),
         Some(128_000),
@@ -221,16 +186,13 @@ async fn static_cache_hit_is_a_silent_estimate() {
     let resolved = resolve_window_with_probe(
         key,
         Some(128_000),
-        async { panic!("a cache hit must not probe again within the TTL") },
+        async { panic!("a valid negative entry must not probe again within the TTL") },
         Duration::from_secs(1),
     )
     .await;
     assert_eq!(
         resolved,
-        Some(ResolvedWindow::Estimated {
-            window: 128_000,
-            fresh: false
-        })
+        Some(ResolvedWindow::Estimated { window: 128_000 })
     );
 }
 
@@ -261,47 +223,4 @@ async fn unresolved_entry_fails_fast_without_reprobing() {
     .await;
     assert_eq!(second, None);
     assert_eq!(probes.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn inline_timeout_uses_estimate_and_background_probe_corrects_cache() {
-    let key = unique_cache_key("timeout-correction");
-    let resolved = resolve_window_with_probe(
-        key.clone(),
-        Some(128_000),
-        async {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            Some(200_000)
-        },
-        Duration::from_millis(20),
-    )
-    .await;
-    assert_eq!(
-        resolved,
-        Some(ResolvedWindow::Estimated {
-            window: 128_000,
-            fresh: true
-        })
-    );
-
-    // The detached probe task finishes later and writes the dynamic value;
-    // poll the cache until it does so the correction is observable.
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let corrected = resolve_window_with_probe(
-            key.clone(),
-            Some(128_000),
-            async { panic!("the cache must already hold the dynamic value") },
-            Duration::from_secs(1),
-        )
-        .await;
-        if corrected == Some(ResolvedWindow::Trusted { window: 200_000 }) {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "background probe did not correct the cache"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }

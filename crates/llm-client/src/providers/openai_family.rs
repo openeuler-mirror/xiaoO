@@ -1,7 +1,6 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use futures::StreamExt;
 
 use crate::convert::{
     llm_request_to_wire, parse_tool_arguments, parsed_chunk_to_stream_chunk,
@@ -72,9 +71,9 @@ impl OpenAiFamilyProvider {
         let max_context_window =
             crate::provider_registry::ProtocolFamily::OpenAiCompatible.static_context_window();
         Self {
+            // No total client timeout; request_policy owns every deadline.
             client: reqwest::Client::builder()
-                .timeout(crate::request_policy::REQUEST_TIMEOUT)
-                .connect_timeout(crate::request_policy::REQUEST_TIMEOUT)
+                .connect_timeout(crate::request_policy::CONNECT_TIMEOUT)
                 .danger_accept_invalid_certs(skip_tls_verify)
                 .http1_only()
                 .build()
@@ -211,18 +210,16 @@ impl OpenAiFamilyProvider {
             .build()
             .map_err(map_reqwest_error)?;
         redactor.headers(request.headers());
-        let response = self
-            .client
-            .execute(request)
-            .await
-            .map_err(map_reqwest_error)?;
+        let response =
+            crate::request_policy::execute_stream_request(&self.client, request, map_reqwest_error)
+                .await?;
 
         let status = response.status();
         let headers = response.headers().clone();
         redactor.headers(&headers);
 
         if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body = crate::request_policy::read_error_body_with_deadline(response).await?;
             return Err(map_api_status_error(
                 status,
                 &error_body,
@@ -236,7 +233,8 @@ impl OpenAiFamilyProvider {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if !content_type.to_lowercase().starts_with("text/event-stream") {
-            let full_response = response.text().await.unwrap_or_default();
+            let full_response =
+                crate::request_policy::read_error_body_with_deadline(response).await?;
             return Err(crate::error::map_protocol_mismatch(
                 url,
                 &redactor,
@@ -260,7 +258,15 @@ impl OpenAiFamilyProvider {
         let mut byte_stream = response.bytes_stream();
         let mut bytes_received: usize = 0;
 
-        while let Some(chunk_result) = byte_stream.next().await {
+        loop {
+            let chunk_result =
+                match crate::request_policy::next_stream_chunk(&mut byte_stream, bytes_received)
+                    .await?
+                {
+                    Some(result) => result,
+                    None => break,
+                };
+
             let bytes = chunk_result.map_err(|e| {
                 crate::error::map_stream_read_error(
                     url,

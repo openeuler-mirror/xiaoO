@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use agent_contracts::TokenEstimator;
 use agent_llm::{ChatMessageExt, CompletionConfigExt, LlmRequestExt, MessageRoleExt};
 use agent_types::{ChatMessage, CompletionConfig, ContentBlock, LlmRequest, ResponseFormat};
-use llm_client::LlmProviderWrapper;
+use llm_client::{LlmProviderWrapper, RetryBudget};
 use serde::{Deserialize, Serialize};
 
 use crate::{CompactError, CompactResult};
@@ -124,7 +124,9 @@ pub async fn summarize_messages_with_previous(
         },
         request_config,
     )?;
-    let response = provider.complete(&request).await?;
+    let response = provider
+        .complete_with_budget(&request, RetryBudget::Background)
+        .await?;
     let compact_summary = parse_compact_summary_response(response.message.text.as_deref())?;
     let merged_lines = build_summary_lines(
         messages.len(),

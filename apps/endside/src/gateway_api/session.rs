@@ -107,13 +107,6 @@ pub enum SessionTurnUpdate {
         messages: Vec<xiaoo_api::chat::ChatMessage>,
     },
     HookActions(Vec<xiaoo_api::chat::HookAction>),
-    /// One-line budget-provenance notice: the turn is dispatched with a
-    /// static window estimate because the dynamic probe did not resolve.
-    /// Sent before the turn's first stream content so the TUI can insert
-    /// it into the transcript ahead of the assistant placeholder.
-    TurnNotice {
-        text: String,
-    },
     Err(String),
 }
 

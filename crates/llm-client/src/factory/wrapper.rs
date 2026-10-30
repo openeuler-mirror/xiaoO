@@ -27,6 +27,23 @@ pub struct LlmProviderWrapper {
     default_runtime_view: Option<Arc<dyn RuntimeView>>,
 }
 
+/// Retry-budget profile for a non-streaming completion.
+///
+/// Off-path work (compaction, memory summary) must not inherit the foreground
+/// call's multi-minute overall budget: it would otherwise hold a worker while
+/// a hung upstream runs out the clock. Foreground callers keep the generous
+/// budget needed for slow-but-healthy gateways.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RetryBudget {
+    /// Default for user-facing completions: tolerates slow-but-healthy
+    /// gateways at the cost of a longer worst-case wait.
+    #[default]
+    Foreground,
+    /// Background work (compaction, memory summary): a much shorter overall
+    /// bound so a hung upstream cannot occupy a worker for minutes.
+    Background,
+}
+
 impl LlmProviderWrapper {
     /// Constructs a wrapper around the given provider.  When `agent_id` and
     /// `runtime_view` are both `Some`, hooks fire on every `complete` /
@@ -518,8 +535,19 @@ fn hook_invoke_metadata(hook_span: &TraceSpanHandle) -> HookInvokeMetadata {
 }
 
 impl LlmProviderWrapper {
-    async fn complete_with_retry(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-        crate::request_policy::run(|_| self.inner.complete(request)).await
+    async fn complete_with_retry(
+        &self,
+        request: &LlmRequest,
+        budget: RetryBudget,
+    ) -> Result<LlmResponse, LlmError> {
+        match budget {
+            RetryBudget::Foreground => {
+                crate::request_policy::run(|_| self.inner.complete(request)).await
+            }
+            RetryBudget::Background => {
+                crate::request_policy::run_background(|_| self.inner.complete(request)).await
+            }
+        }
     }
 
     async fn complete_stream_with_retry(
@@ -527,7 +555,7 @@ impl LlmProviderWrapper {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        crate::request_policy::run(|attempt| {
+        crate::request_policy::run_stream(|attempt| {
             if attempt > 0 {
                 on_chunk(StreamChunk {
                     reset: true,
@@ -549,7 +577,26 @@ impl LlmProviderWrapper {
         self.run_scoped_lifecycle::<std::future::Pending<()>>(
             runtime_view,
             request,
-            ScopedCall::Complete,
+            ScopedCall::Complete {
+                budget: RetryBudget::Foreground,
+            },
+        )
+        .await
+    }
+
+    /// Non-streaming completion with an explicit retry-budget profile. Use
+    /// [`RetryBudget::Background`] for off-path work (compaction, memory
+    /// summary) so a hung upstream cannot hold a worker for the foreground
+    /// budget.
+    pub async fn complete_with_budget(
+        &self,
+        request: &LlmRequest,
+        budget: RetryBudget,
+    ) -> Result<LlmResponse, LlmError> {
+        self.run_scoped_lifecycle::<std::future::Pending<()>>(
+            None,
+            request,
+            ScopedCall::Complete { budget },
         )
         .await
     }
@@ -676,9 +723,10 @@ impl LlmProviderWrapper {
         }
 
         let outcome = match call {
-            ScopedCall::Complete => {
-                ScopedCallOutcome::Response(self.complete_with_retry(effective_request_ref).await)
-            }
+            ScopedCall::Complete { budget } => ScopedCallOutcome::Response(
+                self.complete_with_retry(effective_request_ref, budget)
+                    .await,
+            ),
             ScopedCall::StreamWithCancel { on_chunk, cancel } => {
                 let traced_on_chunk = |chunk: StreamChunk| {
                     if let Some(stats) = stream_stats.as_ref() {
@@ -882,8 +930,9 @@ impl LlmProviderWrapper {
 /// How the provider call is executed inside
 /// [`LlmProviderWrapper::run_scoped_lifecycle`].
 enum ScopedCall<'a, Fut> {
-    /// Plain (non-streaming) call via `complete_with_retry`.
-    Complete,
+    /// Plain (non-streaming) call via `complete_with_retry`, using `budget`
+    /// to pick the retry profile.
+    Complete { budget: RetryBudget },
     /// Streaming call via `complete_stream_with_retry`, raced against a
     /// caller-supplied cancellation future.
     StreamWithCancel {

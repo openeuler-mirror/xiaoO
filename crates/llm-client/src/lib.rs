@@ -26,6 +26,7 @@ pub use auth::{AuthCredential, AuthPool, AuthState, InMemoryAuthPool};
 pub use auth::{AuthStore, AuthStoreError, InMemoryAuthStore};
 pub use factory::{
     create_llm_provider, create_llm_provider_from_resolved, LlmProviderConfig, LlmProviderWrapper,
+    RetryBudget,
 };
 pub use models::{create_model_catalog, resolve_model_context_length, ModelCatalog, ModelSummary};
 pub use provider_registry::{

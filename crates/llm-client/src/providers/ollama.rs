@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use futures::StreamExt;
 
 use super::openai_family::parse_openai_family_stream_line;
 use crate::convert::{chat_messages_to_wire, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
@@ -20,8 +19,9 @@ pub(crate) struct OllamaProvider {
 impl OllamaProvider {
     pub(crate) fn new(base_url: String, model: String) -> Self {
         Self {
+            // No total client timeout; request_policy owns every deadline.
             client: reqwest::Client::builder()
-                .timeout(crate::request_policy::REQUEST_TIMEOUT)
+                .connect_timeout(crate::request_policy::CONNECT_TIMEOUT)
                 .danger_accept_invalid_certs(crate::http::tls_verification_disabled())
                 .build()
                 .unwrap_or_else(crate::http::client_build_failed),
@@ -156,17 +156,19 @@ impl LlmProvider for OllamaProvider {
                 .build()
                 .map_err(map_reqwest_error)?;
             redactor.headers(request.headers());
-            let response = self
-                .client
-                .execute(request)
-                .await
-                .map_err(map_reqwest_error)?;
+            let response = crate::request_policy::execute_stream_request(
+                &self.client,
+                request,
+                map_reqwest_error,
+            )
+            .await?;
 
             let status = response.status();
             let headers = response.headers().clone();
             redactor.headers(&headers);
             if !status.is_success() {
-                let error_body = response.text().await.unwrap_or_default();
+                let error_body =
+                    crate::request_policy::read_error_body_with_deadline(response).await?;
                 return Err(map_api_status_error(
                     status,
                     &error_body,
@@ -184,7 +186,16 @@ impl LlmProvider for OllamaProvider {
             let mut byte_stream = response.bytes_stream();
             let mut bytes_received: usize = 0;
 
-            while let Some(chunk_result) = byte_stream.next().await {
+            loop {
+                let chunk_result = match crate::request_policy::next_stream_chunk(
+                    &mut byte_stream,
+                    bytes_received,
+                )
+                .await?
+                {
+                    Some(result) => result,
+                    None => break,
+                };
                 let bytes = chunk_result.map_err(|e| {
                     crate::error::map_stream_read_error(
                         &url,
