@@ -114,6 +114,9 @@
   "apps/endside/src/gateway_api/session_core.rs": {
     "tokio::spawn(async move {": 1
   },
+  "apps/endside/src/main.rs": {
+    "tokio::spawn(": 1
+  },
   "apps/serverside/src/channels/feishu/client.rs": {
     "let status = response.status();": 5
   },

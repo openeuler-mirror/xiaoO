@@ -36,7 +36,7 @@ impl ProtocolFamily {
     /// Static fallback context window for the protocol family: when the
     /// dynamic probing chain (provider catalog > OpenRouter > Ollama
     /// `/api/show`) misses entirely, the provider-construction default and
-    /// the TUI's synchronous validation share this value so the two magic
+    /// the TUI's turn-path fallback share this value so the two magic
     /// numbers cannot drift. A coarse lower bound only — not the real
     /// window (dynamic probing is authoritative).
     pub fn static_context_window(&self) -> usize {

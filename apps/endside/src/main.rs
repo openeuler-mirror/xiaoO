@@ -10,8 +10,7 @@ use crossterm::terminal::{
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::PathBuf;
 
 use xiaoo_shared::backend::ProcessGroupCleanupGuard;
 use xiaoo_shared::config_identity::ConfigFileIdentity;
@@ -50,12 +49,6 @@ pub(crate) use support::error_log;
 
 const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 const CLI_SWITCH: &str = "--cli";
-
-/// Total budget startup validation waits for dynamic context-window probing:
-/// the probe chain's per-client timeouts add up to ~40s, and startup cannot
-/// wait unbounded. Past this deadline we fall back to the protocol-family
-/// static value and continue.
-const CONFIG_PROBE_DEADLINE: Duration = Duration::from_secs(3);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -249,21 +242,20 @@ async fn run_tui(
     workspace: PathBuf,
     config_identity: Option<ConfigFileIdentity>,
 ) -> Result<()> {
-    let (validation_errors, validation_warnings) =
-        validate_config_for_tui(&config, &config_path).await;
-
-    for warning in &validation_warnings {
-        tracing::warn!("Config validation warning: {}", warning);
-    }
-
-    if !validation_errors.is_empty() {
-        for error in &validation_errors {
-            eprintln!("! Config Error: {}", error);
-        }
-        eprintln!("Program startup failed due to invalid configuration.");
-        eprintln!("Please fix the configuration in: {}", config_path.display());
-        std::process::exit(1);
-    }
+    // Context-window probing runs off the startup critical path: the TUI
+    // renders immediately while this task warms the process-wide cache
+    // shared with the turn path, so the first turn usually resolves from
+    // cache instead of probing inline. Statically-certain config errors
+    // (missing provider/model, zero max_tokens) still gate startup via
+    // `require_tui_bootstrap_config`; window-dependent checks happen at
+    // turn dispatch — see
+    // `gateway_api::runtime_request::build_runtime_config_from_inputs`.
+    tokio::spawn(
+        crate::gateway_api::runtime_request::warm_context_window_cache(
+            config.llm.clone(),
+            config::resolve_context_window(&config),
+        ),
+    );
 
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     execute!(io::stdout(), EnterAlternateScreen).context("failed to enter alternate screen")?;
@@ -293,26 +285,6 @@ async fn run_tui(
     let mut app =
         app::App::new_with_config(&config, config_path.clone(), workspace, config_identity)
             .context("failed to initialize TUI app state")?;
-
-    for error in validation_errors {
-        app.state
-            .chat_state
-            .messages
-            .push(crate::chat::Message::system(format!(
-                "! Config Error: {}",
-                error
-            )));
-    }
-
-    for warning in validation_warnings {
-        app.state
-            .chat_state
-            .messages
-            .push(crate::chat::Message::system(format!(
-                "! Config Warning: {}",
-                warning
-            )));
-    }
 
     if let Some(remote) = config
         .tui
@@ -351,82 +323,6 @@ async fn run_tui(
     let _ = disable_raw_mode();
 
     result
-}
-
-/// Validate configuration for TUI.
-///
-/// Prefer the dynamic probing chain for the context window
-/// ([`crate::gateway_api::runtime_request::probe_dynamic_context_window`],
-/// the same one the TUI gateway uses), capped by an inline deadline; on
-/// timeout/failure fall back to the protocol-family static value
-/// ([`config::resolve_context_window`]). That way a large-`max_tokens`
-/// config on a large-window model is not rejected as an error just because
-/// the 128k/200k static fallback underestimates it.
-async fn validate_config_for_tui(
-    config: &config::Config,
-    config_path: &Path,
-) -> (Vec<String>, Vec<String>) {
-    let resolved_context_window = resolve_context_window_for_validation(config).await;
-    validate_max_tokens_against_window(
-        config.llm.max_tokens,
-        &config.llm.model,
-        resolved_context_window,
-        config_path,
-    )
-}
-
-/// Window resolution for startup validation: goes through the same
-/// process-wide cache and probe chain as the TUI gateway
-/// (`resolve_window_with_shared_cache`); the probe writes the cache, so the
-/// first turn hits it and skips a repeat wait.
-async fn resolve_context_window_for_validation(config: &config::Config) -> usize {
-    crate::gateway_api::runtime_request::resolve_window_with_shared_cache(
-        &config.llm,
-        config::resolve_context_window(config),
-        CONFIG_PROBE_DEADLINE,
-    )
-    .await
-    .unwrap_or(128_000)
-}
-
-/// Pure function: resolved window + config in, `(errors, warnings)` out.
-/// Kept standalone so unit tests can inject a synthetic window without
-/// touching the network.
-fn validate_max_tokens_against_window(
-    max_tokens: u32,
-    model: &str,
-    resolved_context_window: usize,
-    config_path: &Path,
-) -> (Vec<String>, Vec<String>) {
-    let mut errors = Vec::new();
-    let mut warnings = Vec::new();
-
-    let max_reasonable_output_ratio = 0.5;
-    let max_reasonable_output_tokens =
-        (resolved_context_window as f64 * max_reasonable_output_ratio) as usize;
-
-    if max_tokens as usize > max_reasonable_output_tokens {
-        warnings.push(format!(
-            "max_tokens {} exceeds 50% of the estimated context window for model {}. \
-            This may limit input space.",
-            max_tokens, model
-        ));
-    }
-
-    if max_tokens as usize >= resolved_context_window {
-        errors.push(format!(
-            "max_tokens {} is too large relative to the estimated context window. \
-            This would leave NO space for input.\n\
-            Configuration file: {}\n\
-            Suggestions:\n\
-              - Reduce max_tokens (currently {}) in [llm] section",
-            max_tokens,
-            config_path.display(),
-            max_tokens,
-        ));
-    }
-
-    (errors, warnings)
 }
 
 #[cfg(test)]
