@@ -1142,3 +1142,28 @@ async fn settle_in_flight_turn_returns_immediately_when_idle() {
     runtime.settle_in_flight_turn(&mut state).await;
     assert!(state.chat_state.messages.is_empty());
 }
+
+#[test]
+fn retry_exhaustion_stops_loading_and_waits_for_user_input() {
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let mut state = test_state();
+    state.chat_state.is_loading = true;
+    state
+        .chat_state
+        .messages
+        .push(Message::assistant_streaming());
+    runtime.stream_message_index = Some(0);
+    let (tx, rx) = mpsc::unbounded_channel();
+    runtime.stream_rx = Some(rx);
+    tx.send(SessionTurnUpdate::Err(
+        "LLM request failed after 6 attempts".into(),
+    ))
+    .unwrap();
+    assert!(runtime.poll_stream_updates(&mut state));
+    assert!(!state.chat_state.is_loading);
+    assert!(!runtime.turn_stream_in_flight());
+    assert!(runtime.stream_rx.is_none());
+    assert!(state.chat_state.messages[0].content.contains("6 attempts"));
+    runtime.poll_stream_updates(&mut state);
+    assert!(!state.chat_state.is_loading);
+}

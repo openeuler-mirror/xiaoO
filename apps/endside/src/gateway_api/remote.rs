@@ -68,14 +68,12 @@ enum RemoteSseEvent {
         #[serde(default)]
         agent_id: Option<String>,
         delta: String,
-        #[allow(dead_code)]
         snapshot: String,
     },
     ThinkingDelta {
         #[serde(default)]
         agent_id: Option<String>,
         delta: String,
-        #[allow(dead_code)]
         snapshot: String,
     },
     ToolResult {
@@ -850,16 +848,34 @@ async fn handle_remote_event(
             });
         }
         RemoteSseEvent::TextDelta {
-            agent_id, delta, ..
+            agent_id,
+            delta,
+            snapshot,
         } => {
+            if delta.is_empty() && snapshot.is_empty() {
+                let _ = updates_tx.send(SessionTurnUpdate::SetAssistantContent {
+                    agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
+                    text: String::new(),
+                });
+                return;
+            }
             let _ = updates_tx.send(SessionTurnUpdate::AppendAssistantContent {
                 agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
                 delta,
             });
         }
         RemoteSseEvent::ThinkingDelta {
-            agent_id, delta, ..
+            agent_id,
+            delta,
+            snapshot,
         } => {
+            if delta.is_empty() && snapshot.is_empty() {
+                let _ = updates_tx.send(SessionTurnUpdate::SetAssistantThinking {
+                    agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
+                    text: String::new(),
+                });
+                return;
+            }
             let _ = updates_tx.send(SessionTurnUpdate::AppendAssistantThinking {
                 agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
                 delta,

@@ -48,3 +48,16 @@ fn whitespace_only_prompt_yields_no_title() {
     let title = generate_title_from_prompt(prompt);
     assert_eq!(title, None);
 }
+
+#[test]
+fn task_timeout_defaults_to_ten_minutes_and_accepts_override() {
+    for (extra, expected) in [(vec![], 600), (vec!["--timeout", "120"], 120)] {
+        let mut arguments = vec!["xiaoo", "run", "--prompt", "hello"];
+        arguments.extend(extra);
+        let args = Args::try_parse_from(arguments).unwrap();
+        assert!(
+            matches!(args.command, Some(Command::Run { timeout_secs, .. }) if timeout_secs == expected)
+        );
+    }
+    assert!(Args::try_parse_from(["xiaoo", "run", "--prompt", "hello", "--timeout", "0"]).is_err());
+}

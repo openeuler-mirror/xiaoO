@@ -43,6 +43,7 @@ xiaoo-api = { path = "../../crates/xiaoo-api" }            # runtime SDK 门面�
 xiaoo-shared = { path = "../shared" }                      # 应用装配门面
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 # 模型列表拉取的 HTTP 级测试：起本地假 `/models` 端点，覆盖成功 / 401 /
 # 空列表 / 缺 key 四条路径。仅测试依赖；外部 crate 不受 check-facade.sh

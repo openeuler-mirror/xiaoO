@@ -332,6 +332,7 @@ impl LlmProvider for ReplyingLlmProvider {
             .expect("seen requests")
             .push(request.clone());
         on_chunk(StreamChunk {
+            reset: false,
             delta_text: Some("reply".to_string()),
             delta_reasoning: None,
             delta_tool_call: None,

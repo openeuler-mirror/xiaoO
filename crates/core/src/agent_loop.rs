@@ -1379,7 +1379,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     } else {
         let first_token_at = std::sync::Arc::clone(&first_token_at);
         let on_chunk = |chunk: StreamChunk| {
-            if first_token_at.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            if !chunk.reset && first_token_at.load(std::sync::atomic::Ordering::Relaxed) == 0 {
                 first_token_at.store(
                     start.elapsed().as_millis() as u64,
                     std::sync::atomic::Ordering::Relaxed,
@@ -1651,68 +1651,21 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     Ok(())
 }
 
-const MAX_TRANSIENT_RETRIES: u32 = 4;
-const TRANSIENT_BASE_DELAY_MS: u64 = 4_000;
-const TRANSIENT_MAX_DELAY_MS: u64 = 60_000;
-
-fn is_transient(error: &LlmError) -> bool {
-    matches!(
-        error,
-        LlmError::RateLimited { .. }
-            | LlmError::HttpError(_)
-            | LlmError::Timeout
-            | LlmError::StreamError { .. }
-            | LlmError::IoError(_)
-    )
-}
-
-fn transient_backoff(attempt: u32, retry_after_ms: u64) -> Duration {
-    let millis = if retry_after_ms > 0 {
-        retry_after_ms
-    } else {
-        TRANSIENT_BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(63))
-    };
-    Duration::from_millis(millis.min(TRANSIENT_MAX_DELAY_MS))
-}
-
+// Network retries and timeouts belong exclusively to LlmProviderWrapper.
 async fn llm_call_with_recovery(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
-    let mut retry_attempts: u32 = 0;
-    loop {
-        match llm_call(ctx).await {
-            Ok(()) => return Ok(()),
-            Err(LlmError::ContextLengthExceeded { message }) => {
-                tracing::warn!(
-                    turn = ctx.turn.turn_number,
-                    "LLM request exceeded provider context limit; forcing compression retry: {message}"
-                );
-
-                compress(ctx, CompressionTrigger::ContextLimitRetry).await?;
-                build_messages(ctx).await?;
-                return llm_call(ctx)
-                    .await
-                    .map_err(|error| AgentError::LlmProvider(error.to_string()));
-            }
-            Err(error) if retry_attempts < MAX_TRANSIENT_RETRIES && is_transient(&error) => {
-                let retry_after_ms = match &error {
-                    LlmError::RateLimited { retry_after_ms, .. } => *retry_after_ms,
-                    _ => 0,
-                };
-                let backoff = transient_backoff(retry_attempts, retry_after_ms);
-                retry_attempts += 1;
-                tracing::warn!(
-                    turn = ctx.turn.turn_number,
-                    attempt = retry_attempts,
-                    max_attempts = MAX_TRANSIENT_RETRIES,
-                    backoff_ms = backoff.as_millis() as u64,
-                    "transient LLM error; backing off before retrying agent turn: {error}"
-                );
-                tokio::select! {
-                    _ = ctx.state.cancel.cancelled() => return Ok(()),
-                    _ = tokio::time::sleep(backoff) => {}
-                }
-            }
-            Err(error) => return Err(AgentError::LlmProvider(error.to_string())),
+    match llm_call(ctx).await {
+        Err(LlmError::ContextLengthExceeded { message }) => {
+            tracing::warn!(
+                turn = ctx.turn.turn_number,
+                "LLM request exceeded provider context limit; forcing compression retry: {message}"
+            );
+            compress(ctx, CompressionTrigger::ContextLimitRetry).await?;
+            build_messages(ctx).await?;
+            llm_call(ctx)
+                .await
+                .map_err(|error| AgentError::LlmProvider(error.to_string()))
         }
+        result => result.map_err(|error| AgentError::LlmProvider(error.to_string())),
     }
 }
 
@@ -1774,6 +1727,33 @@ fn stream_assistant_chunk(
     chunk: StreamChunk,
     secrets: &[String],
 ) {
+    if chunk.reset {
+        stream
+            .text
+            .lock()
+            .expect("assistant stream text mutex should not be poisoned")
+            .clear();
+        stream
+            .reasoning
+            .lock()
+            .expect("assistant stream reasoning mutex should not be poisoned")
+            .clear();
+        *stream
+            .last_text_emit
+            .lock()
+            .expect("assistant stream text emit state mutex should not be poisoned") =
+            StreamEmitState::default();
+        *stream
+            .last_reasoning_emit
+            .lock()
+            .expect("assistant stream reasoning emit state mutex should not be poisoned") =
+            StreamEmitState::default();
+        if let Some(sink) = sink {
+            sink.on_assistant_message(agent_id, "");
+            sink.on_assistant_reasoning(agent_id, "");
+        }
+        return;
+    }
     // Buffers fill unconditionally (see `AssistantStreamState` doc). The
     // emits below are individually guarded on `sink`, so a sinkless call
     // only pays the accumulation; the post-stream flush still reads

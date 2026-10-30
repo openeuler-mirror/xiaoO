@@ -9,7 +9,9 @@ use crate::cli::{
 };
 
 use super::attach::run_with_attach;
+use super::deadline::{run_local_turn, TaskDeadline, DEFAULT_TASK_TIMEOUT_SECS};
 use super::skills::{handle_skill_command, resolve_skills_config_from_file, SkillCommands};
+use tokio_util::sync::CancellationToken;
 
 use clap::Parser;
 use serde_json::Value;
@@ -94,6 +96,10 @@ enum Command {
         /// Max turns per agent loop invocation
         #[arg(long, default_value_t = 10)]
         max_turns: u32,
+
+        /// Overall task deadline in seconds, including startup, tools, and all turns
+        #[arg(long = "timeout", default_value_t = DEFAULT_TASK_TIMEOUT_SECS, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout_secs: u64,
 
         /// Disable tool execution
         #[arg(long)]
@@ -210,6 +216,7 @@ where
             api_base,
             system,
             max_turns,
+            timeout_secs,
             no_tools,
             tools,
             reasoning_effort,
@@ -219,6 +226,8 @@ where
             agent,
             attach,
         }) => {
+            let deadline = TaskDeadline::new(timeout_secs)
+                .unwrap_or_else(|error| exit_run_error(error, format == OutputFormat::Json));
             let prompt = prompt.join(" ");
             if let Some(path) = config_path.as_ref() {
                 if let Err(error) = xiaoo_shared::llm_secrets::init_llm_secrets(path) {
@@ -304,6 +313,7 @@ where
                     session,
                     agent,
                     attach,
+                    deadline,
                 },
             )
             .await;
@@ -333,6 +343,7 @@ struct RunOnceTarget {
     session: Option<String>,
     agent: Option<String>,
     attach: Option<String>,
+    deadline: TaskDeadline,
 }
 
 async fn run_once(
@@ -347,6 +358,7 @@ async fn run_once(
         session,
         agent,
         attach,
+        deadline,
     } = target;
     if debug {
         eprintln!(
@@ -368,7 +380,10 @@ async fn run_once(
     }
 
     if let Some(attach_url) = &attach {
-        run_with_attach(attach_url, prompt, format, title, session, agent, debug).await;
+        if debug {
+            eprintln!("Attaching to daemon at: {attach_url}");
+        }
+        run_with_attach(attach_url, prompt, format, title, session, agent, deadline).await;
         return;
     }
 
@@ -379,8 +394,10 @@ async fn run_once(
     ) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Failed to create LLM provider: {}", e);
-            std::process::exit(1);
+            exit_run_error(
+                format!("Failed to create LLM provider: {e}"),
+                format == OutputFormat::Json,
+            );
         }
     };
 
@@ -388,13 +405,18 @@ async fn run_once(
     let compression_pipeline = match build_compression_pipeline(&config, &llm_provider) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("Failed to build compression pipeline: {}", e);
-            std::process::exit(1);
+            exit_run_error(
+                format!("Failed to build compression pipeline: {e}"),
+                format == OutputFormat::Json,
+            );
         }
     };
 
     // 3. Session runtime config
-    let total_budget = resolve_effective_context_window(&config, &llm_provider).await;
+    let total_budget = deadline
+        .run(resolve_effective_context_window(&config, &llm_provider))
+        .await
+        .unwrap_or_else(|error| exit_run_error(error, format == OutputFormat::Json));
     let reserved_for_output = total_budget / 10;
     let reserved_for_system = total_budget / 20;
 
@@ -482,22 +504,25 @@ async fn run_once(
     // 4. Bindings (CliEventSink for debug output)
     let loop_event_sink: Option<Arc<dyn LoopEventSink>> =
         debug.then(|| Arc::new(CliEventSink::new()) as Arc<dyn LoopEventSink>);
+    let cancel = CancellationToken::new();
     let bindings = SessionRuntimeBindings {
         loop_event_sink,
         tool_event_sink: None,
         interaction_handle: None,
         channel_file_sender: None,
         pending_user_messages: None,
-        cancel_token: None,
+        cancel_token: Some(cancel.clone()),
     };
 
     // 5. Bootstrap gateway
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
-    let memory_automation = match McpMemoryAutomation::connect(
-        config.memory_automation.clone(),
-        &config.mcp_servers,
-    )
-    .await
+    let memory_automation = match deadline
+        .run(McpMemoryAutomation::connect(
+            config.memory_automation.clone(),
+            &config.mcp_servers,
+        ))
+        .await
+        .unwrap_or_else(|error| exit_run_error(error, format == OutputFormat::Json))
     {
         Ok(automation) => automation,
         Err(error) => {
@@ -533,8 +558,7 @@ async fn run_once(
                     Err(_) => eprintln!("[warn] MCP memory automation close timed out after 5 seconds"),
                 }
             }
-            eprintln!("Failed to bootstrap session: {}", e);
-            std::process::exit(1);
+            exit_run_error(format!("Failed to bootstrap session: {e}"), format == OutputFormat::Json);
         }
     };
 
@@ -592,27 +616,16 @@ async fn run_once(
 
     // 7. Run turn via gateway session service, then explicitly close the
     // session so SessionClosed lifecycle hookers fire in CLI mode as well.
-    let turn_result = deps.session_service.run_turn(request).await;
-    if let Err(err) = deps
-        .session_control_plane
-        .force_close_session(&session_id)
-        .await
-    {
-        if format == OutputFormat::Json {
-            println!(
-                "{}",
-                serde_json::to_string(&serde_json::json!({
-                    "type": "error",
-                    "data": {
-                        "message": format!("failed to close session: {}", err)
-                    }
-                }))
-                .unwrap()
-            );
-            let _ = std::io::stdout().flush();
-        } else {
-            eprintln!("[warn] failed to close session: {}", err);
-        }
+    let turn_result = run_local_turn(
+        deadline,
+        deps.session_service.as_ref(),
+        deps.session_control_plane.as_ref(),
+        request,
+        &cancel,
+    )
+    .await;
+    if let Some(reaper) = deps.reaper_handle {
+        reaper.abort();
     }
     if let Some(automation) = memory_automation_for_shutdown {
         match tokio::time::timeout(std::time::Duration::from_secs(5), automation.close()).await {
@@ -641,25 +654,23 @@ async fn run_once(
                 println!("{}", result.raw_reply);
             }
         }
-        Err(e) => {
-            if format == OutputFormat::Json {
-                println!(
-                    "{}",
-                    serde_json::to_string(&serde_json::json!({
-                        "type": "error",
-                        "data": {
-                            "message": e.to_string()
-                        }
-                    }))
-                    .unwrap()
-                );
-                let _ = std::io::stdout().flush();
-            } else {
-                eprintln!("[error] {}", e);
-            }
-            std::process::exit(1);
-        }
+        Err(error) => exit_run_error(error, format == OutputFormat::Json),
     }
+}
+
+/// process::exit skips Drop; explicitly reap CLI-owned process groups first.
+pub(super) fn exit_run_error(message: String, is_json: bool) -> ! {
+    if is_json {
+        println!(
+            "{}",
+            serde_json::json!({"type": "error", "data": {"message": message}})
+        );
+        let _ = std::io::stdout().flush();
+    } else {
+        eprintln!("[error] {message}");
+    }
+    drop(ProcessGroupCleanupGuard);
+    std::process::exit(1);
 }
 
 fn generate_title_from_prompt(prompt: &str) -> Option<String> {

@@ -309,17 +309,14 @@ async fn interrupted(kind: &str, name: &str, userinfo: bool, echo_headers: bool)
     if kind != "openai" && kind != "zhipu" {
         assert_eq!(logged_url.path(), endpoint_path);
     } else {
-        assert!(log.contains(endpoint_path));
+        // Transport errors no longer trigger endpoint probing.
+        assert_eq!(server.paths.lock().unwrap().len(), 1);
     }
     assert_eq!(
         log.matches("source=llm_stream_error").count(),
         server.paths.lock().unwrap().len()
     );
-    if kind == "openai" || kind == "zhipu" {
-        assert!(matches!(error, LlmError::ApiError(_)));
-    } else {
-        assert!(matches!(error, LlmError::StreamError { .. }));
-    }
+    assert!(matches!(error, LlmError::StreamError { .. }));
 }
 #[tokio::test]
 async fn gemini_interrupted_stream() {
@@ -600,7 +597,7 @@ async fn provider_connection_timeout() {
     let _lock = HOME_LOCK.lock().await;
     let home = Home::new("provider_connection_timeout");
     // A local TCP peer accepts but never completes TLS. This exercises the
-    // provider's real 30-second connect timeout without routing assumptions.
+    // provider's real 20-second timeout without routing assumptions.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let p = provider(
@@ -614,9 +611,9 @@ async fn provider_connection_timeout() {
         &format!("elapsed_ms={}\n{}", elapsed.as_millis(), full_error(&error)),
         false,
     );
-    assert!(matches!(error, LlmError::ApiError(_)));
+    assert!(matches!(error, LlmError::HttpError(_)));
     assert!(error.to_string().contains("Request timeout"));
-    assert!(elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(40));
+    assert!(elapsed >= Duration::from_secs(19) && elapsed < Duration::from_secs(30));
 }
 
 fn success_body(kind: &str, stream: bool) -> String {

@@ -167,3 +167,22 @@ async fn sse_subagent_lifecycle_events_reach_channel_in_order() {
         } if agent_id == "child-1" && stop_reason == "end_turn"
     ));
 }
+
+#[test]
+fn retry_reset_emits_empty_snapshot_for_remote_clients() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sink = SseLoopEventSink::new(tx);
+    let agent = AgentId("test".into());
+    sink.on_assistant_message(&agent, "old partial");
+    sink.on_assistant_message(&agent, "");
+    let _ = rx.try_recv().unwrap();
+    assert!(
+        matches!(rx.try_recv().unwrap(), SseStreamEvent::TextDelta { delta, snapshot, .. }
+        if delta.is_empty() && snapshot.is_empty())
+    );
+    sink.on_assistant_message(&agent, "new");
+    assert!(
+        matches!(rx.try_recv().unwrap(), SseStreamEvent::TextDelta { delta, snapshot, .. }
+        if delta == "new" && snapshot == "new")
+    );
+}

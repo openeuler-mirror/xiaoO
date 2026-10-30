@@ -69,6 +69,7 @@ fn stream_chunk_bench() {
             let reasoning_offset = (i * 11) % (chunk_base.len() - 40);
             let reasoning = &chunk_base[reasoning_offset..reasoning_offset + 40];
             StreamChunk {
+                reset: false,
                 delta_text: Some(text.to_string()),
                 delta_reasoning: Some(reasoning.to_string()),
                 delta_tool_call: None,
@@ -215,11 +216,13 @@ fn stream_secret_split_across_text_chunk_boundary_does_not_leak() {
 
     let chunks = [
         StreamChunk {
+            reset: false,
             delta_text: Some("Some padding text before Hello pass".to_string()),
             delta_reasoning: None,
             delta_tool_call: None,
         },
         StreamChunk {
+            reset: false,
             delta_text: Some("word123 plus some trailing padding!!".to_string()),
             delta_reasoning: None,
             delta_tool_call: None,
@@ -253,11 +256,13 @@ fn stream_secret_split_across_reasoning_chunk_boundary_does_not_leak() {
 
     let chunks = [
         StreamChunk {
+            reset: false,
             delta_text: None,
             delta_reasoning: Some("Some padding text before Thinking pass".to_string()),
             delta_tool_call: None,
         },
         StreamChunk {
+            reset: false,
             delta_text: None,
             delta_reasoning: Some("word123 plus some trailing padding!!".to_string()),
             delta_tool_call: None,
@@ -290,4 +295,23 @@ fn feature_flags_default_redacts_secrets_for_daemon() {
         FeatureFlags::default().redact_secrets_display,
         "FeatureFlags::default() must redact secrets (daemon inherits this)"
     );
+}
+
+#[test]
+fn stream_retry_reset_discards_failed_attempt_content() {
+    let stream = AssistantStreamState::default();
+    let agent = AgentId("test".into());
+    stream_assistant_chunk(None, &agent, &stream, StreamChunk {
+        reset: false, delta_text: Some("failed partial".into()),
+        delta_reasoning: Some("failed reasoning".into()), delta_tool_call: None,
+    }, &[]);
+    stream_assistant_chunk(None, &agent, &stream, StreamChunk {
+        reset: true, delta_text: None, delta_reasoning: None, delta_tool_call: None,
+    }, &[]);
+    assert!(stream.text.lock().unwrap().is_empty());
+    assert!(stream.reasoning.lock().unwrap().is_empty());
+    stream_assistant_chunk(None, &agent, &stream, StreamChunk {
+        reset: false, delta_text: Some("new answer".into()), delta_reasoning: None, delta_tool_call: None,
+    }, &[]);
+    assert_eq!(*stream.text.lock().unwrap(), "new answer");
 }

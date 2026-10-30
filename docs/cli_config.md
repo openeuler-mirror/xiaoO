@@ -342,3 +342,43 @@ xiaoo --cli run --debug -p "List all Python files in the project"
 - **TUI Configuration**: [tui_config.md](./tui_config.md)
 - **Daemon Configuration**: [daemon_config.md](./daemon_config.md)
 - **Quick Start**: [README.md](../README.md)
+
+## LLM request timeout and retries
+
+Streaming and non-streaming LLM calls share one retry policy: an initial attempt
+plus at most **5 retries**, each limited to **20 seconds** for the entire request
+(connection, headers and full response body). Continuous streaming does not
+extend the per-attempt limit. A logical call has at most 6 attempts and a
+120-second request budget, excluding hooks and tools. There is no additional
+backoff or Retry-After sleep, and Provider/Agent layers do not stack retries.
+Transient transport, stream, rate-limit and recoverable server errors are retried;
+authentication/configuration errors and cancellation are not.
+
+Exhaustion ends the current turn, even if an error hook offers recovery. TUI
+shows the error and waits for new user input. CLI closes the session and exits
+nonzero. Stream retries discard partial text/reasoning from failed attempts.
+
+## CLI task deadline
+
+`xiaoo --cli run` defaults to an overall deadline of **600 seconds**. Use
+`--timeout <positive integer>` to change it for local or attach mode:
+
+```bash
+xiaoo --cli run --timeout 300 -p "Review the repository"
+xiaoo --cli run --attach http://127.0.0.1:4096 --timeout 900 -p "Run the checks"
+```
+
+The same deadline covers asynchronous startup, all LLM requests and retries,
+tool execution, and all agent turns. It does not reset when a new phase starts
+or a stream produces output. It is independent of the LLM request timeout.
+
+On expiry, local CLI cancels the turn, terminates CLI-owned process groups
+(including running shell tools), and closes the session. Attach mode sends cancel
+and close RPCs; a failed cancel does not skip close. The CLI exits nonzero with
+a deadline error (an `error` event in JSON mode).
+
+Session shutdown has a separate 30-second cleanup limit; attach cancellation
+allows up to 5 seconds, and local MCP shutdown allows up to 5 seconds. Cleanup
+may therefore extend process lifetime beyond the task deadline. Shutdown errors
+are reported explicitly, including when an unreachable daemon prevents confirming
+that its session closed. CLI-owned process groups are reaped before error exit.

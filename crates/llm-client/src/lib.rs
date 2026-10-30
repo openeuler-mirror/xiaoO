@@ -8,6 +8,7 @@ pub mod resolver;
 
 pub(crate) mod convert;
 mod providers;
+mod request_policy;
 pub(crate) mod url_fallback;
 pub(crate) mod wire_types;
 

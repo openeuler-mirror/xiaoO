@@ -363,7 +363,7 @@ async fn cached_retry(key: &str, status: usize, body: &str, name: &str, trace_ch
         .with_status(status)
         .with_header("content-type", "application/json")
         .with_body(body)
-        .expect(4)
+        .expect(1)
         .create_async()
         .await;
     let error = call(&p, false).await.unwrap_err();
@@ -371,8 +371,7 @@ async fn cached_retry(key: &str, status: usize, body: &str, name: &str, trace_ch
     home.record(&format!("{}\nTRACING:\n{trace}", full_error(&error)), false);
     failure.assert_async().await;
     if trace_check {
-        assert!(trace.contains("Retrying cached URL"));
-        assert!(trace.contains("All 3 retry attempts failed"));
+        assert!(!trace.contains("Retrying cached URL"));
     }
 }
 #[tokio::test]
