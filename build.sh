@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# AgentMoss 探测共享定义（端口窗口与 instance 归属过滤），下方安装分支
+# 的 console URL 探测与 install.sh 共用同一份逻辑，防止两边漂移。
+source "${SCRIPT_DIR}/plugins/hookers/agent_moss/probe.sh"
+
 # Check if called from project root.
 # `$SCRIPT_DIR/Cargo.toml` is the script's OWN directory and always exists, so it
 # could never catch the case this guard is for. What matters is the working
@@ -141,19 +145,14 @@ if [ "$INSTALL_AUDIT" = true ]; then
         echo ""
         echo "✅ agent_moss installed & service running."
         echo ""
-        # Probe the actual port dynamically (same logic as install.sh step 5):
-        # agent-moss server --port 0 makes findFreePort scan upward from 9090,
-        # so co-located instances may land on 9091+. Only services that are
-        # healthy AND instance==xiaoo count, so we never drift to another
-        # agent's agentmoss on the same host.
+        # 动态探测实际端口：agent-moss --port 0 从 9090 向上找空闲端口，
+        # 共存实例可能落在 9091+。归属过滤语义与端口窗口见 probe.sh，
+        # 与 install.sh 步骤 5 共用 find_instance_port。
         AM_CONSOLE_URL="http://127.0.0.1:9090/console"  # 探测失败兜底
-        for port in 9090 9091 9092 9093 9094 9095; do
-            if curl -sf -m 1 "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null \
-                | grep -q '"instance":"xiaoo"'; then
-                AM_CONSOLE_URL="http://127.0.0.1:${port}/console"
-                break
-            fi
-        done
+        AM_PROBED_PORT="$(find_instance_port || true)"
+        if [ -n "$AM_PROBED_PORT" ]; then
+            AM_CONSOLE_URL="http://127.0.0.1:${AM_PROBED_PORT}/console"
+        fi
         echo "   Policy Console: ${AM_CONSOLE_URL}"
         if [ "${ENABLE_LLM_ENV:-}" = "0" ]; then
             echo "   LLM 分析 (L3): 已禁用"
@@ -168,6 +167,10 @@ if [ "$INSTALL_AUDIT" = true ]; then
         echo ""
         echo "❌ agent_moss plugin registration failed."
         echo ""
+        # 非零退出兑现文件头注释的承诺（abort the build if starting fails）；
+        # cargo build 本身已成功，但用户选了 Y 就意味着"服务必须起来"，
+        # 吞掉退出码会让 CI/调用方误判整体成功
+        exit "$REGISTER_EXIT_CODE"
     fi
 else
     # Print final security notice after build

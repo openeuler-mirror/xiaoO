@@ -8,12 +8,8 @@
 
 Open-source intelligence hub for AgentOS.
 
-[![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-
-## Community
-
-To improve the efficiency of developing and maintaining xiaoO, you can apply to join the "xiaoO Enthusiasts Group" by adding WeChat: xj756386857 (remark: xiaoO enthusiast + atomgit_id).
+[![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License/LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
 ## What is xiaoO?
 
@@ -26,25 +22,27 @@ The runtime also includes a layered memory and adaptive context-compression syst
 ## Key Features
 
 - Agent runtime hub: CLI, TUI, daemon, HTTP API, and channel integrations.
-- Full tool suite: file operations, shell execution, Git, web search/browse, patch application, sub-agents, and extensible tool manifests.
+- Full tool suite: file operations, shell execution, code search (glob/grep), web search/browse, sub-agents, and MCP / custom TOML tool manifests.
 - Adaptive context management: token-budget tracking, configured compaction, forced recovery after context-limit errors, and prefix-cache telemetry.
 - Streaming reasoning: provider reasoning/thinking deltas can be surfaced while the model works.
 - Reasoning-effort tiers: switch among `off`, `high`, and `max`; the TUI cycles them with `Ctrl+T`.
 - Session management: save and resume long-running work.
 - LSP diagnostics: inline errors and warnings after edits through servers such as `rust-analyzer`, `pyright`, `typescript-language-server`, `gopls`, and `clangd`.
 - Skills system: installable instruction packs loaded from local directories or Git sources.
-- Hook and plugin system: lifecycle hook points around agent creation, LLM calls, and tool calls, plus session lifecycle stages (`SessionCreated`, `SessionClosed`, `SessionState`) and chat-message transforms, for audit, policy, traceability, and custom extensions.
+- Hook and plugin system: hook points around LLM calls, tool calls, slash-command execution, and chat-message/system-prompt transforms, plus session lifecycle stages (`SessionCreated`, `SessionClosed`, `SessionState`), for audit, policy, traceability, and custom extensions.
 - Observability: live token/cost tracking and trace storage through `noop`, `stdout`, or `moirai-sqlite`.
 - Scheduled and triggered tasks: long-running automation workflows can be attached to the runtime.
 - Localized UI: a clean terminal interface designed for daily agent work.
 
 ## Prerequisites
 
-- Rust toolchain with Cargo installed.
+- Rust toolchain 1.88 or newer, with Cargo installed (the lockfile pins `icu_normalizer`, `clap`, and other crates that require rustc >= 1.88).
 - A supported LLM provider account or a local model endpoint.
 - Provider credentials available through environment variables or the xiaoO configuration file.
 
-## Installation From Source
+## Installation
+
+### From Source
 
 ```bash
 git clone https://atomgit.com/openeuler/xiaoO.git
@@ -52,7 +50,7 @@ cd xiaoO
 cargo install --path apps/endside
 ```
 
-This installs the application binaries into `~/.cargo/bin` and attempts to install builtin skills. Make sure `~/.cargo/bin` is in your `PATH`.
+This installs the `xiaoo` binary into `~/.cargo/bin` and attempts to install builtin skills. Make sure `~/.cargo/bin` is in your `PATH`.
 
 > **Note**: `cargo build` does NOT install skills. Only `cargo install` triggers skill installation.
 >
@@ -65,56 +63,26 @@ This installs the application binaries into `~/.cargo/bin` and attempts to insta
 > **For system-wide installation** (recommended for multi-user environments):
 > - Run `cargo install` with root privileges: `sudo cargo install --path apps/endside`
 
-### Uninstallation
-
-```bash
-# Uninstall binaries
-cargo uninstall xiaoo-endside
-
-# Remove the guardian skill (system level requires root)
-sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
-```
-
-### Skill Directory Priority (Four Levels - Runtime Search Only)
-
-Skills are searched at runtime across four directory levels (highest to lowest priority):
-
-1. **Project level**: `./.xiaoo/skills/`
-2. **Config level**: directories specified in `[skills].dirs`
-3. **User level**: `~/.xiaoo/skills/`
-4. **System level**: `/usr/lib/.xiaoo/skills/` (built-in skills only)
-
-See [docs/skill_usage.md](./docs/skill_usage.md) for details.
-
 ### Build
 
 ```bash
 ./build.sh --release
 ```
 
-The build wrapper can install the `agent_moss` hooker, a thin bridge that audits tool execution for risky operations via the resident AgentMoss HTTP service. Plugin installation details are available in [docs/plugins.md](./docs/plugins.md).
+The build wrapper can install the `agent_moss` hooker, a security-audit plugin for tool execution. Once enabled, xiaoO sends every tool operation to the resident AgentMoss service on the same host for security analysis before executing it, and intercepts the execution when a dangerous operation is detected. See [docs/plugins.md](./docs/plugins.md) for plugin installation and usage.
 
-### Docker
-
-The image contains `xiaoo`, `xiaoo-daemon`, and `moirai`, and ships **no**
-`config.toml` — mount your own at run time:
+### Uninstallation
 
 ```bash
-docker build -t xiaoo:latest .
-docker run --rm -d -p 18080:18080 \
-  -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
-  -e OPENROUTER_API_KEY=sk-or-... \
-  -e XIAOO_HTTP_BEARER_TOKEN=change-me \
-  xiaoo:latest
-```
+# Uninstall binaries
+cargo uninstall xiaoo-endside
 
-The container starts `xiaoo-daemon` bound to `0.0.0.0`, so the mounted config
-must set a bearer token (`[http].bearer_token` or `bearer_token_env`) and
-provide the configured API key environment variable — otherwise the daemon
-refuses to start. Pass `xiaoo` for the TUI (`docker run -it xiaoo:latest
-xiaoo`) or `xiaoo --cli run -p "..."` for one-shot CLI; expose the read-only
-dashboard with `--dashboard-host 0.0.0.0 -p 28081:28081`.
-See [docs/docker_deploy.md](./docs/docker_deploy.md) for full instructions.
+# Remove builtin skills (system level requires root)
+sudo rm -rf /usr/lib/.xiaoo/skills
+
+# Or the user-level copies created by the fallback path
+rm -rf ~/.xiaoo/skills/{xiaoo-guardian,block-analyzer,security-rules-tester}
+```
 
 ## Quick Start
 
@@ -125,29 +93,17 @@ Create `~/.config/xiaoo/config.toml`:
 provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"   # Read the API key from this environment variable
-max_tokens = 128000                  # Optional, max output tokens per response (TUI/Daemon only; CLI ignores this field)
 reasoning_effort = "off"             # Optional: off, high, or max (TUI only; CLI uses --reasoning-effort; Daemon uses HTTP API field)
 
 # Predefined subagent roles (CLI/TUI/Daemon all support) ⭐
-# Note: tools configuration supports two formats - see docs/config_file_guide.md
+# More role options: docs/config_file_guide.md
 [subagent.code_reviewer]
 description = "Code review specialist"
 prompt = "You are a code review specialist focusing on quality and best practices."
 max_turns = 5
-
-[subagent.code_reviewer.tools]
-bash = true
-file_read = true
-glob = true
-grep = true
 ```
 
-> **Known gap:** `[subagent.<role>.tools]` is currently parsed and accepted, but **not enforced**
-> for subagent roles — the role's tool allowlist is ignored at spawn time
-> (`crates/tool/src/impl/builtin/spawn_subagent/executor.rs` reads only `prompt` and
-> `description`; `apps/shared/src/gateway/session_supervisor.rs` applies only `prompt`,
-> `max_turns`, and `description`). Use real builtin tool names such as `file_read`, `file_write`,
-> `bash`, `glob`, or `grep`; unknown names are silently dropped without a validation warning.
+Optionally, configure trace storage:
 
 ```toml
 [trace]
@@ -199,54 +155,35 @@ Example CLI output:
 > - [TUI Configuration](docs/tui_config.md) - TUI-specific configuration (remote, LSP, agent roles)
 > - [Daemon Configuration](docs/daemon_config.md) - Daemon-specific configuration (channels, HTTP API)
 
-## Context Window
+## Docker
 
-The effective context window is resolved dynamically. xiaoO resolves the effective value in this order:
-
-1. Dynamic model lookup against the provider's model catalog (`/models` or equivalent). Available for any provider whose profile has `supports_model_catalog = true`, including `openai`, `anthropic`, `gemini`, `ollama`, `zai`/`zhipu`, `deepseek`, `openrouter`, `kimi`, `kimi-coding-plan`, `minimax-coding-plan`, `zai-coding-plan`, `local`, and `other`. Providers marked `supports_model_catalog = false` (e.g. `minimax`, `minimax-anthropic`, `gitcode`) skip this step.
-2. Local fallback defaults keyed off the provider's protocol family:
-   - OpenAI-compatible, Ollama, and Zhipu families default to `128000`
-   - Anthropic defaults to `200000`
-   - Gemini defaults to `1000000`
-
-More details are available in [Memory & Context Compression](./docs/memory_context_system.md).
-
-## Reasoning Effort
-
-`[llm].reasoning_effort` controls provider-side thinking or reasoning where supported.
-
-| Value | Meaning | TUI color |
-| --- | --- | --- |
-| `off` | Disable extra reasoning controls where supported | Gray |
-| `high` | Use a stronger reasoning/thinking setting | Yellow |
-| `max` | Use the strongest reasoning/thinking setting | Red |
-
-The TUI status bar shows the current value as `Think off/high/max`. Press `Ctrl+T` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use:
+The image contains `xiaoo`, `xiaoo-daemon`, and `moirai`, and ships **no**
+`config.toml` — mount your own at run time:
 
 ```bash
-xiaoo --cli run --reasoning-effort high -p "Explain this repository"
+docker build -t xiaoo:latest .
+docker run --rm -d -p 18080:18080 \
+  -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
+  -e OPENROUTER_API_KEY=sk-or-... \
+  -e XIAOO_HTTP_BEARER_TOKEN=change-me \
+  xiaoo:latest
 ```
 
-Provider mapping is best-effort. OpenAI-compatible providers receive `reasoning_effort` for `high` and `max`; Anthropic receives `thinking.budget_tokens`; Gemini receives `thinkingConfig.thinkingBudget`; unsupported providers ignore the setting. `off` omits provider-specific reasoning fields so default requests keep each provider's native behavior.
-
-## Skills
-
-xiaoO loads skills from `~/.xiaoo/skills` by default. Each skill is a reusable instruction pack backed by `SKILL.md` or `SKILL.toml`.
-
-```bash
-xiaoo --cli skill list
-xiaoo --cli skill show <name>
-xiaoo --cli skill audit <path>
-xiaoo --cli skill install ./my-skill/
-xiaoo --cli skill install https://github.com/user/my-skill.git
-xiaoo --cli skill remove <name>
-```
-
-See [docs/skill_usage.md](./docs/skill_usage.md) for the full skill workflow.
+The container starts `xiaoo-daemon` bound to `0.0.0.0`, so the mounted config
+must set a bearer token (`[http].bearer_token` or `bearer_token_env`) and
+provide the configured API key environment variable — otherwise the daemon
+refuses to start. Pass `xiaoo` for the TUI (`docker run -it xiaoo:latest
+xiaoo`) or `xiaoo --cli run -p "..."` for one-shot CLI; expose the read-only
+dashboard with `--dashboard-host 0.0.0.0 -p 28081:28081`.
+See [docs/docker_deploy.md](./docs/docker_deploy.md) for full instructions.
 
 ## Run as a Daemon
 
-xiaoO can run as a daemon and expose a REST API for external systems such as Feishu, Telegram, or custom services.
+xiaoO can run as a daemon and expose a REST API for external systems such as Feishu, Telegram, or custom services. The daemon is a separate binary, installed from the same repository:
+
+```bash
+cargo install --path apps/serverside
+```
 
 ```bash
 # Default address: 127.0.0.1:18080 (loopback only)
@@ -272,10 +209,12 @@ HTTP requests can select an agent role preset by passing `runtime_profile_id` in
 
 ```json
 {
+  "runtime_id": "demo-runtime",
   "text": "Review this patch for security issues",
   "channel": "http",
   "sender_id": "demo-user",
   "conversation_id": "demo-conv",
+  "mentions": [],
   "entry": {
     "kind": "http_api",
     "runtime_profile_id": "code-reviewer"
@@ -284,6 +223,26 @@ HTTP requests can select an agent role preset by passing `runtime_profile_id` in
 ```
 
 More daemon configuration details are in [docs/daemon_config.md](./docs/daemon_config.md).
+
+## Skills
+
+Each skill is a reusable instruction pack backed by `SKILL.md` or `SKILL.toml`. Skills are searched at runtime across four directory levels, highest to lowest priority:
+
+1. **Project level**: `./.xiaoo/skills/`
+2. **Config level**: directories specified in `[skills].dirs`
+3. **User level**: `~/.xiaoo/skills/` (default install location)
+4. **System level**: `/usr/lib/.xiaoo/skills/` (built-in skills only)
+
+```bash
+xiaoo --cli skill list
+xiaoo --cli skill show <name>
+xiaoo --cli skill audit <path>
+xiaoo --cli skill install ./my-skill/
+xiaoo --cli skill install https://github.com/user/my-skill.git
+xiaoo --cli skill remove <name>
+```
+
+See [docs/skill_usage.md](./docs/skill_usage.md) for the full skill workflow.
 
 ## Testing
 
@@ -299,27 +258,39 @@ bash tests/run.sh -p xiaoo-core   # extra args are passed through to cargo test
 
 `scripts/ci.sh` is the unified CI entry for static gates: facade discipline, test hygiene (keeps test code out of `src/`), doc link checks, code formatting (`cargo fmt --check`), and Dockerfile COPY coverage; it does not compile. Layout and naming conventions are documented in [tests/README.md](./tests/README.md).
 
-## More Documentation
+## Documentation
+
+**Guides**
+
+- [Skill Usage](./docs/skill_usage.md)
+- [Plugin System](./docs/plugins.md)
+- [MCP Integration](./docs/mcp.md)
+- [Custom Tools](./docs/custom_tools.md)
+- [Custom Agents](./docs/custom_agent.md)
+- [Scheduled Jobs (Cron)](./docs/cron_scheduled_jobs.md)
+- [Remote TUI](./docs/remote_tui.md)
+- [E2B Workspace & Skills Bootstrap](./docs/e2b_workspace_skills_bootstrap.md)
+
+**Deployment**
+
+- [Docker Deployment](./docs/docker_deploy.md)
+- [Feishu Deployment](./docs/feishu_deploy.md)
+- [Telegram Deployment](./docs/telegram_deploy.md)
+
+**Architecture & Design**
 
 - [Architecture Overview](./docs/architecture_overview.md) — apps, workspace crates, binaries, and runtime layering
 - [Memory & Context Compression](./docs/memory_context_system.md)
 - [Runtime Checkpoint Control](./docs/runtime_checkpoint.md)
-- [Runtime SDK Architecture](./docs/xiaoo_api_pure_runtime_refactor.md)
-- [Plugin System](./docs/plugins.md)
-- [Skill Usage](./docs/skill_usage.md)
-- [MCP Integration](./docs/mcp.md)
-- [Custom Tools](./docs/custom_tools.md)
-- [Scheduled Jobs (Cron)](./docs/cron_scheduled_jobs.md)
-- [E2B Workspace & Skills Bootstrap](./docs/e2b_workspace_skills_bootstrap.md)
-- [Custom Agents](./docs/custom_agent.md)
-- [Remote TUI](./docs/remote_tui.md)
-- [Feishu Deployment](./docs/feishu_deploy.md)
-- [Telegram Deployment](./docs/telegram_deploy.md)
-- [Docker Deployment](./docs/docker_deploy.md)
+- [Runtime SDK Refactor (Landed)](./docs/xiaoo_api_pure_runtime_refactor.md)
 - [Vault Secrets Design](./docs/vault_secrets_design.md)
 - [KV Cache Coordination Design](./docs/kvcache-coordination-design.md)
 - [Super Gateway Control Plane Design](./docs/super_gateway_control_plane_design.md)
 
+## Community
+
+To improve the efficiency of developing and maintaining xiaoO, you can apply to join the "xiaoO Enthusiasts Group" by adding WeChat: xj756386857 (remark: xiaoO enthusiast + atomgit_id).
+
 ## License
 
-xiaoO is licensed under [MulanPSL-2.0](./License).
+xiaoO is licensed under [MulanPSL-2.0](./License/LICENSE).

@@ -8,12 +8,8 @@
 
 AgentOS 的开源智能中枢。
 
-[![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-
-## 社区交流
-
-为提升 xiaoO 开发及维护效率，可以申请加入"xiaoO爱好者交流群"，添加微信: xj756386857 (备注：xiaoO爱好者+atomgit_id)。
+[![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License/LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
 ## xiaoO 是什么？
 
@@ -26,25 +22,27 @@ xiaoO 的运行时还内置了分层记忆和自适应上下文压缩系统，�
 ## 核心特性
 
 - Agent 运行时中枢：支持 CLI、TUI、Daemon、HTTP API 和渠道集成。
-- 完整工具能力：文件操作、Shell 执行、Git、Web 搜索/浏览、补丁应用、子 Agent 和可扩展工具清单。
+- 完整工具能力：文件操作、Shell 执行、代码搜索（glob/grep）、Web 搜索/浏览、子 Agent，以及 MCP 与自定义 TOML 工具清单。
 - 自适应上下文管理：Token 预算跟踪、配置化压缩、上下文超限后的强制恢复和 prefix-cache 遥测。
 - 流式推理展示：在模型工作时展示 provider 返回的 reasoning/thinking 增量。
 - 推理强度分级：支持 `off`、`high`、`max`；TUI 中可用 `Ctrl+T` 循环切换。
 - 会话管理：支持保存和恢复长时间运行的任务。
 - LSP 诊断：编辑后通过 `rust-analyzer`、`pyright`、`typescript-language-server`、`gopls`、`clangd` 等服务展示错误和警告。
 - Skills 技能系统：从本地目录或 Git 来源安装可复用的指令包。
-- Hook 与插件系统：在 Agent 创建、LLM 调用前后、工具调用前后提供扩展点，同时支持会话生命周期阶段（`SessionCreated`、`SessionClosed`、`SessionState`）和 Chat 消息转换，可用于审计、策略、追踪和自定义扩展。
+- Hook 与插件系统：在 LLM 调用前后、工具调用前后、斜杠命令执行前提供扩展点，同时支持 Chat 消息/系统提示转换和会话生命周期阶段（`SessionCreated`、`SessionClosed`、`SessionState`），可用于审计、策略、追踪和自定义扩展。
 - 可观测性：支持实时 token/cost 统计，并通过 `noop`、`stdout` 或 `moirai-sqlite` 存储 trace。
 - 定时和触发式任务：支持接入长期运行的自动化工作流。
 - 本地化 UI：提供适合日常 Agent 工作的终端界面。
 
 ## 前置要求
 
-- 已安装 Rust 工具链和 Cargo。
+- 已安装 Rust 1.88 或更新版本的工具链和 Cargo（依赖锁定文件中的 `icu_normalizer`、`clap` 等要求 rustc >= 1.88）。
 - 可用的 LLM provider 账号，或本地模型端点。
 - 通过环境变量或 xiaoO 配置文件提供 provider 凭证。
 
-## 从源码安装
+## 安装
+
+### 从源码安装
 
 ```bash
 git clone https://atomgit.com/openeuler/xiaoO.git
@@ -52,7 +50,7 @@ cd xiaoO
 cargo install --path apps/endside
 ```
 
-安装后应用二进制会位于 `~/.cargo/bin`，并尝试安装内置技能。请确认 `~/.cargo/bin` 已加入 `PATH`。
+安装后 `xiaoo` 二进制会位于 `~/.cargo/bin`，并尝试安装内置技能。请确认 `~/.cargo/bin` 已加入 `PATH`。
 
 > **注意**：`cargo build` 不会安装技能，只有 `cargo install` 会触发技能安装。
 >
@@ -65,55 +63,26 @@ cargo install --path apps/endside
 > **系统级安装**（推荐用于多用户环境）：
 > - 使用 root 权限运行 `cargo install`：`sudo cargo install --path apps/endside`
 
-### 卸载
-
-```bash
-# 卸载二进制文件
-cargo uninstall xiaoo-endside
-
-# 删除系统级 guardian 技能（需要 root 权限）
-sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
-```
-
-### 技能目录优先级（四层 - 仅运行时搜索）
-
-技能在运行时按四个目录层级搜索（优先级从高到低）：
-
-1. **项目级**：`./.xiaoo/skills/`
-2. **配置级**：`[skills].dirs` 中指定的目录
-3. **用户级**：`~/.xiaoo/skills/`
-4. **系统级**：`/usr/lib/.xiaoo/skills/`（仅内置技能）
-
-详见 [docs/skill_usage.md](./docs/skill_usage.md)。
-
 ### 构建
 
 ```bash
 ./build.sh --release
 ```
 
-该构建脚本可以安装 `agent_moss` hooker（瘦 bridge 插件，转发到常驻 AgentMoss HTTP 服务审计工具执行中的高风险操作）。插件安装与使用请参考 [docs/plugins.md](./docs/plugins.md)。
+该构建脚本可以安装 `agent_moss` hooker（工具执行的安全审计插件。启用后，xiaoO 在每次执行工具之前，会先把该操作发给本机常驻的 AgentMoss 服务做安全分析，命中危险操作则拦截执行）。插件安装与使用请参考 [docs/plugins.md](./docs/plugins.md)。
 
-### Docker
-
-构建完成的镜像包含 `xiaoo`、`xiaoo-daemon` 和 `moirai`。镜像**不内置**
-`config.toml`，运行时挂载你自己的配置文件：
+### 卸载
 
 ```bash
-docker build -t xiaoo:latest .
-docker run --rm -d -p 18080:18080 \
-  -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
-  -e OPENROUTER_API_KEY=sk-or-... \
-  -e XIAOO_HTTP_BEARER_TOKEN=change-me \
-  xiaoo:latest
-```
+# 卸载二进制文件
+cargo uninstall xiaoo-endside
 
-容器默认以 `--host 0.0.0.0` 启动 `xiaoo-daemon`，因此挂载的配置**必须**设置
-bearer token（`[http].bearer_token` 或 `bearer_token_env`），且需提供配置引用的
-API key 环境变量，否则 daemon 拒绝启动。传入 `xiaoo` 进入 TUI
-（`docker run -it xiaoo:latest xiaoo`），或 `xiaoo --cli run -p "..."` 进行一次性
-CLI 调用；只读 dashboard 需 `--dashboard-host 0.0.0.0 -p 28081:28081` 暴露。
-完整说明见 [docs/docker_deploy.md](./docs/docker_deploy.md)。
+# 删除内置技能（系统级需要 root 权限）
+sudo rm -rf /usr/lib/.xiaoo/skills
+
+# 或删除回退安装到用户级的副本
+rm -rf ~/.xiaoo/skills/{xiaoo-guardian,block-analyzer,security-rules-tester}
+```
 
 ## 快速开始
 
@@ -124,28 +93,17 @@ CLI 调用；只读 dashboard 需 `--dashboard-host 0.0.0.0 -p 28081:28081` 暴�
 provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"   # 从这个环境变量读取 API 密钥
-max_tokens = 128000                  # 可选，每次响应的最大输出 token 数（仅 TUI/Daemon 支持；CLI 忽略此字段）
 reasoning_effort = "off"             # 可选: off, high, 或 max（仅 TUI 支持；CLI 使用 --reasoning-effort；Daemon 使用 HTTP API 字段）
 
 # 预定义 subagent 角色（CLI/TUI/Daemon 均支持） ⭐
-# 注意：tools 配置支持两种格式，详见 docs/config_file_guide.md
+# 更多角色配置项见 docs/config_file_guide.md
 [subagent.code_reviewer]
 description = "代码审查专家"
 prompt = "你是代码审查专家，专注于代码质量和最佳实践。"
 max_turns = 5
-
-[subagent.code_reviewer.tools]
-bash = true
-file_read = true
-glob = true
-grep = true
 ```
 
-> **已知缺口：** `[subagent.<role>.tools]` 目前会被解析并接受，但对 subagent 角色**不生效**——
-> 角色级工具允许清单在 spawn 时被忽略（`crates/tool/src/impl/builtin/spawn_subagent/executor.rs`
-> 只读取 `prompt` 和 `description`；`apps/shared/src/gateway/session_supervisor.rs` 只应用
-> `prompt`、`max_turns` 和 `description`）。请使用真实的内置工具名，例如 `file_read`、
-> `file_write`、`bash`、`glob`、`grep`；未知名称会被静默丢弃，且不会给出校验警告。
+可选：配置 trace 存储：
 
 ```toml
 [trace]
@@ -193,54 +151,34 @@ CLI 输出示例：
 > - [TUI配置](docs/tui_config.md) - TUI专用配置（remote、LSP、agent角色）
 > - [Daemon配置](docs/daemon_config.md) - Daemon专用配置（channels、HTTP API）
 
-## 上下文窗口
+## Docker
 
-上下文窗口大小由运行时动态解析。xiaoO 会按以下顺序解析最终值：
-
-1. 动态模型查询：调用 provider 的模型目录接口（`/models` 或等价接口）。只要 provider profile 中 `supports_model_catalog = true` 即可，包括 `openai`、`anthropic`、`gemini`、`ollama`、`zai`/`zhipu`、`deepseek`、`openrouter`、`kimi`、`kimi-coding-plan`、`minimax-coding-plan`、`zai-coding-plan`、`local`、`other` 等；`supports_model_catalog = false` 的 provider（如 `minimax`、`minimax-anthropic`、`gitcode`）跳过此步。
-2. 本地兜底默认值（按 provider 协议族）：
-   - OpenAI-compatible、Ollama 和智谱系列默认为 `128000`
-   - Anthropic 默认为 `200000`
-   - Gemini 默认为 `1000000`
-
-更多说明请查看 [Memory & Context Compression](./docs/memory_context_system.md)。
-
-## 推理强度
-
-`[llm].reasoning_effort` 用于控制 provider 侧支持的 thinking 或 reasoning 级别。
-
-| 值 | 含义 | TUI 颜色 |
-| --- | --- | --- |
-| `off` | 在支持的 provider 中关闭额外推理控制 | 灰色 |
-| `high` | 使用更强的推理/思考设置 | 黄色 |
-| `max` | 使用最强的推理/思考设置 | 红色 |
-
-TUI 状态栏会显示当前值：`Think off/high/max`。按 `Ctrl+T` 可按 `off -> high -> max -> off` 为下一轮切换强度。CLI 模式可使用：
+构建完成的镜像包含 `xiaoo`、`xiaoo-daemon` 和 `moirai`。镜像**不内置**
+`config.toml`，运行时挂载你自己的配置文件：
 
 ```bash
-xiaoo --cli run --reasoning-effort high -p "Explain this repository"
+docker build -t xiaoo:latest .
+docker run --rm -d -p 18080:18080 \
+  -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
+  -e OPENROUTER_API_KEY=sk-or-... \
+  -e XIAOO_HTTP_BEARER_TOKEN=change-me \
+  xiaoo:latest
 ```
 
-Provider 映射采用 best-effort 策略：OpenAI-compatible provider 在 `high` 和 `max` 时接收 `reasoning_effort`；Anthropic 接收 `thinking.budget_tokens`；Gemini 接收 `thinkingConfig.thinkingBudget`；不支持该能力的 provider 会忽略此设置。`off` 会省略 provider 专用推理字段，使默认请求保留各 provider 的原生行为。
-
-## Skills 技能
-
-xiaoO 默认从 `~/.xiaoo/skills` 加载技能。每个技能都是一个由 `SKILL.md` 或 `SKILL.toml` 描述的可复用指令包。
-
-```bash
-xiaoo --cli skill list
-xiaoo --cli skill show <name>
-xiaoo --cli skill audit <path>
-xiaoo --cli skill install ./my-skill/
-xiaoo --cli skill install https://github.com/user/my-skill.git
-xiaoo --cli skill remove <name>
-```
-
-完整技能工作流请参考 [docs/skill_usage.md](./docs/skill_usage.md)。
+容器默认以 `--host 0.0.0.0` 启动 `xiaoo-daemon`，因此挂载的配置**必须**设置
+bearer token（`[http].bearer_token` 或 `bearer_token_env`），且需提供配置引用的
+API key 环境变量，否则 daemon 拒绝启动。传入 `xiaoo` 进入 TUI
+（`docker run -it xiaoo:latest xiaoo`），或 `xiaoo --cli run -p "..."` 进行一次性
+CLI 调用；只读 dashboard 需 `--dashboard-host 0.0.0.0 -p 28081:28081` 暴露。
+完整说明见 [docs/docker_deploy.md](./docs/docker_deploy.md)。
 
 ## Daemon 模式
 
-xiaoO 可以作为 daemon 运行，并为 Feishu、Telegram 或自定义服务等外部系统提供 REST API。
+xiaoO 可以作为 daemon 运行，并为 Feishu、Telegram 或自定义服务等外部系统提供 REST API。daemon 是独立的二进制，从同一仓库安装：
+
+```bash
+cargo install --path apps/serverside
+```
 
 ```bash
 # 默认监听地址：127.0.0.1:18080（仅回环）
@@ -264,10 +202,12 @@ HTTP 请求可在 JSON body 的 `entry` 对象中通过 `runtime_profile_id` 选
 
 ```json
 {
+  "runtime_id": "demo-runtime",
   "text": "Review this patch for security issues",
   "channel": "http",
   "sender_id": "demo-user",
   "conversation_id": "demo-conv",
+  "mentions": [],
   "entry": {
     "kind": "http_api",
     "runtime_profile_id": "code-reviewer"
@@ -276,6 +216,26 @@ HTTP 请求可在 JSON body 的 `entry` 对象中通过 `runtime_profile_id` 选
 ```
 
 更多 daemon 配置请参考 [docs/daemon_config.md](./docs/daemon_config.md)。
+
+## Skills 技能
+
+每个技能都是由 `SKILL.md` 或 `SKILL.toml` 描述的可复用指令包。运行时按四个目录层级搜索技能（优先级从高到低）：
+
+1. **项目级**：`./.xiaoo/skills/`
+2. **配置级**：`[skills].dirs` 中指定的目录
+3. **用户级**：`~/.xiaoo/skills/`（默认安装位置）
+4. **系统级**：`/usr/lib/.xiaoo/skills/`（仅内置技能）
+
+```bash
+xiaoo --cli skill list
+xiaoo --cli skill show <name>
+xiaoo --cli skill audit <path>
+xiaoo --cli skill install ./my-skill/
+xiaoo --cli skill install https://github.com/user/my-skill.git
+xiaoo --cli skill remove <name>
+```
+
+完整技能工作流请参考 [docs/skill_usage.md](./docs/skill_usage.md)。
 
 ## 测试
 
@@ -291,27 +251,39 @@ bash tests/run.sh -p xiaoo-core   # 额外参数原样透传给 cargo test
 
 `scripts/ci.sh` 为统一 CI 入口（仅静态门禁、不编译）：门面纪律门禁、测试卫生门禁（防止测试代码回流 `src/`）、文档链接门禁、代码格式门禁（`cargo fmt --check`）与 Dockerfile COPY 覆盖门禁。目录约定与命名规则见 [tests/README.md](./tests/README.md)。
 
-## 更多文档
+## 文档
+
+**使用指南**
+
+- [Skill Usage](./docs/skill_usage.md)
+- [Plugin System](./docs/plugins.md)
+- [MCP 集成](./docs/mcp.md)
+- [自定义工具](./docs/custom_tools.md)
+- [Custom Agents](./docs/custom_agent.md)
+- [定时任务（Cron）](./docs/cron_scheduled_jobs.md)
+- [Remote TUI](./docs/remote_tui.md)
+- [E2B Workspace & Skills Bootstrap](./docs/e2b_workspace_skills_bootstrap.md)
+
+**部署**
+
+- [Docker 容器化部署](./docs/docker_deploy.md)
+- [Feishu Deployment](./docs/feishu_deploy.md)
+- [Telegram Deployment](./docs/telegram_deploy.md)
+
+**架构与设计**
 
 - [架构总览](./docs/architecture_overview.md) — apps、workspace crate、二进制与运行时分层
 - [Memory & Context Compression](./docs/memory_context_system.md)
 - [运行时 Checkpoint 控制](./docs/runtime_checkpoint.md)
 - [Runtime SDK 改造（已落地）](./docs/xiaoo_api_pure_runtime_refactor.md)
-- [Plugin System](./docs/plugins.md)
-- [Skill Usage](./docs/skill_usage.md)
-- [MCP 集成](./docs/mcp.md)
-- [自定义工具](./docs/custom_tools.md)
-- [定时任务（Cron）](./docs/cron_scheduled_jobs.md)
-- [E2B Workspace & Skills Bootstrap](./docs/e2b_workspace_skills_bootstrap.md)
-- [Custom Agents](./docs/custom_agent.md)
-- [Remote TUI](./docs/remote_tui.md)
-- [Feishu Deployment](./docs/feishu_deploy.md)
-- [Telegram Deployment](./docs/telegram_deploy.md)
-- [Docker 容器化部署](./docs/docker_deploy.md)
 - [Vault 密钥管理设计](./docs/vault_secrets_design.md)
 - [KV Cache 协同设计](./docs/kvcache-coordination-design.md)
 - [Super Gateway 控制面设计](./docs/super_gateway_control_plane_design.md)
 
+## 社区交流
+
+为提升 xiaoO 开发及维护效率，可以申请加入"xiaoO爱好者交流群"，添加微信: xj756386857 (备注：xiaoO爱好者+atomgit_id)。
+
 ## 许可证
 
-xiaoO 使用 [MulanPSL-2.0](./License) 许可证。
+xiaoO 使用 [MulanPSL-2.0](./License/LICENSE) 许可证。
