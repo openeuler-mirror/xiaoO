@@ -8,8 +8,8 @@
 //! Two hard constraints:
 //! - No fine-grained llm-client types in the API surface:
 //!   `ResolveInput` / `ResolvedConfig` / `create_llm_provider_from_resolved`
-//!   / `resolve_provider_profile` / `resolve_model_context_length` stay
-//!   internal to this module.
+//!   / `resolve_provider_profile` / `resolve_model_context_length` /
+//!   `ModelContextResolution` stay internal to this module.
 //! - Every pub item must have an app consumer (currently the serverside
 //!   `daemon_runtime` startup assembly and the resolver cache-miss path);
 //!   `llm-client` never leaks out of this module.
@@ -27,7 +27,9 @@ use llm_client::{
 };
 use serde::Serialize;
 use xiaoo_api::chat::AgentId;
-use xiaoo_api::llm::{resolve_config, resolve_model_context_length, ResolveInput};
+use xiaoo_api::llm::{
+    resolve_config, resolve_model_context_length, ModelContextResolution, ResolveInput,
+};
 
 /// LLM provider assembly input. Fields are plain types plus already-exported
 /// shared handles.
@@ -261,19 +263,14 @@ async fn resolve_effective_context_window(
     }
 
     match resolve_model_context_length(resolved, model).await {
-        Ok(Some(context_window)) => match usize::try_from(context_window) {
+        ModelContextResolution::Found(context_window) => match usize::try_from(context_window) {
             Ok(value) if value > 0 => return value,
-            Ok(_) => {}
-            Err(_) => {}
+            _ => {}
         },
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(
-                model = %model,
-                error = %error,
-                "failed to dynamically resolve model context window; falling back"
-            );
-        }
+        // A clean miss and a degraded chain are equivalent here: both fall
+        // back to the static capabilities. Only the endside probe cache
+        // distinguishes them (definitive negatives persist cross-process).
+        ModelContextResolution::NotFound | ModelContextResolution::Degraded => {}
     }
 
     static_fallback.max(1)

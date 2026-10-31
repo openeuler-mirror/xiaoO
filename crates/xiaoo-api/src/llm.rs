@@ -26,7 +26,9 @@ pub use llm_client::{
 
 // ---- Context-window probing chain ----
 #[doc(inline)]
-pub use llm_client::{resolve_model_context_length, resolve_protocol_family, ProtocolFamily};
+pub use llm_client::{
+    resolve_model_context_length, resolve_protocol_family, ModelContextResolution, ProtocolFamily,
+};
 
 // ---- Compression pipeline ----
 #[doc(inline)]

@@ -15,11 +15,13 @@ use crate::gateway::{
 };
 use xiaoo_api::chat::AgentId;
 use xiaoo_api::chat::{
-    validate_max_tokens_against_window, FeatureFlags, ReasoningEffort, TokenBudgetConfig,
+    system_reserve, validate_max_tokens_against_window, FeatureFlags, ReasoningEffort,
+    TokenBudgetConfig,
 };
 use xiaoo_shared::gateway::tool_assembly::{discover_tool_names, ToolAssemblyInput};
 
 use super::runtime::GatewayRuntime;
+use super::window_disk_cache::WindowDiskCache;
 use xiaoo_api::runtime::spawn_prefetch;
 
 /// User-facing system message (with glyph) shown when the daemon reports the
@@ -38,12 +40,13 @@ pub(crate) fn session_taken_over_notice_plain() -> String {
 }
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/tui_default_system_prompt.txt");
-const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 
 /// TTL for negative probe results: while valid, later resolutions reuse
 /// the conclusion without touching the network; expiry retries the chain,
 /// so a key appearing or the network returning self-corrects within this
-/// TTL. Positive results never expire.
+/// TTL. Positive results never expire. Cross-process persistence has its
+/// own, longer TTLs — see `window_disk_cache` — and admits definitive
+/// misses only (transient failures stay in this memory tier).
 const NEGATIVE_RESULT_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Total budget for the off-path resolutions (startup warm-up and CLI). The
@@ -60,15 +63,18 @@ const PROBE_TURN_BUDGET: Duration = Duration::from_secs(3);
 /// Process-wide dynamic context-window cache keyed by provider, model,
 /// api_base and credential fingerprint: `build_runtime_config` runs on every
 /// local turn and probing can hit the network, so each combination carries at
-/// most one in-flight probe (see [`WindowCacheSlot`]).
+/// most one in-flight probe (see [`WindowCacheSlot`]). A disk tier
+/// (`super::window_disk_cache`) backs this table so conclusions survive
+/// process restarts.
 fn dynamic_context_window_cache() -> &'static Mutex<HashMap<String, WindowCacheSlot>> {
     static CACHE: OnceLock<Mutex<HashMap<String, WindowCacheSlot>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// One probe's conclusion entry: `window = Some(_)` is the authoritative
-/// probed window; `window = None` is a negative result (the chain ran to
-/// completion without a hit).
+/// probed window; `window = None` is a negative result (a definitive miss
+/// or a transient failure — this tier treats both the same; only
+/// definitive misses also reach the disk tier, see [`ProbeConclusion`]).
 ///
 /// Static fallback values are NOT cached — callers supply them per call,
 /// and the negative entry takes over the "don't re-probe within the TTL"
@@ -104,29 +110,6 @@ enum WindowCacheSlot {
         rx: watch::Receiver<Option<usize>>,
     },
     Resolved(CachedWindow),
-}
-
-/// Window-resolution outcome for the turn path, separating probed values
-/// from static-family estimates:
-///
-/// - `Trusted`: a probed value (cache hit, or a probe that concluded within
-///   the caller's budget) — authoritative enough to reject a turn whose
-///   `max_tokens` leaves no input space.
-/// - `Estimated`: the protocol-family static fallback. It never rejects a
-///   turn: the estimate can undershoot the real window, and rejecting on
-///   it would block a working config whenever probing is offline or slow.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResolvedWindow {
-    Trusted { window: usize },
-    Estimated { window: usize },
-}
-
-impl ResolvedWindow {
-    pub(crate) fn window(self) -> usize {
-        match self {
-            Self::Trusted { window } | Self::Estimated { window } => window,
-        }
-    }
 }
 
 impl GatewayRuntime {
@@ -372,7 +355,7 @@ impl TurnConfigInputs {
 
 /// Build a turn's [`HostedSessionRuntimeConfig`] from a submit-time
 /// snapshot; fatal failures (a `max_tokens` that leaves no input space on a
-/// probed window — see [`evaluate_max_tokens_against_window`] — or an
+/// resolved window — see [`evaluate_max_tokens_against_window`] — or an
 /// outright unresolvable window — see [`unresolved_window_error`]) surface
 /// via `SessionTurnUpdate::Err`.
 async fn build_runtime_config_from_inputs(
@@ -387,7 +370,7 @@ async fn build_runtime_config_from_inputs(
                 .trim_end_matches(['\r', '\n'])
                 .to_string()
         });
-    let resolved_window = resolve_window_for_turn(&inputs.agent_config)
+    let total_budget = resolve_window_for_turn(&inputs.agent_config)
         .await
         .ok_or_else(|| {
             unresolved_window_error(
@@ -397,15 +380,14 @@ async fn build_runtime_config_from_inputs(
             )
         })?;
     evaluate_max_tokens_against_window(
-        resolved_window,
+        total_budget,
         inputs.agent_config.llm.max_tokens,
         &inputs.agent_config.llm.model,
         &inputs.config_path,
     )?;
-    let total_budget = resolved_window.window();
     let reserved_for_output = usize::try_from(inputs.agent_config.llm.max_tokens)
         .map_err(|_| "invalid TUI runtime state: invalid [llm].max_tokens".to_string())?;
-    let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
+    let reserved_for_system = system_reserve(total_budget);
 
     let runtime_config = HostedSessionRuntimeConfig {
         descriptor: SessionRuntimeDescriptor {
@@ -497,11 +479,11 @@ async fn build_runtime_config_from_inputs(
     Ok(runtime_config)
 }
 
-/// Resolve the turn's context window with trust semantics (see
-/// [`ResolvedWindow`]): dynamic probing bounded by [`PROBE_TURN_BUDGET`],
-/// falling back to the static estimate. Caching and retry semantics live
-/// in [`resolve_window_with_probe`].
-async fn resolve_window_for_turn(agent_config: &Config) -> Option<ResolvedWindow> {
+/// Resolve the turn's context window: dynamic probing bounded by
+/// [`PROBE_TURN_BUDGET`], falling back to the caller-supplied static
+/// estimate. Caching and retry semantics live in
+/// [`resolve_window_with_probe`].
+async fn resolve_window_for_turn(agent_config: &Config) -> Option<usize> {
     resolve_window_with_shared_cache(
         &agent_config.llm,
         None,
@@ -513,7 +495,8 @@ async fn resolve_window_for_turn(agent_config: &Config) -> Option<ResolvedWindow
 
 /// Startup cache warm-up: resolves the dynamic context window off the
 /// startup critical path (the TUI renders immediately) so the first turn
-/// usually hits the shared cache instead of probing inline.
+/// usually hits the shared cache instead of probing inline. An expired
+/// disk entry also refreshes here, off the turn path.
 pub(crate) async fn warm_context_window_cache(
     llm: crate::config::LlmConfig,
     static_window: Option<usize>,
@@ -521,42 +504,37 @@ pub(crate) async fn warm_context_window_cache(
     let _ = resolve_window_with_shared_cache(&llm, None, static_window, PROBE_TOTAL_BUDGET).await;
 }
 
-/// Turn-time `max_tokens` gate — the single enforcement point for the
-/// window check: every dispatch funnels through
-/// [`build_runtime_config_from_inputs`], including provider/model switches
-/// made at runtime via `/connect`.
+/// Turn-time `max_tokens` gate — the single enforcement point every
+/// dispatch funnels through (see [`build_runtime_config_from_inputs`]),
+/// including provider/model switches made at runtime via `/connect`.
 ///
-/// A probed ([`ResolvedWindow::Trusted`]) window is authoritative: a
-/// `max_tokens` at or above it leaves no input space, so the turn is
-/// rejected before any RPC or API call. The rejection text comes from the
-/// shared `xiaoo_api::chat::validate_max_tokens_against_window` — the same
-/// single source the daemon's startup validation uses, so the two
-/// enforcement points cannot drift apart. A static estimate never rejects:
-/// it can undershoot the real window (offline probing + a large-window
-/// model), and rejecting on it would block a working config.
+/// A budget whose output and system reserves leave no input space is
+/// unrunnable, whatever the window's trust level (probed or estimated):
+/// it is rejected here, before any RPC or API call — failing fast beats
+/// letting the turn die mid-flight. The rejection text comes from the
+/// shared `xiaoo_api::chat::validate_max_tokens_against_window` — the
+/// same source the daemon's startup validation uses.
 fn evaluate_max_tokens_against_window(
-    resolved: ResolvedWindow,
+    window: usize,
     max_tokens: u32,
     model: &str,
     config_path: &std::path::Path,
 ) -> Result<(), String> {
-    match resolved {
-        ResolvedWindow::Trusted { window } => validate_max_tokens_against_window(
-            max_tokens as usize,
-            window,
-            model,
-            config_path,
-            "[llm]",
-        ),
-        ResolvedWindow::Estimated { .. } => Ok(()),
-    }
+    validate_max_tokens_against_window(
+        max_tokens as usize,
+        window,
+        system_reserve(window),
+        model,
+        config_path,
+        "[llm]",
+    )
 }
 
 /// Turn-path error for the outright window-resolution failure (probe
 /// returned nothing and no static estimate exists — see
 /// [`resolve_window_for_turn`]). In practice an unrecognized provider name
 /// is the only cause: known providers always carry a protocol-family
-/// estimate and take the [`ResolvedWindow::Estimated`] fallback instead.
+/// estimate and take the static-estimate fallback instead.
 /// The message therefore points the user at the provider name rather than
 /// blaming internal state. The failure is cached as a negative
 /// [`CachedWindow`] entry and retried automatically once
@@ -579,13 +557,13 @@ fn unresolved_window_error(provider: &str, model: &str, config_path: &std::path:
 /// path ([`resolve_window_for_turn`]), the startup warm-up
 /// ([`warm_context_window_cache`]) and the CLI
 /// (`cli::resolve_effective_context_window`) share one cache table, probe
-/// chain, total budget and static fallback.
+/// chain, total budget, disk tier and static fallback.
 pub(crate) async fn resolve_window_with_shared_cache(
     llm: &crate::config::LlmConfig,
     api_key: Option<String>,
     static_window: Option<usize>,
     budget: Duration,
-) -> Option<ResolvedWindow> {
+) -> Option<usize> {
     let api_base = (!llm.api_base.trim().is_empty()).then(|| llm.api_base.clone());
     let provider = llm.provider.clone();
     let model = llm.model.clone();
@@ -604,6 +582,7 @@ pub(crate) async fn resolve_window_with_shared_cache(
             probe_dynamic_context_window(&provider, &model, api_key, api_key_env, api_base).await
         },
         budget,
+        WindowDiskCache::default(),
     )
     .await
 }
@@ -700,19 +679,24 @@ pub(crate) fn llm_runtime_config_from_parts(
 /// Dynamic context-window probing: builds a `ResolvedConfig` and goes
 /// through the shared resolution chain (provider catalog > OpenRouter >
 /// Ollama `/api/show`). Reached through [`resolve_window_with_shared_cache`]
-/// by every caller (turn path, warm-up, CLI); any failure just logs a warn
-/// and returns `None`, leaving the caller to its own static estimate.
+/// by every caller (turn path, warm-up, CLI). The conclusion separates a
+/// definitive miss from a transient failure (see [`ProbeConclusion`]) so
+/// only the former may reach the disk tier; either way the caller falls
+/// back to its own static estimate for the turn.
 pub(crate) async fn probe_dynamic_context_window(
     provider: &str,
     model: &str,
     api_key: Option<String>,
     api_key_env: Option<String>,
     api_base: Option<String>,
-) -> Option<usize> {
-    use xiaoo_api::llm::{resolve_config, resolve_model_context_length, ResolveInput};
+) -> ProbeConclusion {
+    use xiaoo_api::llm::{
+        resolve_config, resolve_model_context_length, ModelContextResolution, ResolveInput,
+    };
 
     if provider.trim().is_empty() {
-        return None;
+        // The config never reached the chain — nothing to conclude.
+        return ProbeConclusion::Failed;
     }
     let input = ResolveInput {
         provider: Some(provider.to_string()),
@@ -730,49 +714,82 @@ pub(crate) async fn probe_dynamic_context_window(
                 %error,
                 "failed to resolve provider config for dynamic context window; falling back"
             );
-            return None;
+            return ProbeConclusion::Failed;
         }
     };
     match resolve_model_context_length(&resolved, model).await {
-        Ok(Some(context)) => usize::try_from(context).ok().filter(|value| *value > 0),
-        Ok(None) => None,
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider,
-                model = %model,
-                %error,
-                "dynamic context window probe failed; falling back"
-            );
-            None
+        ModelContextResolution::Found(context) => match usize::try_from(context) {
+            // A catalog answer of 0 or overflow is unusable data, not a
+            // miss: keep it out of the long-lived negative caches.
+            Ok(value) if value > 0 => ProbeConclusion::Window(value),
+            _ => ProbeConclusion::Failed,
+        },
+        ModelContextResolution::NotFound => ProbeConclusion::NotFound,
+        ModelContextResolution::Degraded => ProbeConclusion::Failed,
+    }
+}
+
+/// Probe conclusion with disk-trust semantics: a definitive miss (every
+/// source in the chain was consulted cleanly — request succeeded, data
+/// fresh — and none knew the model) may persist behind the disk tier's long
+/// negative TTL, while a transient failure (resolve error, network/timeout,
+/// degraded chain) must not — frozen behind that TTL it would keep
+/// suppressing re-probes long after the network or config recovers. The
+/// memory tier's short TTL is the self-heal window for failures.
+#[derive(Clone, Copy)]
+pub(crate) enum ProbeConclusion {
+    /// A probed window (> 0).
+    Window(usize),
+    /// The chain completed cleanly with no hit.
+    NotFound,
+    /// The chain errored or was degraded somewhere.
+    Failed,
+}
+
+impl ProbeConclusion {
+    /// Memory-tier value: both negative kinds cache identically here.
+    fn window(self) -> Option<usize> {
+        match self {
+            Self::Window(window) => Some(window),
+            Self::NotFound | Self::Failed => None,
         }
+    }
+
+    /// Whether the disk tier may persist this conclusion.
+    fn definitive(self) -> bool {
+        !matches!(self, Self::Failed)
     }
 }
 
 /// State-machine core of [`resolve_window_for_turn`] (free function so unit
-/// tests can inject a synthetic probe and budget without the network):
+/// tests can inject a synthetic probe and budget without the network).
+/// Resolution order: memory → disk (adopted while fresh) → network.
 ///
-/// - a valid conclusion returns immediately (positive → `Trusted`, negative →
-///   static estimate); an in-flight slot's receiver is cloned to merge onto
-///   the existing probe; otherwise a fresh probe task is registered;
-/// - the waiter awaits the conclusion for at most `budget`. On timeout it
-///   falls back to the static estimate and writes **no cache entry** (the
-///   probe is still running, so writing would misrecord it as failed); the
-///   detached task records the real conclusion when it finishes;
-/// - a task that dies without sending routes waiters into the dead-probe
-///   branch of [`wait_for_probe_conclusion`], which records a negative entry.
+/// - Inside the lock (sync decisions only, never across an await): a valid
+///   conclusion returns; an in-flight slot's receiver is cloned so the
+///   caller merges onto the existing probe; otherwise a fresh disk entry is
+///   adopted as a memory hit, and only a disk miss registers a probe task.
+/// - The probe task records its conclusion in the memory table before
+///   sending, so waiters always find it settled; definitive conclusions
+///   also reach the disk tier — transient failures stay memory-only (see
+///   [`ProbeConclusion`]). A waiter that exhausts its budget writes nothing.
+/// - A probe task that dies without sending gets a negative memory entry
+///   only — the much longer disk TTL would freeze an undetermined outcome
+///   for days.
 async fn resolve_window_with_probe(
     cache_key: String,
     static_window: Option<usize>,
-    probe: impl Future<Output = Option<usize>> + Send + 'static,
+    probe: impl Future<Output = ProbeConclusion> + Send + 'static,
     budget: Duration,
-) -> Option<ResolvedWindow> {
+    disk: WindowDiskCache,
+) -> Option<usize> {
     let rx = {
         let Ok(mut guard) = dynamic_context_window_cache().lock() else {
             // Poisoned lock: neither reading nor updating the cache is
             // possible — degrade to an uncached probe, still budget-bound.
             return match tokio::time::timeout(budget, probe).await {
-                Ok(Some(window)) => Some(ResolvedWindow::Trusted { window }),
-                _ => estimate(static_window),
+                Ok(ProbeConclusion::Window(window)) => Some(window),
+                _ => static_window,
             };
         };
         match guard.get(&cache_key) {
@@ -780,40 +797,71 @@ async fn resolve_window_with_probe(
                 return cached_outcome(*entry, static_window);
             }
             Some(WindowCacheSlot::InFlight { rx }) => rx.clone(),
-            // Expired negative entry or missing slot: register a fresh
-            // probe (the insert overwrites the expired entry). The map
-            // keeps a receiver for later mergers.
-            _ => {
-                let (done, rx) = watch::channel(None);
-                guard.insert(
-                    cache_key.clone(),
-                    WindowCacheSlot::InFlight { rx: rx.clone() },
-                );
-                let probe_key = cache_key.clone();
-                tokio::spawn(run_probe(probe_key, probe, done));
-                rx
-            }
+            // Expired negative entry or missing slot: adopt from disk or
+            // register a fresh probe; the map keeps a receiver for mergers.
+            _ => match disk.load(&cache_key) {
+                Some(window) => {
+                    // Adoption re-stamps `resolved_at`: memory TTL counts
+                    // from adoption, disk freshness from the entry's own
+                    // timestamp.
+                    let entry = CachedWindow {
+                        window,
+                        resolved_at: Instant::now(),
+                    };
+                    guard.insert(cache_key, WindowCacheSlot::Resolved(entry));
+                    return cached_outcome(entry, static_window);
+                }
+                None => {
+                    let (done, rx) = watch::channel(None);
+                    guard.insert(
+                        cache_key.clone(),
+                        WindowCacheSlot::InFlight { rx: rx.clone() },
+                    );
+                    let probe_key = cache_key.clone();
+                    tokio::spawn(run_probe(probe_key, probe, done, disk.clone()));
+                    rx
+                }
+            },
         }
     };
     wait_for_probe_conclusion(rx, cache_key, static_window, budget).await
 }
 
-/// Probe task body: writes the conclusion before sending so the cache holds
-/// it by the time a waiter wakes. `done` is the channel's only sender, so a
-/// task that dies without sending drops it, closing the channel and routing
-/// waiters into the dead-probe branch instead of pinning them on a dead slot.
+/// Probe task body: records the conclusion in the memory table before
+/// sending, so a woken waiter finds it settled; definitive conclusions are
+/// also persisted to the disk tier — transient failures are not (see
+/// [`ProbeConclusion`]). The `done` sender is the channel's only one (the
+/// map holds receivers), so a task that dies without sending drops it and
+/// routes waiters into the dead-probe branch of
+/// [`wait_for_probe_conclusion`].
 async fn run_probe(
     cache_key: String,
-    probe: impl Future<Output = Option<usize>>,
+    probe: impl Future<Output = ProbeConclusion>,
     done: watch::Sender<Option<usize>>,
+    disk: WindowDiskCache,
 ) {
-    let window = probe.await;
+    let conclusion = probe.await;
+    let window = conclusion.window();
     let entry = CachedWindow {
         window,
         resolved_at: Instant::now(),
     };
     if let Ok(mut guard) = dynamic_context_window_cache().lock() {
-        guard.insert(cache_key, WindowCacheSlot::Resolved(entry));
+        guard.insert(cache_key.clone(), WindowCacheSlot::Resolved(entry));
+    }
+    // The disk write stays off the memory lock — file IO under that lock
+    // would stall every concurrent turn resolution queued on it — and
+    // lands before `send`, so a caller that observed the conclusion finds
+    // it settled on disk too. Unserialized writers race the
+    // read-modify-write on the shared file and a loser's entry is lost:
+    // the same worst case cross-process writers already accept, healed by
+    // a re-probe once the TTL lapses. Only definitive conclusions are
+    // persisted: a transient failure frozen behind the disk tier's
+    // negative TTL would keep suppressing re-probes for days after the
+    // network recovers — the memory tier's short TTL is the self-heal
+    // window for those.
+    if conclusion.definitive() {
+        disk.store(&cache_key, window);
     }
     let _ = done.send(window);
 }
@@ -825,11 +873,11 @@ async fn wait_for_probe_conclusion(
     cache_key: String,
     static_window: Option<usize>,
     budget: Duration,
-) -> Option<ResolvedWindow> {
+) -> Option<usize> {
     match tokio::time::timeout(budget, rx.changed()).await {
         Ok(Ok(())) => match *rx.borrow_and_update() {
-            Some(window) => Some(ResolvedWindow::Trusted { window }),
-            None => estimate(static_window),
+            Some(window) => Some(window),
+            None => static_window,
         },
         // Every sender dropped = the probe task died without sending. The
         // real conclusion may already have been written before it died
@@ -849,7 +897,7 @@ async fn wait_for_probe_conclusion(
                     }
                 }
             }
-            estimate(static_window)
+            static_window
         }
         Err(_) => {
             tracing::debug!(
@@ -857,24 +905,18 @@ async fn wait_for_probe_conclusion(
                 "dynamic context window probe exceeded total budget; \
                  using static estimate for this turn (probe continues in background)"
             );
-            estimate(static_window)
+            static_window
         }
     }
 }
 
-/// Maps a cache conclusion to turn-window semantics: positive → `Trusted`;
+/// Maps a cache conclusion to a window: positive → the probed window;
 /// negative → the caller-supplied static estimate.
-fn cached_outcome(entry: CachedWindow, static_window: Option<usize>) -> Option<ResolvedWindow> {
+fn cached_outcome(entry: CachedWindow, static_window: Option<usize>) -> Option<usize> {
     match entry.window {
-        Some(window) => Some(ResolvedWindow::Trusted { window }),
-        None => estimate(static_window),
+        Some(window) => Some(window),
+        None => static_window,
     }
-}
-
-/// The caller-supplied static estimate: the fallback whenever probing
-/// yields no conclusion (negative result / budget exhausted / task death).
-fn estimate(static_window: Option<usize>) -> Option<ResolvedWindow> {
-    static_window.map(|window| ResolvedWindow::Estimated { window })
 }
 
 /// Build a TUI entry context that carries the active agent role as
