@@ -11,6 +11,9 @@ pub struct TokenUsage {
     /// Zero means the provider did not report a cache hit.
     #[serde(default)]
     pub cached_tokens: usize,
+    /// Prompt tokens written to the provider cache (zero when unreported).
+    #[serde(default)]
+    pub cache_write_tokens: usize,
 }
 
 pub enum AgentOutcome {

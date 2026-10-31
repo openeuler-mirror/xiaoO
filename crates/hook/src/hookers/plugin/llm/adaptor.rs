@@ -456,6 +456,10 @@ impl PluginLlmHookerAdaptor {
         })?;
 
         Ok(Usage {
+            cache_write_tokens: usage_value
+                .get("cache_write_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize,
             prompt_tokens: usage_value
                 .get("prompt_tokens")
                 .and_then(Value::as_u64)

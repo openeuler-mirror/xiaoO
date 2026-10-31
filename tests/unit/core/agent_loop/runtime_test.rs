@@ -46,6 +46,7 @@ impl LlmProvider for StreamingTestProvider {
                 reasoning_content: None,
                 tool_calls: Vec::new(),
                 usage: Usage {
+                    cache_write_tokens: 0,
                     prompt_tokens: 3,
                     completion_tokens: 2,
                     total_tokens: 5,
@@ -106,20 +107,22 @@ impl LlmProvider for SequentialUsageProvider {
             (
                 "first turn".to_string(),
                 Usage {
+                    cache_write_tokens: 1,
                     prompt_tokens: 3,
                     completion_tokens: 2,
                     total_tokens: 5,
-                    cached_tokens: 0,
+                    cached_tokens: 1,
                 },
             )
         } else {
             (
                 "second turn".to_string(),
                 Usage {
+                    cache_write_tokens: 3,
                     prompt_tokens: 7,
                     completion_tokens: 1,
                     total_tokens: 8,
-                    cached_tokens: 0,
+                    cached_tokens: 2,
                 },
             )
         };
@@ -516,6 +519,8 @@ async fn run_agent_loop_overwrites_token_usage_with_current_turn_usage() {
             assert_eq!(token_usage.prompt_tokens, 7);
             assert_eq!(token_usage.completion_tokens, 1);
             assert_eq!(token_usage.total_tokens, 8);
+            assert_eq!(token_usage.cached_tokens, 2);
+            assert_eq!(token_usage.cache_write_tokens, 3);
         }
         _ => panic!("unexpected outcome"),
     }

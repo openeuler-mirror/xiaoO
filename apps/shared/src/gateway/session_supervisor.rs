@@ -1599,6 +1599,7 @@ fn terminal_from_outcome(
 
     LaneTerminal {
         result: AppTurnResult {
+            cache_write_tokens: token_usage.cache_write_tokens as u64,
             raw_reply: reply.clone(),
             visible_reply: reply.clone(),
             messages,

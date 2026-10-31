@@ -51,6 +51,7 @@ impl LlmProvider for EmptyCallIdToolCallProvider {
                     reasoning_content: None,
                     tool_calls: Vec::new(),
                     usage: Usage {
+                        cache_write_tokens: 0,
                         prompt_tokens: 10,
                         completion_tokens: 2,
                         total_tokens: 12,
@@ -72,6 +73,7 @@ impl LlmProvider for EmptyCallIdToolCallProvider {
                     input: serde_json::json!({"command": "date"}),
                 }],
                 usage: Usage {
+                    cache_write_tokens: 0,
                     prompt_tokens: 10,
                     completion_tokens: 5,
                     total_tokens: 15,
@@ -519,6 +521,7 @@ impl LlmProvider for TwoToolCallProvider {
                         },
                     ],
                     usage: Usage {
+                        cache_write_tokens: 0,
                         cached_tokens: 0,
                         prompt_tokens: 5,
                         completion_tokens: 3,
@@ -536,6 +539,7 @@ impl LlmProvider for TwoToolCallProvider {
                 reasoning_content: None,
                 tool_calls: Vec::new(),
                 usage: Usage {
+                    cache_write_tokens: 0,
                     cached_tokens: 0,
                     prompt_tokens: 5,
                     completion_tokens: 1,

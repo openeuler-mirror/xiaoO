@@ -66,12 +66,14 @@ fn message_start_carries_prompt_tokens() {
 fn merge_usage_keeps_prompt_and_completion_totals() {
     let merged = merge_usage(
         Some(Usage {
+            cache_write_tokens: 0,
             prompt_tokens: 21,
             completion_tokens: 0,
             total_tokens: 21,
             cached_tokens: 0,
         }),
         Usage {
+            cache_write_tokens: 0,
             prompt_tokens: 0,
             completion_tokens: 15,
             total_tokens: 15,
@@ -400,4 +402,35 @@ fn successive_text_deltas_each_carry_their_own_fragment() {
     )
     .unwrap();
     assert_eq!(result.unwrap().content, Some(" World".to_string()));
+}
+
+#[test]
+fn cache_read_and_write_survive_streaming_and_nonstreaming() {
+    let value = serde_json::json!({"input_tokens":21,"output_tokens":15,"cache_read_input_tokens":34,"cache_creation_input_tokens":55});
+    let direct = anthropic_usage(&value);
+    let mut event = Some("message_start".to_string());
+    let frame = format!("data: {}", serde_json::json!({"message":{"usage":value}}));
+    let wire = AnthropicProvider::parse_anthropic_stream_line(&mut event, &frame)
+        .unwrap()
+        .unwrap()
+        .usage
+        .unwrap();
+    let streamed = crate::convert::wire_usage_to_usage(&wire);
+    for usage in [direct, streamed] {
+        assert_eq!(usage.prompt_tokens, 110);
+        assert_eq!(usage.completion_tokens, 15);
+        assert_eq!(usage.total_tokens, 125);
+        assert_eq!(usage.cached_tokens, 34);
+        assert_eq!(usage.cache_write_tokens, 55);
+    }
+    let merged = merge_usage(
+        Some(anthropic_usage(&value)),
+        Usage {
+            completion_tokens: 20,
+            ..Usage::default()
+        },
+    );
+    assert_eq!(merged.cached_tokens, 34);
+    assert_eq!(merged.cache_write_tokens, 55);
+    assert_eq!(merged.total_tokens, 130);
 }
