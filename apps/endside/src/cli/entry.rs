@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ struct Args {
 enum Command {
     /// Run a single prompt through the AgentLoop
     Run {
-        /// The prompt to send to the agent
+        /// The prompt to send to the agent (piped stdin is appended on a new line)
         #[arg(short, long, num_args = 1..)]
         prompt: Vec<String>,
 
@@ -228,7 +228,18 @@ where
         }) => {
             let deadline = TaskDeadline::new(timeout_secs)
                 .unwrap_or_else(|error| exit_run_error(error, format == OutputFormat::Json));
-            let prompt = prompt.join(" ");
+            let prompt = deadline
+                .run(async move {
+                    tokio::task::spawn_blocking(move || {
+                        let stdin = std::io::stdin();
+                        resolve_prompt(&prompt, stdin.is_terminal(), &mut stdin.lock())
+                    })
+                    .await
+                    .map_err(|error| format!("Failed to read prompt: {error}"))?
+                })
+                .await
+                .and_then(|result| result)
+                .unwrap_or_else(|error| exit_run_error(error, format == OutputFormat::Json));
             if let Some(path) = config_path.as_ref() {
                 if let Err(error) = xiaoo_shared::llm_secrets::init_llm_secrets(path) {
                     eprintln!(
@@ -335,6 +346,25 @@ where
             handle_skill_command(command);
         }
     }
+}
+
+fn resolve_prompt(
+    prompt: &[String],
+    stdin_is_terminal: bool,
+    stdin: &mut impl Read,
+) -> Result<String, String> {
+    let mut text = prompt.join(" ");
+    if !stdin_is_terminal {
+        let mut piped = String::new();
+        stdin
+            .read_to_string(&mut piped)
+            .map_err(|error| format!("Failed to read prompt from stdin: {error}"))?;
+        if !text.is_empty() && !piped.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&piped);
+    }
+    Ok(text)
 }
 
 /// Where a `run` invocation routes: session id, agent id, and an optional
