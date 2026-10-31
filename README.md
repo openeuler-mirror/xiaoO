@@ -141,6 +141,10 @@ xiaoo
 
 # Single-shot CLI
 xiaoo --cli run -p "Count the characters in hello world"
+
+# Read a large prompt from stdin, bypassing argv size limits
+cat prompt.txt | xiaoo --cli run
+xiaoo --cli run < prompt.txt
 ```
 
 Example CLI output:

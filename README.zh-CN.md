@@ -137,6 +137,10 @@ xiaoo
 
 # 单次 CLI 调用
 xiaoo --cli run -p "Count the characters in hello world"
+
+# 长 prompt 从 stdin 读取，绕过 argv 长度限制
+cat prompt.txt | xiaoo --cli run
+xiaoo --cli run < prompt.txt
 ```
 
 CLI 输出示例：

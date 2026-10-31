@@ -96,13 +96,26 @@ xiaoo --cli run --debug -p "Your prompt"
 
 # Disable tool execution
 xiaoo --cli run --no-tools -p "Just answer this question"
+
+# Read a large UTF-8 prompt without passing its contents through argv
+cat prompt.txt | xiaoo --cli run
+xiaoo --cli run < prompt.txt
+cat context.txt | xiaoo --cli run -p "Summarize this context"
 ```
+
+When stdin is not a terminal (a pipe or redirected file), CLI reads UTF-8 text
+from stdin to EOF and uses it as the prompt. If `-p/--prompt` is also provided,
+stdin is appended after the argument text, separated by a newline when both are
+nonempty. Stdin whitespace and newlines are preserved. Terminal stdin is not read;
+an empty stdin leaves the argument prompt unchanged. Prompt reading is included
+in the overall `--timeout` deadline. This avoids the operating system's argv size
+limits without an additional flag.
 
 ### Parameter Description
 
 | Parameter | Description | Default |
 |------|------|--------|
-| `-p, --prompt` | Prompt to send to agent. **Optional and repeatable** (`num_args = 1..`); repeats are joined into one prompt | — |
+| `-p, --prompt` | Prompt to send to agent. **Optional and repeatable** (`num_args = 1..`); repeats are joined into one prompt. Piped stdin is appended on a new line | — |
 | `--config` | Configuration file path (also accepts `XIAOO_CONFIG` env var). `global` | `~/.config/xiaoo/config.toml` |
 | `--debug` | Show intermediate process (turns, tool calls, etc.). `global` | false |
 | `--provider` | Override provider in configuration file | - |
