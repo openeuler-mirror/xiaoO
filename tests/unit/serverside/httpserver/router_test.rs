@@ -508,6 +508,7 @@ impl FakeSessionService {
             .expect("session service mutex poisoned")
             .push(request);
         Ok(AppTurnResult {
+            cache_write_tokens: 0,
             raw_reply: self.reply.clone(),
             visible_reply: self.reply.clone(),
             messages: Vec::new(),

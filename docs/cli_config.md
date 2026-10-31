@@ -395,3 +395,48 @@ allows up to 5 seconds, and local MCP shutdown allows up to 5 seconds. Cleanup
 may therefore extend process lifetime beyond the task deadline. Shutdown errors
 are reported explicitly, including when an unreachable daemon prevents confirming
 that its session closed. CLI-owned process groups are reaped before error exit.
+
+## JSON response usage
+
+Local `run --format json` includes a `data.usage` object in its final `response`
+event, alongside the existing `raw_reply` and `session_id` fields:
+
+```json
+{"type":"response","data":{"raw_reply":"done","session_id":"session-1","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"cache_read_tokens":60,"cache_write_tokens":10,"model":"test-model","duration_ms":1234,"token_scope":"last_llm_request"}}}
+```
+
+Token counts are provider-reported, not estimates. `token_scope` is
+`last_llm_request`, matching the runtime result: these counts cover the last
+successful root-agent LLM request, not the sum of earlier tool rounds, subagents,
+or compression requests. Cache counts are subsets of input tokens; unreported
+cache counts are zero. Anthropic input counts include uncached input plus cache
+reads and writes. `model` is the resolved configured model. `duration_ms` measures
+the gateway turn and session close, excluding provider bootstrap and subsequent
+memory automation shutdown. `--attach` continues to forward daemon SSE events.
+
+### JSON tool progress events
+
+Local `run --format json` emits one JSON object per stdout line and flushes each
+progress event immediately. Progress does not require `--debug`; debug text goes
+to stderr. The final `response` event and its usage fields remain available.
+
+| Event `type` | `data` fields (in addition to `session_id` and `agent_id`) |
+|---|---|
+| `turn_started` | `turn`: agent-local loop turn number |
+| `tool_call` | `call_id`, `tool_name`, `args_preview`, `status` |
+| `tool_result` | `call_id`, `tool_name`, `args_preview`, `output_preview`, `is_error` |
+| `loop_end` | `turn_count`, `total_tokens`, `stop_reason` |
+
+```json
+{"type":"turn_started","data":{"session_id":"s1","agent_id":"defaultagent","turn":1}}
+{"type":"tool_call","data":{"session_id":"s1","agent_id":"defaultagent","call_id":"c1","tool_name":"bash","args_preview":"{\"command\":\"pwd\"}","status":"running"}}
+{"type":"tool_result","data":{"session_id":"s1","agent_id":"defaultagent","call_id":"c1","tool_name":"bash","args_preview":"{\"command\":\"pwd\"}","output_preview":"/workspace","is_error":false}}
+```
+
+Correlate tool events with `(session_id, agent_id, call_id)`. Parallel tools and
+subagents can interleave events; each tool has one `tool_call` followed by its
+`tool_result`. `status` describes the first observed lifecycle state (usually
+`running`, or `pending`/`denied`/`failed`/`completed`). A result without a lifecycle
+start gets a preceding `tool_call` with `status: "reported"`. Argument and output
+fields contain runtime previews. `--attach` continues to forward the daemon's
+existing SSE event schema.

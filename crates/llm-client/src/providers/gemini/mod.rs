@@ -144,6 +144,7 @@ impl LlmProvider for GeminiProvider {
                     reasoning_content: None,
                     tool_calls: tool_use_blocks,
                     usage: Usage {
+                        cache_write_tokens: 0,
                         prompt_tokens,
                         completion_tokens,
                         total_tokens: prompt_tokens + completion_tokens,

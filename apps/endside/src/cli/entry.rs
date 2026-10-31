@@ -10,6 +10,7 @@ use crate::cli::{
 
 use super::attach::run_with_attach;
 use super::deadline::{run_local_turn, TaskDeadline, DEFAULT_TASK_TIMEOUT_SECS};
+use super::json_events::JsonEventSink;
 use super::skills::{handle_skill_command, resolve_skills_config_from_file, SkillCommands};
 use tokio_util::sync::CancellationToken;
 
@@ -531,13 +532,23 @@ async fn run_once(
         memory_automation: config.memory_automation.clone(),
     };
 
-    // 4. Bindings (CliEventSink for debug output)
-    let loop_event_sink: Option<Arc<dyn LoopEventSink>> =
-        debug.then(|| Arc::new(CliEventSink::new()) as Arc<dyn LoopEventSink>);
+    // 4. JSON progress callbacks share one writer and call-id registry.
+    let session_id = session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let json_sink = (format == OutputFormat::Json).then(|| {
+        Arc::new(JsonEventSink::new(
+            session_id.clone(),
+            agent.clone().unwrap_or_else(|| "defaultagent".into()),
+            debug,
+        ))
+    });
+    let loop_event_sink: Option<Arc<dyn LoopEventSink>> = match &json_sink {
+        Some(sink) => Some(sink.clone()),
+        None => debug.then(|| Arc::new(CliEventSink::new()) as Arc<dyn LoopEventSink>),
+    };
     let cancel = CancellationToken::new();
     let bindings = SessionRuntimeBindings {
         loop_event_sink,
-        tool_event_sink: None,
+        tool_event_sink: json_sink.map(|sink| sink as Arc<dyn xiaoo_api::events::ToolEventSink>),
         interaction_handle: None,
         channel_file_sender: None,
         pending_user_messages: None,
@@ -592,8 +603,7 @@ async fn run_once(
         }
     };
 
-    // 6. Turn request - use provided session ID or create new one
-    let session_id = session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // 6. Turn request uses the same session id as the progress callbacks.
     let request = AppTurnRequest {
         session_id: session_id.clone(),
         entry: GatewayEntryContext::cli(),
@@ -644,6 +654,7 @@ async fn run_once(
         }
     }
 
+    let turn_started = std::time::Instant::now();
     // 7. Run turn via gateway session service, then explicitly close the
     // session so SessionClosed lifecycle hookers fire in CLI mode as well.
     let turn_result = run_local_turn(
@@ -654,6 +665,7 @@ async fn run_once(
         &cancel,
     )
     .await;
+    let duration_ms = turn_started.elapsed().as_millis() as u64;
     if let Some(reaper) = deps.reaper_handle {
         reaper.abort();
     }
@@ -670,13 +682,12 @@ async fn run_once(
             if format == OutputFormat::Json {
                 println!(
                     "{}",
-                    serde_json::to_string(&serde_json::json!({
-                        "type": "response",
-                        "data": {
-                            "raw_reply": result.raw_reply,
-                            "session_id": session_id,
-                        }
-                    }))
+                    serde_json::to_string(&json_response(
+                        &result,
+                        &session_id,
+                        &config.model,
+                        duration_ms
+                    ))
                     .unwrap()
                 );
                 let _ = std::io::stdout().flush();
@@ -686,6 +697,31 @@ async fn run_once(
         }
         Err(error) => exit_run_error(error, format == OutputFormat::Json),
     }
+}
+
+fn json_response(
+    result: &xiaoo_shared::gateway::AppTurnResult,
+    session_id: &str,
+    model: &str,
+    duration_ms: u64,
+) -> Value {
+    serde_json::json!({
+        "type": "response",
+        "data": {
+            "raw_reply": result.raw_reply,
+            "session_id": session_id,
+            "usage": {
+                "input_tokens": result.prompt_tokens,
+                "output_tokens": result.completion_tokens,
+                "total_tokens": result.total_tokens,
+                "cache_read_tokens": result.cached_tokens,
+                "cache_write_tokens": result.cache_write_tokens,
+                "model": model,
+                "duration_ms": duration_ms,
+                "token_scope": "last_llm_request",
+            }
+        }
+    })
 }
 
 /// process::exit skips Drop; explicitly reap CLI-owned process groups first.

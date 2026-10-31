@@ -52,6 +52,8 @@ pub(crate) struct WireUsage {
 pub(crate) struct WirePromptTokensDetails {
     #[serde(default)]
     pub cached_tokens: u32,
+    #[serde(default)]
+    pub cache_write_tokens: u32,
 }
 
 #[cfg(test)]

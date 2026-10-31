@@ -256,6 +256,7 @@ fn usage_from_ollama_json(json: &serde_json::Value) -> Usage {
     let prompt_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0) as usize;
     let completion_tokens = json["eval_count"].as_u64().unwrap_or(0) as usize;
     Usage {
+        cache_write_tokens: 0,
         prompt_tokens,
         completion_tokens,
         total_tokens: prompt_tokens + completion_tokens,

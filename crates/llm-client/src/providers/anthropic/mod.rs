@@ -296,15 +296,7 @@ impl LlmProvider for AnthropicProvider {
             });
             let tool_calls = extract_anthropic_tool_calls(&anthropic_response["content"]);
 
-            let usage_val = &anthropic_response["usage"];
-            let usage = Usage {
-                prompt_tokens: usage_val["input_tokens"].as_u64().unwrap_or(0) as usize,
-                completion_tokens: usage_val["output_tokens"].as_u64().unwrap_or(0) as usize,
-                total_tokens: (usage_val["input_tokens"].as_u64().unwrap_or(0)
-                    + usage_val["output_tokens"].as_u64().unwrap_or(0))
-                    as usize,
-                cached_tokens: usage_val["cache_read_input_tokens"].as_u64().unwrap_or(0) as usize,
-            };
+            let usage = anthropic_usage(&anthropic_response["usage"]);
 
             let finish_reason = anthropic_response["stop_reason"]
                 .as_str()
@@ -543,11 +535,26 @@ impl AnthropicProvider {
                     .as_u64()
                     .or_else(|| json["usage"]["input_tokens"].as_u64())
                     .map(|t| t as u32);
-                let usage = input_tokens.map(|t| WireUsage {
-                    prompt_tokens: t,
-                    completion_tokens: 0,
-                    total_tokens: t,
-                    prompt_tokens_details: None,
+                let usage_val = json
+                    .get("message")
+                    .and_then(|m| m.get("usage"))
+                    .unwrap_or(&json["usage"]);
+                let normalized = anthropic_usage(usage_val);
+                let usage = input_tokens.map(|_| WireUsage {
+                    prompt_tokens: normalized.prompt_tokens as u32,
+                    completion_tokens: normalized.completion_tokens as u32,
+                    total_tokens: normalized.total_tokens as u32,
+                    prompt_tokens_details: Some(
+                        crate::wire_types::response::WirePromptTokensDetails {
+                            cached_tokens: usage_val["cache_read_input_tokens"]
+                                .as_u64()
+                                .unwrap_or(0) as u32,
+                            cache_write_tokens: usage_val["cache_creation_input_tokens"]
+                                .as_u64()
+                                .unwrap_or(0)
+                                as u32,
+                        },
+                    ),
                 });
                 Ok(Some(ParsedChunk {
                     content: None,
@@ -635,11 +642,27 @@ impl AnthropicProvider {
     }
 }
 
+fn anthropic_usage(value: &serde_json::Value) -> Usage {
+    let cached_tokens = value["cache_read_input_tokens"].as_u64().unwrap_or(0) as usize;
+    let cache_write_tokens = value["cache_creation_input_tokens"].as_u64().unwrap_or(0) as usize;
+    let prompt_tokens =
+        value["input_tokens"].as_u64().unwrap_or(0) as usize + cached_tokens + cache_write_tokens;
+    let completion_tokens = value["output_tokens"].as_u64().unwrap_or(0) as usize;
+    Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens + completion_tokens,
+        cached_tokens,
+        cache_write_tokens,
+    }
+}
+
 fn merge_usage(existing: Option<Usage>, incoming: Usage) -> Usage {
     let mut merged = existing.unwrap_or_default();
     merged.prompt_tokens = merged.prompt_tokens.max(incoming.prompt_tokens);
     merged.completion_tokens = merged.completion_tokens.max(incoming.completion_tokens);
     merged.cached_tokens = merged.cached_tokens.max(incoming.cached_tokens);
+    merged.cache_write_tokens = merged.cache_write_tokens.max(incoming.cache_write_tokens);
     merged.total_tokens = merged.prompt_tokens + merged.completion_tokens;
     merged
 }

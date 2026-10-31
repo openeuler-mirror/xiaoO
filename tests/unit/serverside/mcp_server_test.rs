@@ -15,6 +15,7 @@ struct MockSessions;
 
 fn mock_turn_result() -> AppTurnResult {
     AppTurnResult {
+        cache_write_tokens: 0,
         raw_reply: "mock reply".to_string(),
         visible_reply: "mock reply".to_string(),
         messages: Vec::new(),

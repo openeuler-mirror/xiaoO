@@ -53,6 +53,8 @@ pub struct AppTurnResult {
     pub completion_tokens: u64,
     pub total_tokens: u64,
     pub cached_tokens: u64,
+    /// Prompt tokens written to the provider cache (zero when unreported).
+    pub cache_write_tokens: u64,
     pub estimated_input_tokens: u64,
     pub outcome: TurnOutcome,
     /// Actions requested by `*.Session.lifecycle.state` plugin hookers after

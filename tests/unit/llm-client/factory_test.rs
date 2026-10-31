@@ -97,6 +97,7 @@ mod wrapper_tests {
                 reasoning_content: None,
                 tool_calls: vec![],
                 usage: Usage {
+                    cache_write_tokens: 0,
                     prompt_tokens: 10,
                     completion_tokens: 5,
                     total_tokens: 15,

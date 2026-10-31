@@ -2,6 +2,7 @@ pub mod attach;
 pub mod config;
 mod deadline;
 pub mod entry;
+mod json_events;
 pub mod skills;
 
 use std::sync::{Arc, Mutex};

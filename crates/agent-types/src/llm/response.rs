@@ -14,6 +14,9 @@ pub struct Usage {
     pub total_tokens: usize,
     #[serde(default)]
     pub cached_tokens: usize,
+    /// Prompt tokens written to the provider cache (zero when unreported).
+    #[serde(default)]
+    pub cache_write_tokens: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

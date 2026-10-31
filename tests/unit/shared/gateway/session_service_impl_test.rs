@@ -352,6 +352,7 @@ fn reply_response() -> LlmResponse {
             reasoning_content: None,
             tool_calls: Vec::new(),
             usage: Usage {
+                cache_write_tokens: 0,
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 total_tokens: 2,
