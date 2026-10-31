@@ -16,6 +16,21 @@ pub struct TokenUsage {
     pub cache_write_tokens: usize,
 }
 
+impl TokenUsage {
+    /// Accumulate successful provider responses without wrapping counters.
+    pub fn add_assign(&mut self, usage: &Self) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(usage.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(usage.completion_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(usage.total_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(usage.cache_write_tokens);
+    }
+}
+
 pub enum AgentOutcome {
     Complete {
         reply: String,

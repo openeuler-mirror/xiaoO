@@ -402,17 +402,21 @@ Local `run --format json` includes a `data.usage` object in its final `response`
 event, alongside the existing `raw_reply` and `session_id` fields:
 
 ```json
-{"type":"response","data":{"raw_reply":"done","session_id":"session-1","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"cache_read_tokens":60,"cache_write_tokens":10,"model":"test-model","duration_ms":1234,"token_scope":"last_llm_request"}}}
+{"type":"response","data":{"raw_reply":"done","session_id":"session-1","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"cache_read_tokens":60,"cache_write_tokens":10,"model":"test-model","duration_ms":1234,"token_scope":"agent_task","total":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"cache_read_tokens":60,"cache_write_tokens":10},"last":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"cache_read_tokens":6,"cache_write_tokens":1}}}}
 ```
 
-Token counts are provider-reported, not estimates. `token_scope` is
-`last_llm_request`, matching the runtime result: these counts cover the last
-successful root-agent LLM request, not the sum of earlier tool rounds, subagents,
-or compression requests. Cache counts are subsets of input tokens; unreported
-cache counts are zero. Anthropic input counts include uncached input plus cache
-reads and writes. `model` is the resolved configured model. `duration_ms` measures
-the gateway turn and session close, excluding provider bootstrap and subsequent
-memory automation shutdown. `--attach` continues to forward daemon SSE events.
+Token counts are provider-reported, not estimates. `token_scope` is `agent_task`:
+`usage.total` sums every successful root-agent LLM request in the current task,
+including all tool rounds and requests before/after a suspended lane resumes.
+`usage.last` contains only the latest request. The existing flat token fields
+are aliases of `usage.total`, so clients reading those fields receive cumulative
+usage. A new user task in the same session resets the accounting period.
+Subagent and compression requests are not included in this per-agent total;
+failed requests without provider usage cannot be counted. Cache counts are subsets
+of input tokens; unreported counts are zero. `model` is the configured model.
+`duration_ms` measures the gateway turn and session close. `--attach` continues
+to forward daemon SSE events. Old snapshots cannot reconstruct usage omitted
+before this change.
 
 ### JSON tool progress events
 

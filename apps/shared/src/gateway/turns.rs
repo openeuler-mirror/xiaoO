@@ -49,6 +49,10 @@ pub struct AppTurnResult {
     pub raw_reply: String,
     pub visible_reply: String,
     pub messages: Vec<ChatMessage>,
+    /// Accumulated usage for the current agent task (all tool rounds).
+    pub total_token_usage: agent_types::outcome::TokenUsage,
+    /// Latest request; legacy flat fields below retain their context-window semantics.
+    pub last_token_usage: agent_types::outcome::TokenUsage,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,

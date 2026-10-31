@@ -115,6 +115,10 @@ async fn run_agent_loop_synthesizes_missing_call_id_and_executes_tool() {
     // turn 1: synthesize + run the tool; turn 2: model stops and the loop
     // completes without injecting a checklist that could replace the answer.
     assert_eq!(loop_state.turn_count, 2);
+    assert_eq!(loop_state.token_usage.prompt_tokens, 20);
+    assert_eq!(loop_state.token_usage.completion_tokens, 7);
+    assert_eq!(loop_state.token_usage.total_tokens, 27);
+    assert_eq!(loop_state.last_token_usage.total_tokens, 12);
 
     let messages = loop_state.messages.read();
     assert!(

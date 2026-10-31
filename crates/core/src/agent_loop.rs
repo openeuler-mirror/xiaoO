@@ -96,6 +96,10 @@ pub async fn run_agent_loop(
 
     // Detect `/skill-name` prefix and expand skill prompt inline.
     if input.append_user_message {
+        // A new external user turn starts a new accounting period. Resuming a
+        // suspended tool/subagent lane uses append_user_message=false.
+        state.token_usage = Default::default();
+        state.last_token_usage = Default::default();
         if let Some(expanded) =
             try_expand_skill_prefix(&input.user_message, &*snapshot.skill_registry)
         {
@@ -841,7 +845,7 @@ fn live_context_snippets(
 
     let turn = ctx.turn.turn_number;
     let max_turns = ctx.snapshot.max_turns;
-    let tokens_used = ctx.state.token_usage.total_tokens;
+    let tokens_used = ctx.state.last_token_usage.total_tokens;
     let remaining = max_turns.saturating_sub(turn);
     if max_turns > 0 && remaining <= 5 {
         let horizon = format!(
@@ -855,7 +859,7 @@ fn live_context_snippets(
     }
 
     let window = ctx.snapshot.token_budget_config.total_budget;
-    let context_input = ctx.state.token_usage.prompt_tokens;
+    let context_input = ctx.state.last_token_usage.prompt_tokens;
     if let Some(pct) = context_input.saturating_mul(100).checked_div(window) {
         if pct >= 25 {
             let mut line =
@@ -1508,11 +1512,16 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     ctx.turn.total_time_ms = total_time_ms;
     ctx.turn.tpot_ms = tpot_ms;
 
-    ctx.state.token_usage.prompt_tokens = response.message.usage.prompt_tokens;
-    ctx.state.token_usage.completion_tokens = completion_tokens;
-    ctx.state.token_usage.total_tokens = response.message.usage.total_tokens;
-    ctx.state.token_usage.cached_tokens = response.message.usage.cached_tokens;
-    ctx.state.token_usage.cache_write_tokens = response.message.usage.cache_write_tokens;
+    ctx.state.last_token_usage = agent_types::outcome::TokenUsage {
+        prompt_tokens: response.message.usage.prompt_tokens,
+        completion_tokens,
+        total_tokens: response.message.usage.total_tokens,
+        cached_tokens: response.message.usage.cached_tokens,
+        cache_write_tokens: response.message.usage.cache_write_tokens,
+    };
+    ctx.state
+        .token_usage
+        .add_assign(&ctx.state.last_token_usage);
 
     // Flush the final filtered text/reasoning only when the last in-stream
     // emit did not already cover the full content (throttling may have
