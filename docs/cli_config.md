@@ -358,18 +358,26 @@ xiaoo --cli run --debug -p "List all Python files in the project"
 
 ## LLM request timeout and retries
 
-Streaming and non-streaming LLM calls share one retry policy: an initial attempt
-plus at most **5 retries**, each limited to **20 seconds** for the entire request
-(connection, headers and full response body). Continuous streaming does not
-extend the per-attempt limit. A logical call has at most 6 attempts and a
-120-second request budget, excluding hooks and tools. There is no additional
-backoff or Retry-After sleep, and Provider/Agent layers do not stack retries.
-Transient transport, stream, rate-limit and recoverable server errors are retried;
-authentication/configuration errors and cancellation are not.
+Non-streaming calls start with an initial attempt plus at most **5 retries**.
+Foreground calls bound each attempt at **180 seconds** and the whole call at
+**360 seconds** (two full-length attempts), which stays below the CLI task
+deadline so one hung call cannot consume the entire turn. Background work
+(compaction, memory summary) uses **120 seconds** per attempt and **240 seconds**
+overall. Retries back off exponentially from 200 ms and a `Retry-After` hint is
+honoured up to a 5-second cap.
 
-Exhaustion ends the current turn, even if an error hook offers recovery. TUI
-shows the error and waits for new user input. CLI closes the session and exits
-nonzero. Stream retries discard partial text/reasoning from failed attempts.
+Streaming calls have **no total budget**: liveness is enforced per read. The
+first byte is allowed **60 seconds** for the response head and again for the
+first chunk (slow prefill), then each chunk gap must stay under **30 seconds**.
+Streaming allows at most **3 retries**, so a dead peer is cut off instead of
+pinning the interactive path.
+
+Transient transport, stream, rate-limit and recoverable server errors are
+retried; authentication/configuration errors and cancellation are not.
+Provider/Agent layers do not stack retries. Exhaustion ends the current turn,
+even if an error hook offers recovery. TUI shows the error and waits for new
+user input. CLI closes the session and exits nonzero. Stream retries discard
+partial text/reasoning from failed attempts.
 
 ## CLI task deadline
 

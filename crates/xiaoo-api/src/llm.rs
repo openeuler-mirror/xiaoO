@@ -12,7 +12,7 @@
 
 // ---- Provider construction ----
 #[doc(inline)]
-pub use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper};
+pub use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper, RetryBudget};
 
 // ---- Provider / model resolution ----
 #[doc(inline)]

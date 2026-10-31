@@ -178,26 +178,33 @@ pub fn build_compression_pipeline(
     Ok(pipeline)
 }
 
-/// CLI context-window resolution: dynamic probing chain first (shared with
-/// the TUI gateway via `probe_dynamic_context_window`), falling back to the
-/// provider's static value on failure.
+/// CLI context-window resolution: same shared entry point as the TUI turn
+/// path (single-flight cache, bounded probe chain), so a cold invocation
+/// returns within a bounded wait even when endpoints are slow or
+/// unreachable. The CLI only needs a number, so the outcome collapses to
+/// its window value, with the provider's static capability as fallback
+/// and floor.
 pub async fn resolve_effective_context_window(
     config: &CliConfig,
     llm_provider: &Arc<LlmProviderWrapper>,
 ) -> usize {
-    if let Some(window) = crate::gateway_api::runtime_request::probe_dynamic_context_window(
-        &config.provider,
-        &config.model,
+    let static_window = llm_provider.capabilities().max_context_window.max(1);
+    let llm = crate::config::LlmConfig {
+        provider: config.provider.clone(),
+        model: config.model.clone(),
+        api_key_env: config.api_key_env.clone(),
+        api_base: config.api_base.clone().unwrap_or_default(),
+        ..Default::default()
+    };
+    crate::gateway_api::runtime_request::resolve_window_with_shared_cache(
+        &llm,
         config.api_key.clone(),
-        config.api_key_env.clone(),
-        config.api_base.clone(),
+        Some(static_window),
+        crate::gateway_api::runtime_request::PROBE_TOTAL_BUDGET,
     )
     .await
-    {
-        return window;
-    }
-
-    llm_provider.capabilities().max_context_window.max(1)
+    .map(|resolved| resolved.window())
+    .unwrap_or(static_window)
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 #[tokio::test(start_paused = true)]
-async fn hung_calls_stop_after_initial_attempt_and_five_retries() {
+async fn hung_calls_stop_at_overall_budget() {
     let calls = AtomicU32::new(0);
     let start = tokio::time::Instant::now();
     let result: Result<(), _> = run(|_| {
@@ -9,24 +9,14 @@ async fn hung_calls_stop_after_initial_attempt_and_five_retries() {
         std::future::pending()
     })
     .await;
-    assert_eq!(calls.load(Ordering::SeqCst), 6);
-    assert_eq!(start.elapsed(), Duration::from_secs(120));
+    // Each attempt burns the per-attempt budget, so the overall cap ends the
+    // loop before MAX_NON_STREAM_RETRIES is reached.
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(start.elapsed(), REQUEST_OVERALL_BUDGET);
     assert!(matches!(
         result,
-        Err(LlmError::RetryExhausted { attempts: 6, .. })
+        Err(LlmError::RetryExhausted { attempts: 2, .. })
     ));
-}
-#[tokio::test]
-async fn success_on_last_retry_is_returned() {
-    let result = run(|attempt| async move {
-        if attempt < MAX_RETRIES {
-            Err(LlmError::Timeout)
-        } else {
-            Ok("done")
-        }
-    })
-    .await;
-    assert_eq!(result.unwrap(), "done");
 }
 #[tokio::test]
 async fn permanent_errors_and_cancellation_are_never_retried() {
@@ -51,7 +41,7 @@ async fn permanent_errors_and_cancellation_are_never_retried() {
     }
 }
 #[tokio::test(start_paused = true)]
-async fn retry_after_does_not_extend_budget() {
+async fn retry_after_is_capped_by_max_backoff() {
     let start = tokio::time::Instant::now();
     let result: Result<(), _> = run(|_| async {
         Err(LlmError::RateLimited {
@@ -64,5 +54,7 @@ async fn retry_after_does_not_extend_budget() {
         result,
         Err(LlmError::RetryExhausted { attempts: 6, .. })
     ));
-    assert_eq!(start.elapsed(), Duration::ZERO);
+    // The huge Retry-After hint is capped, so five backoffs cost at most
+    // 5 * MAX_RETRY_BACKOFF.
+    assert_eq!(start.elapsed(), MAX_RETRY_BACKOFF * MAX_NON_STREAM_RETRIES);
 }

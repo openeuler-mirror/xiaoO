@@ -109,7 +109,7 @@
   },
   "apps/endside/src/gateway_api/runtime_request.rs": {
     "tokio::spawn(async move {": 1,
-    "let probe = tokio::spawn(async move {": 1
+    "tokio::spawn(run_probe(probe_key, probe, done));": 1
   },
   "apps/endside/src/gateway_api/session_core.rs": {
     "tokio::spawn(async move {": 1

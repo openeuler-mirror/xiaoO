@@ -222,9 +222,10 @@ mod wrapper_tests {
         }
     }
 
-    /// A provider whose `complete_stream` records the request and then
-    /// never resolves — models an LLM response still streaming when the
-    /// caller cancels. `complete` is never reached on the streaming path.
+    /// A provider whose `complete_stream` records the request and then emits
+    /// nothing until the first-chunk read deadline fires — models a stream
+    /// that stalls after the handshake. `complete` is never reached on the
+    /// streaming path.
     struct PendingStreamProvider {
         captured: Mutex<Option<LlmRequest>>,
         caps: ProviderCapabilities,
@@ -251,10 +252,12 @@ mod wrapper_tests {
             _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
         ) -> Result<LlmResponse, LlmError> {
             *self.captured.lock().unwrap() = Some(request.clone());
-            // The stream never completes: only the cancel branch of the
-            // wrapper can end this call.
-            std::future::pending::<()>().await;
-            unreachable!("pending future never resolves")
+            // The provider layer owns stream liveness (no total budget in the
+            // retry policy), so model the tiered read deadline here: a stalled
+            // stream is cut at the first-chunk budget instead of pending
+            // forever, which keeps the retry loop terminating.
+            tokio::time::sleep(crate::request_policy::STREAM_FIRST_CHUNK_TIMEOUT).await;
+            Err(LlmError::Timeout)
         }
 
         fn capabilities(&self) -> &ProviderCapabilities {
@@ -1085,7 +1088,8 @@ mod wrapper_tests {
             .unwrap_err();
         assert!(matches!(
             result,
-            LlmError::RetryExhausted { attempts: 6, .. }
+            LlmError::RetryExhausted { attempts, .. }
+                if attempts == crate::request_policy::MAX_STREAM_RETRIES + 1
         ));
     }
 
@@ -1098,7 +1102,11 @@ mod wrapper_tests {
             .complete_stream(&make_request("hi"), &|_| {})
             .await
             .unwrap_err();
-        assert!(matches!(err, LlmError::RetryExhausted { attempts: 6, .. }));
+        assert!(matches!(
+            err,
+            LlmError::RetryExhausted { attempts, .. }
+                if attempts == crate::request_policy::MAX_STREAM_RETRIES + 1
+        ));
     }
 
     #[tokio::test]
@@ -1135,10 +1143,22 @@ mod wrapper_tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            LlmError::RetryExhausted { attempts: 6, .. }
+            LlmError::RetryExhausted { attempts, .. }
+                if attempts == crate::request_policy::MAX_STREAM_RETRIES + 1
         ));
-        assert_eq!(resets.load(Ordering::SeqCst), 5);
-        assert_eq!(started.elapsed(), std::time::Duration::from_secs(120));
+        assert_eq!(
+            resets.load(Ordering::SeqCst),
+            crate::request_policy::MAX_STREAM_RETRIES as usize
+        );
+        // Attempts run to the provider's first-chunk deadline; the retry
+        // backoff adds a small fixed amount on top.
+        assert!(
+            started.elapsed()
+                >= std::time::Duration::from_secs(
+                    (crate::request_policy::MAX_STREAM_RETRIES as u64 + 1)
+                        * crate::request_policy::STREAM_FIRST_CHUNK_TIMEOUT.as_secs()
+                )
+        );
     }
     #[tokio::test(start_paused = true)]
     async fn cancelling_during_retry_stops_the_remaining_budget() {

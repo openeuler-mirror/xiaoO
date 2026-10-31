@@ -3,7 +3,7 @@ use std::sync::Arc;
 use agent_contracts::TokenEstimator;
 use agent_llm::{ChatMessageExt, CompletionConfigExt, LlmRequestExt, ResponseFormatExt};
 use agent_types::{ChatMessage, CompletionConfig, LlmRequest, MessageRole, ResponseFormat};
-use llm_client::LlmProviderWrapper;
+use llm_client::{LlmProviderWrapper, RetryBudget};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -165,7 +165,10 @@ impl SessionMemoryManager {
 
         let source = build_summary_source(snapshot, &self.policy);
         let request = self.build_summary_request(&source)?;
-        let response = self.summary_provider.complete(&request).await?;
+        let response = self
+            .summary_provider
+            .complete_with_budget(&request, RetryBudget::Background)
+            .await?;
         let llm_sections = parse_session_summary_response(response.message.text.as_deref())?;
         let sections = llm_sections.into_sections(snapshot);
         let budgeted = budget_session_sections(

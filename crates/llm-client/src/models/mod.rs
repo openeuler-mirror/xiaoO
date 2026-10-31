@@ -71,18 +71,35 @@ pub trait ModelCatalog: Send + Sync {
     async fn list_models(&self) -> Result<Vec<ModelSummary>, LlmError>;
 }
 
+/// 探测链各阶段的等待预算（按目录 > OpenRouter > Ollama 的解析顺序）。
+///
+/// 各 catalog 客户端自身的 HTTP 上限（30s/10s）保持不变——模型列表浏览
+/// 等用户交互路径仍依赖它们；探测链内由这里的阶段预算截断等待。
+const CATALOG_STAGE_BUDGET: Duration = Duration::from_secs(2);
+const OPENROUTER_STAGE_BUDGET: Duration = Duration::from_secs(3);
+const OLLAMA_STAGE_BUDGET: Duration = Duration::from_secs(2);
+
 /// 解析模型上下文窗口，优先级：provider 动态 catalog > OpenRouter 公共模型库
 /// > Ollama `/api/show`。
 ///
-/// 全链 fail-soft：任一级失败只记 warn 并落穿到下一级，绝不因网络问题
-/// 阻塞 provider 装配（调用方在全部未命中时使用 provider 构造 fallback）。
+/// 全链 fail-soft：任一级失败（含阶段预算超时）只记 warn 并落穿到下一级，
+/// 绝不因网络问题阻塞 provider 装配（调用方在全部未命中时使用 provider
+/// 构造 fallback）。
 pub async fn resolve_model_context_length(
     config: &ResolvedConfig,
     model: &str,
 ) -> Result<Option<u64>, LlmError> {
     if config.supports_model_catalog {
         let catalog_result = match create_model_catalog(config) {
-            Ok(catalog) => catalog.list_models().await,
+            Ok(catalog) => {
+                match tokio::time::timeout(CATALOG_STAGE_BUDGET, catalog.list_models()).await {
+                    Ok(result) => result,
+                    Err(_) => Err(LlmError::ApiError(format!(
+                        "provider model catalog timed out after {}ms",
+                        CATALOG_STAGE_BUDGET.as_millis()
+                    ))),
+                }
+            }
             Err(error) => {
                 tracing::warn!(
                     model = %model,
@@ -115,15 +132,39 @@ pub async fn resolve_model_context_length(
         }
     }
 
-    if let Some(context) = openrouter::lookup_context_length(model).await {
-        return Ok(Some(context));
+    match tokio::time::timeout(
+        OPENROUTER_STAGE_BUDGET,
+        openrouter::lookup_context_length(model),
+    )
+    .await
+    {
+        Ok(Some(context)) => return Ok(Some(context)),
+        Ok(None) => {}
+        Err(_) => {
+            tracing::warn!(
+                model = %model,
+                "openrouter model lookup timed out; continuing resolution chain"
+            );
+        }
     }
 
     match config.protocol {
         ProtocolFamily::Ollama => {
-            OllamaModelCatalog::new(config.base_url.clone())
-                .get_context_length(model)
-                .await
+            match tokio::time::timeout(
+                OLLAMA_STAGE_BUDGET,
+                OllamaModelCatalog::new(config.base_url.clone()).get_context_length(model),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        model = %model,
+                        "ollama /api/show probe timed out; giving up resolution chain"
+                    );
+                    Ok(None)
+                }
+            }
         }
         _ => Ok(None),
     }
