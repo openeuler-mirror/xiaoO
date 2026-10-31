@@ -230,6 +230,13 @@ impl GatewayRuntime {
                         self.pending_hook_actions.extend(actions);
                     }
                 }
+                SessionTurnUpdate::TurnNotice { text } => {
+                    // Inserted before the streaming placeholder, so the
+                    // notice reads as context for the turn rather than as
+                    // an epilogue after its reply.
+                    self.insert_aux_message(state, Message::system(text));
+                    state.chat_state.stick_to_bottom = true;
+                }
                 SessionTurnUpdate::Err(error) => {
                     if self.draining_after_cancel {
                         // Late failure from a turn the user already

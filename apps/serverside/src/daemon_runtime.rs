@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::{fs, path::Path};
 use xiaoo_api::chat::{
-    AgentId, FeatureFlags, HookerRegistryConfig, ReasoningEffort, TokenBudgetConfig, ToolName,
+    validate_max_tokens_against_window, AgentId, FeatureFlags, HookerRegistryConfig,
+    ReasoningEffort, TokenBudgetConfig, ToolName, MAX_REASONABLE_OUTPUT_RATIO,
 };
 use xiaoo_api::llm::LlmProviderWrapper;
 use xiaoo_api::llm::{build_context_manager, CompactOverrides, CompressionPipeline};
@@ -1052,40 +1053,43 @@ fn build_token_budget(total_budget: usize, configured_output_tokens: usize) -> T
     }
 }
 
+/// Startup/override-time `max_tokens` gate. The rejection predicate and the
+/// user-facing text come from the shared `validate_max_tokens_against_window`
+/// (the same single source the TUI turn gate uses), so the two enforcement
+/// points cannot drift; only the failure handling differs — the daemon is a
+/// long-lived shared process, so an unusable config aborts instead of
+/// rejecting a single turn. The ratio warning is daemon-side only: the TUI
+/// turn path emits no ratio warning and only hard-rejects on zero input
+/// space.
 fn validate_token_budget_config(
     budget: &TokenBudgetConfig,
     configured_max_tokens: usize,
     model: &str,
     config_path: &Path,
 ) {
-    let max_reasonable_output_ratio = 0.5;
     let max_reasonable_output_tokens =
-        (budget.total_budget as f64 * max_reasonable_output_ratio) as usize;
+        (budget.total_budget as f64 * MAX_REASONABLE_OUTPUT_RATIO) as usize;
 
     if configured_max_tokens > max_reasonable_output_tokens {
-        let warning_msg = format!(
-            "Warning: max_tokens {} exceeds 50% of the estimated context window for model {}. \
-            This may limit input space.",
-            configured_max_tokens, model
+        // Percentage is derived from the ratio constant, not restated as a
+        // literal, so the two cannot diverge.
+        tracing::warn!(
+            "max_tokens {} exceeds {:.0}% of the estimated context window for model {}. \
+             This may limit input space.",
+            configured_max_tokens,
+            MAX_REASONABLE_OUTPUT_RATIO * 100.0,
+            model
         );
-        tracing::warn!("{}", warning_msg);
     }
 
-    if configured_max_tokens >= budget.total_budget {
-        let error_msg = format!(
-            "Config Error: max_tokens {} is too large relative to the estimated context window. \
-            This would leave NO space for input.",
-            configured_max_tokens
-        );
-
-        eprintln!("{}", error_msg);
-        eprintln!();
-        eprintln!("Configuration file: {}", config_path.display());
-        eprintln!("Suggestions:");
-        eprintln!(
-            "  - Reduce max_tokens (currently {}) in [app.llm] section",
-            configured_max_tokens
-        );
+    if let Err(error) = validate_max_tokens_against_window(
+        configured_max_tokens,
+        budget.total_budget,
+        model,
+        config_path,
+        "[app.llm]",
+    ) {
+        eprintln!("Config Error: {}", error);
         std::process::abort();
     }
 }
