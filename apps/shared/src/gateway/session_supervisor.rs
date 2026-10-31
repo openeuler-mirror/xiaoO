@@ -1599,14 +1599,16 @@ fn terminal_from_outcome(
 
     LaneTerminal {
         result: AppTurnResult {
-            cache_write_tokens: token_usage.cache_write_tokens as u64,
+            total_token_usage: token_usage.clone(),
+            last_token_usage: loop_state.last_token_usage.clone(),
+            cache_write_tokens: loop_state.last_token_usage.cache_write_tokens as u64,
             raw_reply: reply.clone(),
             visible_reply: reply.clone(),
             messages,
-            prompt_tokens: token_usage.prompt_tokens as u64,
-            completion_tokens: token_usage.completion_tokens as u64,
-            total_tokens: token_usage.total_tokens as u64,
-            cached_tokens: token_usage.cached_tokens as u64,
+            prompt_tokens: loop_state.last_token_usage.prompt_tokens as u64,
+            completion_tokens: loop_state.last_token_usage.completion_tokens as u64,
+            total_tokens: loop_state.last_token_usage.total_tokens as u64,
+            cached_tokens: loop_state.last_token_usage.cached_tokens as u64,
             estimated_input_tokens: estimated_input_tokens as u64,
             outcome,
             hook_actions: Vec::new(),

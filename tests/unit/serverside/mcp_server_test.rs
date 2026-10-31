@@ -15,6 +15,8 @@ struct MockSessions;
 
 fn mock_turn_result() -> AppTurnResult {
     AppTurnResult {
+        total_token_usage: Default::default(),
+        last_token_usage: Default::default(),
         cache_write_tokens: 0,
         raw_reply: "mock reply".to_string(),
         visible_reply: "mock reply".to_string(),

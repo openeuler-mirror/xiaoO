@@ -683,6 +683,7 @@ async fn open_session_preserves_imported_loop_state() {
         save_session_without_backend(&store, &resolver, "s-import", SessionLifecycleStatus::Idle)
             .await;
     seeded.loop_state = Some(LoopStateSnapshot {
+        last_token_usage: Default::default(),
         session_id: "s-import".to_string(),
         messages: imported_messages.clone(),
         turn_count: 1,

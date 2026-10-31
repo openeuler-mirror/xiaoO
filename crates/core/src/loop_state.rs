@@ -12,7 +12,10 @@ pub struct LoopState {
     pub session_id: String,
     pub messages: Arc<RwLock<Vec<ChatMessage>>>,
     pub turn_count: u32,
+    /// Cumulative successful LLM requests in the current agent task.
     pub token_usage: TokenUsage,
+    /// Latest request, used for context-window decisions.
+    pub last_token_usage: TokenUsage,
     pub compression_meta: CompressionMeta,
     pub kv_cache_map: KvCacheMap,
     pub cancel: CancellationToken,
@@ -29,7 +32,11 @@ pub struct LoopStateSnapshot {
     pub session_id: String,
     pub messages: Vec<ChatMessage>,
     pub turn_count: u32,
+    /// Cumulative successful LLM requests in the current agent task.
     pub token_usage: TokenUsage,
+    /// Latest request, used for context-window decisions.
+    #[serde(default)]
+    pub last_token_usage: TokenUsage,
     pub compression_meta: CompressionMeta,
     pub kv_cache_map: KvCacheMap,
 }
@@ -45,6 +52,7 @@ impl LoopState {
             messages: Arc::new(RwLock::new(Vec::new())),
             turn_count: 0,
             token_usage: TokenUsage::default(),
+            last_token_usage: TokenUsage::default(),
             compression_meta: CompressionMeta::default(),
             kv_cache_map: KvCacheMap::default(),
             cancel,
@@ -63,6 +71,7 @@ impl LoopState {
             messages: self.messages.read().clone(),
             turn_count: self.turn_count,
             token_usage: self.token_usage.clone(),
+            last_token_usage: self.last_token_usage.clone(),
             compression_meta: self.compression_meta.clone(),
             kv_cache_map: self.kv_cache_map.clone(),
         }
@@ -74,6 +83,7 @@ impl LoopState {
             messages: Arc::new(RwLock::new(snapshot.messages)),
             turn_count: snapshot.turn_count,
             token_usage: snapshot.token_usage,
+            last_token_usage: snapshot.last_token_usage,
             compression_meta: snapshot.compression_meta,
             kv_cache_map: snapshot.kv_cache_map,
             cancel,

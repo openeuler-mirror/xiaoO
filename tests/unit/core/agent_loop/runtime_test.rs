@@ -489,7 +489,7 @@ fn loop_stop_rule_matches_only_configured_successful_tool() {
 }
 
 #[tokio::test]
-async fn run_agent_loop_overwrites_token_usage_with_current_turn_usage() {
+async fn run_agent_loop_resets_usage_for_new_user_task() {
     let call_count = Arc::new(StdMutex::new(0));
     let provider = Arc::new(LlmProviderWrapper::new(
         Arc::new(SequentialUsageProvider::new(call_count)),
