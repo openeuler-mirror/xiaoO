@@ -294,15 +294,32 @@ echo "步骤 3/5：安装 systemd service..."
 # nohup 模式：下方 export 让进程继承。两种模式都覆盖。
 if [ "$USE_SYSTEMD" = true ]; then
     sudo mkdir -p /etc/agent_moss
+    # 日志白名单：AgentMoss 0.17.0 起校验 llm_log_path，root 服务默认只允许
+    # /root + /tmp。systemd 模式下服务是 root、bridge 是当前用户，日志必然落在
+    # 当前用户家目录 → 必须显式授权。
+    # 多用户共享同一 systemd 服务：每个用户装一次，把自己的日志根目录**累积**
+    # 进白名单（去重、不覆盖），否则后装的人会把前一个人的挤掉。
+    _AM_LOG_ROOT="${AGENT_MOSS_LOG_PATH:+$(dirname "${AGENT_MOSS_LOG_PATH}")}"
+    _AM_LOG_ROOT="${_AM_LOG_ROOT:-$HOME}"
     if [ -f /etc/agent_moss/agent_moss.env ]; then
         # 已有 env 文件：删旧的同名行（避免重复），再追加
         sudo sed -i '/^AGENT_MOSS_INSTANCE=/d' /etc/agent_moss/agent_moss.env
         echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
         sudo sed -i '/^AGENT_MOSS_AUTH_TOKEN_FILE=/d' /etc/agent_moss/agent_moss.env
         echo "AGENT_MOSS_AUTH_TOKEN_FILE=${AM_AUTH_TOKEN_FILE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+        _AM_OLD_ROOTS=$(sudo sed -n 's/^AGENT_MOSS_LOG_ROOTS=//p' /etc/agent_moss/agent_moss.env 2>/dev/null || true)
+        case ",${_AM_OLD_ROOTS}," in
+            *",${_AM_LOG_ROOT},"*) ;;  # 已授权，跳过
+            *)
+                _AM_NEW_ROOTS="${_AM_OLD_ROOTS:+${_AM_OLD_ROOTS},}${_AM_LOG_ROOT}"
+                sudo sed -i '/^AGENT_MOSS_LOG_ROOTS=/d' /etc/agent_moss/agent_moss.env
+                echo "AGENT_MOSS_LOG_ROOTS=${_AM_NEW_ROOTS}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+                ;;
+        esac
     else
         echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee /etc/agent_moss/agent_moss.env > /dev/null
         echo "AGENT_MOSS_AUTH_TOKEN_FILE=${AM_AUTH_TOKEN_FILE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+        echo "AGENT_MOSS_LOG_ROOTS=${_AM_LOG_ROOT}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
     fi
 fi
 export AGENT_MOSS_INSTANCE="${AM_INSTANCE}"
