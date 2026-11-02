@@ -140,11 +140,8 @@ pub fn config_schema() -> Value {
                 field("language_id", "string", true),
             ]),
             section("compact", "上下文压缩", "object", &[
-                field("warning_ratio", "number", false),
                 field("auto_compact_ratio", "number", false),
                 field("blocking_ratio", "number", false),
-                field("snip_stale_after_ms", "integer", false),
-                field("snip_preserve_tail", "integer", false),
                 field("collapse_preserve_tail", "integer", false),
                 field("summary_max_tokens", "integer", false),
                 field("summary_preserve_tail", "integer", false),

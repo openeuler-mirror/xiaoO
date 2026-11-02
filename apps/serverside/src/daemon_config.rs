@@ -389,15 +389,9 @@ pub struct TraceConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CompactConfig {
     #[serde(default)]
-    pub warning_ratio: Option<f64>,
-    #[serde(default)]
     pub auto_compact_ratio: Option<f64>,
     #[serde(default)]
     pub blocking_ratio: Option<f64>,
-    #[serde(default)]
-    pub snip_stale_after_ms: Option<u64>,
-    #[serde(default)]
-    pub snip_preserve_tail: Option<usize>,
     #[serde(default)]
     pub collapse_preserve_tail: Option<usize>,
     #[serde(default)]

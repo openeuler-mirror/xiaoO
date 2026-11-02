@@ -93,7 +93,6 @@ impl TokenBudgetPolicy for CompactionPolicy {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ContextThresholds {
-    pub warning_ratio: f64,
     pub auto_compact_ratio: f64,
     pub blocking_ratio: f64,
 }
@@ -101,7 +100,6 @@ pub struct ContextThresholds {
 impl ContextThresholds {
     pub fn validate(&self) -> CompactResult<()> {
         let ratios = [
-            ("warning_ratio", self.warning_ratio),
             ("auto_compact_ratio", self.auto_compact_ratio),
             ("blocking_ratio", self.blocking_ratio),
         ];
@@ -114,12 +112,9 @@ impl ContextThresholds {
             }
         }
 
-        if !(self.warning_ratio <= self.auto_compact_ratio
-            && self.auto_compact_ratio <= self.blocking_ratio)
-        {
+        if self.auto_compact_ratio > self.blocking_ratio {
             return Err(CompactError::InvalidConfiguration {
-                message: "warning_ratio <= auto_compact_ratio <= blocking_ratio must hold"
-                    .to_string(),
+                message: "auto_compact_ratio <= blocking_ratio must hold".to_string(),
             });
         }
 
@@ -153,7 +148,6 @@ impl CompactionPolicyService {
             });
         }
         let history_limit_usize = history_limit as usize;
-        let warning_threshold = (history_limit * self.thresholds.warning_ratio).floor() as usize;
         let auto_compact_threshold =
             (history_limit * self.thresholds.auto_compact_ratio).floor() as usize;
         let blocking_threshold = (history_limit * self.thresholds.blocking_ratio).floor() as usize;
@@ -162,8 +156,6 @@ impl CompactionPolicyService {
             ContextSeverity::Blocking
         } else if estimated_tokens >= auto_compact_threshold {
             ContextSeverity::AutoCompact
-        } else if estimated_tokens >= warning_threshold {
-            ContextSeverity::Warning
         } else {
             ContextSeverity::Normal
         };

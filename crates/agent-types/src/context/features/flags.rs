@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FeatureFlags {
-    pub history_snip: bool,
     pub context_collapse: bool,
     pub auto_compact: bool,
     pub cache_editing: bool,
@@ -31,7 +30,6 @@ fn default_true() -> bool {
 impl Default for FeatureFlags {
     fn default() -> Self {
         Self {
-            history_snip: true,
             context_collapse: true,
             auto_compact: true,
             cache_editing: true,

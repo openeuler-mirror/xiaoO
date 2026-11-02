@@ -564,8 +564,8 @@ grep = true
 
 # Context compression (common configuration; CLI/Daemon only — TUI ignores [compact]).
 # In remote (daemon) mode the daemon resolves [compact] from its own config;
-# the section is OPTIONAL and defaults to warning=0.6 / auto_compact=0.75 /
-# blocking=0.9 when omitted. Compression is never silently disabled.
+# the section is OPTIONAL and defaults to auto_compact=0.75 / blocking=0.9
+# when omitted. Compression is never silently disabled.
 # [compact]
 # auto_compact_ratio = 0.75
 
