@@ -47,7 +47,7 @@ async fn unrelated_link_in_dedicated_log() {
     let home = Home::new("unrelated_link_in_dedicated_log");
     let redactor = ErrorRedactor::new("http://127.0.0.1:9/chat/completions", "SENTINEL-KEY");
     let text = "KEEP-CASE-unrelated_link_in_dedicated_log KEEP-BODY https://docs.example/SENTINEL-KEY?lang=zh#limits";
-    crate::error::write_redacted_stream_error_log(
+    super::write_redacted_stream_error_log(
         "http://127.0.0.1:9/chat/completions",
         None,
         text,
@@ -311,7 +311,7 @@ async fn large_body(escaped: bool) {
     let expected_x = body.bytes().filter(|&byte| byte == b'x').count();
     let redactor = ErrorRedactor::new("http://127.0.0.1:9/chat/completions", "SENTINEL-KEY");
     let start = Instant::now();
-    crate::error::write_redacted_stream_error_log(
+    super::write_redacted_stream_error_log(
         "http://127.0.0.1:9/chat/completions",
         None,
         &body,

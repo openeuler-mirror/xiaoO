@@ -9,3 +9,4 @@ pub(crate) mod session;
 mod session_core;
 mod session_interaction;
 mod session_sink;
+mod window_disk_cache;

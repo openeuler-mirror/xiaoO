@@ -509,10 +509,10 @@ fn default_llm_max_tokens() -> u32 {
 
 /// Protocol-family static fallback context window: a coarse estimate used
 /// only when the runtime dynamic probe fails — the turn path falls back to
-/// it and never rejects a turn on it (see
-/// `gateway_api::runtime_request::ResolvedWindow`). The authoritative
-/// window comes from the dynamic probing chain (provider catalog >
-/// OpenRouter > Ollama `/api/show`) — see
+/// it, treating it as a plain window value (see
+/// `gateway_api::runtime_request::resolve_window_for_turn`). The
+/// authoritative window comes from the dynamic probing chain (provider
+/// catalog > OpenRouter > Ollama `/api/show`) — see
 /// `gateway_api::runtime_request::probe_dynamic_context_window`.
 pub fn resolve_context_window(config: &Config) -> Option<usize> {
     xiaoo_api::llm::resolve_protocol_family(&config.llm.provider)

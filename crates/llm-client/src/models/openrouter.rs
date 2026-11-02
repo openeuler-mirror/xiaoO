@@ -46,6 +46,29 @@ impl CachedCatalog {
     }
 }
 
+/// 单次 OpenRouter 查询的三态结论。
+///
+/// 只有 [`Self::Miss`] 断言"公共目录确无该模型",且仅在目录数据新鲜
+/// （内存/磁盘在 24h TTL 内,或刚成功拉取）时返回:过期数据上未命中只
+/// 证明数据旧,上游解析链不得据此下长期负结论。命中则不受新鲜度约束——
+/// 过期目录给出的窗口仍是一个可用的答案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenRouterLookup {
+    /// 命中:目录中有该模型的上下文窗口。
+    Found(u64),
+    /// 新鲜数据中确无该模型。
+    Miss,
+    /// 目录不可用(查询被禁用/拉取失败/只剩过期数据可对照)。
+    Unavailable,
+}
+
+/// 目录数据的新鲜度,决定"未命中"是否可信。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogFreshness {
+    Fresh,
+    Stale,
+}
+
 pub(crate) struct OpenRouterCatalog {
     url: String,
     cache_path: Option<PathBuf>,
@@ -73,22 +96,31 @@ impl OpenRouterCatalog {
         }
     }
 
-    /// 查询模型上下文窗口；全链路失败时返回 `None`（fail-soft）。
+    /// 查询模型上下文窗口；过期数据上的未命中报告为
+    /// [`OpenRouterLookup::Unavailable`]，不当作结论。
     ///
     /// 注意：禁用开关（`XIAOO_DISABLE_OPENROUTER_LOOKUP`）由单例门面
     /// [`lookup_context_length`] 检查，显式构造的实例不受其影响（测试
     /// 注入用）。
-    pub(crate) async fn lookup_context_length(&self, model: &str) -> Option<u64> {
-        let entries = self.load_entries().await?;
-        match_model(&entries, model)
+    pub(crate) async fn lookup_context_length(&self, model: &str) -> OpenRouterLookup {
+        let Some((entries, freshness)) = self.load_entries().await else {
+            return OpenRouterLookup::Unavailable;
+        };
+        match match_model(&entries, model) {
+            Some(context) => OpenRouterLookup::Found(context),
+            // 过期数据上的未命中不是证据：目录可能只是旧了。
+            None if freshness == CatalogFreshness::Stale => OpenRouterLookup::Unavailable,
+            None => OpenRouterLookup::Miss,
+        }
     }
 
     /// 加载条目——回落链见模块 `//!`。过期缓存保留的原因：它仍比裸协议族
-    /// 静态兜底值更接近真实窗口，可作离线兜底。
-    async fn load_entries(&self) -> Option<Vec<CatalogEntry>> {
+    /// 静态兜底值更接近真实窗口，可作离线兜底；但以 [`CatalogFreshness::Stale`]
+    /// 标注，未命中不得视为"目录没有该模型"。
+    async fn load_entries(&self) -> Option<(Vec<CatalogEntry>, CatalogFreshness)> {
         if let Some(cached) = self.memory.read().ok().and_then(|guard| guard.clone()) {
             if cached.fresh() {
-                return Some(cached.entries);
+                return Some((cached.entries, CatalogFreshness::Fresh));
             }
         }
 
@@ -99,7 +131,7 @@ impl OpenRouterCatalog {
                 if let Ok(mut guard) = self.memory.write() {
                     *guard = Some(cached.clone());
                 }
-                return Some(cached.entries);
+                return Some((cached.entries, CatalogFreshness::Fresh));
             }
             stale => stale,
         };
@@ -110,7 +142,7 @@ impl OpenRouterCatalog {
                 if let Ok(mut guard) = self.memory.write() {
                     *guard = Some(cached.clone());
                 }
-                return Some(cached.entries);
+                return Some((cached.entries, CatalogFreshness::Fresh));
             }
             Err(error) => {
                 tracing::warn!(
@@ -122,12 +154,13 @@ impl OpenRouterCatalog {
         }
 
         if let Some(cached) = stale_disk {
-            return Some(cached.entries);
+            return Some((cached.entries, CatalogFreshness::Stale));
         }
-        self.memory
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone().map(|cached| cached.entries))
+        self.memory.read().ok().and_then(|guard| {
+            guard
+                .clone()
+                .map(|cached| (cached.entries, CatalogFreshness::Stale))
+        })
     }
 
     async fn fetch(&self) -> Result<CachedCatalog, LlmError> {
@@ -274,9 +307,10 @@ fn is_variant_id(id: &str) -> bool {
 
 /// 进程级单例门面：所有 provider 装配共享同一份缓存。
 /// `XIAOO_DISABLE_OPENROUTER_LOOKUP` 在此生效——显式构造的实例不受影响。
-pub(crate) async fn lookup_context_length(model: &str) -> Option<u64> {
+/// 禁用时报告 [`OpenRouterLookup::Unavailable`]：没做过的查询不能当"确证未命中"。
+pub(crate) async fn lookup_context_length(model: &str) -> OpenRouterLookup {
     if lookup_disabled() {
-        return None;
+        return OpenRouterLookup::Unavailable;
     }
     static CATALOG: OnceLock<OpenRouterCatalog> = OnceLock::new();
     CATALOG

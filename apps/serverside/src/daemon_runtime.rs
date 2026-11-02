@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::{fs, path::Path};
 use xiaoo_api::chat::{
-    validate_max_tokens_against_window, AgentId, FeatureFlags, HookerRegistryConfig,
-    ReasoningEffort, TokenBudgetConfig, ToolName, MAX_REASONABLE_OUTPUT_RATIO,
+    system_reserve, validate_max_tokens_against_window, AgentId, FeatureFlags,
+    HookerRegistryConfig, ReasoningEffort, TokenBudgetConfig, ToolName,
+    MAX_REASONABLE_OUTPUT_RATIO,
 };
 use xiaoo_api::llm::LlmProviderWrapper;
 use xiaoo_api::llm::{build_context_manager, CompactOverrides, CompressionPipeline};
@@ -34,7 +35,6 @@ use xiaoo_shared::gateway::{
     SessionRuntimeResolver,
 };
 
-const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 const DEFAULT_MIN_PROMPT_TOKEN_RESERVE: usize = 2048;
 const DEFAULT_HARD_LIMIT_RATIO: f64 = 0.8;
 const MCP_CHATBOT_INSTANCE_ID: &str = "chatbot";
@@ -1033,7 +1033,7 @@ fn resolve_profile_allowed_tool_names(
 
 fn build_token_budget(total_budget: usize, configured_output_tokens: usize) -> TokenBudgetConfig {
     let total_budget = total_budget.max(1);
-    let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
+    let reserved_for_system = system_reserve(total_budget);
     let reserved_for_prompt = DEFAULT_MIN_PROMPT_TOKEN_RESERVE.min(
         total_budget
             .saturating_sub(reserved_for_system)
@@ -1085,6 +1085,9 @@ fn validate_token_budget_config(
     if let Err(error) = validate_max_tokens_against_window(
         configured_max_tokens,
         budget.total_budget,
+        // build_token_budget clamps the output reserve, so the abort line
+        // stays at "output >= the entire window" (reserve 0).
+        0,
         model,
         config_path,
         "[app.llm]",

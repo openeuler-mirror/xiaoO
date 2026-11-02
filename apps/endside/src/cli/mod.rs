@@ -181,9 +181,8 @@ pub fn build_compression_pipeline(
 /// CLI context-window resolution: same shared entry point as the TUI turn
 /// path (single-flight cache, bounded probe chain), so a cold invocation
 /// returns within a bounded wait even when endpoints are slow or
-/// unreachable. The CLI only needs a number, so the outcome collapses to
-/// its window value, with the provider's static capability as fallback
-/// and floor.
+/// unreachable, with the provider's static capability as fallback and
+/// floor.
 pub async fn resolve_effective_context_window(
     config: &CliConfig,
     llm_provider: &Arc<LlmProviderWrapper>,
@@ -203,7 +202,6 @@ pub async fn resolve_effective_context_window(
         crate::gateway_api::runtime_request::PROBE_TOTAL_BUDGET,
     )
     .await
-    .map(|resolved| resolved.window())
     .unwrap_or(static_window)
 }
 

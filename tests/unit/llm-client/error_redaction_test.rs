@@ -1,15 +1,124 @@
-use crate::error::{map_reqwest_error, write_stream_error_log, LlmError};
+use crate::error::{map_reqwest_error_raw, open_error_log, ErrorRedactor, LlmError};
 use crate::providers::{
     AnthropicProvider, GeminiProvider, OllamaProvider, OpenAiFamilyAuthStyle, OpenAiFamilyProvider,
     ZhipuProvider,
 };
 use agent_contracts::LlmProvider;
 use agent_llm::{ChatMessageExt, LlmRequestExt};
+use agent_types::common::error_log_path;
 use agent_types::{ChatMessage, LlmRequest, StopReason};
+use chrono::Local;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Write the full details of a failed streaming LLM request to error.log
+/// (complete, never truncated). Test-only: production stream-error logging
+/// goes through the structured path (`map_stream_read_error` /
+/// `map_protocol_mismatch` -> `write_structured_stream_error_log` in
+/// `crate::error`); this function and the variant below exist only as
+/// driver entry points for the redaction cases in this suite and its
+/// `boundaries` / `content` sub-suites.
+fn write_stream_error_log(
+    url: &str,
+    response_headers: Option<&reqwest::header::HeaderMap>,
+    partial_response_buffer: &str,
+    error_message: &str,
+    http_status: Option<u16>,
+) {
+    let mut redactor = ErrorRedactor::new(url, "");
+    if let Some(headers) = response_headers {
+        redactor.headers(headers);
+    }
+    write_redacted_stream_error_log(
+        url,
+        response_headers,
+        partial_response_buffer,
+        error_message,
+        http_status,
+        &redactor,
+    );
+}
+
+/// Variant of [`write_stream_error_log`] where the caller supplies the
+/// redactor; test-only as well.
+fn write_redacted_stream_error_log(
+    url: &str,
+    response_headers: Option<&reqwest::header::HeaderMap>,
+    partial_response_buffer: &str,
+    error_message: &str,
+    http_status: Option<u16>,
+    redactor: &ErrorRedactor,
+) {
+    let url = redactor.url(url);
+    let partial_response_buffer = redactor.diagnostic(partial_response_buffer);
+    let error_message = redactor.diagnostic(error_message);
+    let log_path = error_log_path();
+
+    if let Some(parent) = log_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!("Failed to create error log directory: {}", e);
+            return;
+        }
+    }
+
+    match open_error_log(&log_path) {
+        Ok(mut file) => {
+            let timestamp = Local::now().to_rfc3339();
+
+            writeln!(file).ok();
+            writeln!(file, "{}", "=".repeat(60)).ok();
+            writeln!(file, "===== {} source=llm_stream_error =====", timestamp).ok();
+            writeln!(file, "{}", "=".repeat(60)).ok();
+
+            writeln!(file).ok();
+            writeln!(file, "[Basic Info]").ok();
+            writeln!(file, "URL: {}", url).ok();
+            if let Some(status) = http_status {
+                writeln!(file, "HTTP Status: {}", status).ok();
+            }
+            writeln!(file, "Error: {}", error_message).ok();
+
+            if let Some(headers) = response_headers {
+                writeln!(file).ok();
+                writeln!(file, "[Key Headers]").ok();
+
+                let essential_keys = ["content-type", "transfer-encoding"];
+                let debug_keys = [
+                    "x-request-id",
+                    "retry-after",
+                    "x-ratelimit-limit",
+                    "x-ratelimit-remaining",
+                    "x-ratelimit-reset",
+                    "openai-model",
+                ];
+
+                for (key, value) in headers.iter() {
+                    let key_str = key.as_str();
+                    if essential_keys.contains(&key_str) || debug_keys.contains(&key_str) {
+                        let value_str = value.to_str().unwrap_or("<binary>");
+                        writeln!(file, "  {}: {}", key, redactor.diagnostic(value_str)).ok();
+                    }
+                }
+            }
+
+            writeln!(file).ok();
+            writeln!(file, "[Response Body]").ok();
+            writeln!(file, "Length: {} bytes", partial_response_buffer.len()).ok();
+            if !partial_response_buffer.is_empty() {
+                writeln!(file, "{}", partial_response_buffer).ok();
+            }
+
+            writeln!(file).ok();
+            writeln!(file, "{}", "=".repeat(60)).ok();
+            writeln!(file).ok();
+        }
+        Err(e) => {
+            tracing::error!("Failed to write stream error log: {}", e);
+        }
+    }
+}
 
 static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const SECRETS: &[&str] = &[
@@ -587,7 +696,10 @@ async fn short_real_reqwest_timeout() {
         .await
         .unwrap_err();
     assert!(error.is_timeout());
-    let error = map_reqwest_error(error);
+    // Equivalent to the removed map_reqwest_error wrapper: redact against
+    // the failing URL, then map the timeout branch.
+    let redactor = ErrorRedactor::new(error.url().map(|url| url.as_str()).unwrap_or(""), "");
+    let error = redactor.error(map_reqwest_error_raw(error));
     home.record(&full_error(&error), false);
     assert!(matches!(error, LlmError::HttpError(_)));
     assert!(error.to_string().contains("Request timeout"));

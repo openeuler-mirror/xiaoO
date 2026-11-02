@@ -30,4 +30,7 @@ pub use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 // ---- max_tokens vs context-window policy (shared by the TUI turn gate
 // and the daemon's startup/override validation) ----
 #[doc(inline)]
-pub use agent_types::context::{validate_max_tokens_against_window, MAX_REASONABLE_OUTPUT_RATIO};
+pub use agent_types::context::{
+    system_reserve, validate_max_tokens_against_window, DEFAULT_SYSTEM_TOKEN_RESERVE,
+    MAX_REASONABLE_OUTPUT_RATIO,
+};
