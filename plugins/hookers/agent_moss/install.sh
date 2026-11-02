@@ -4,6 +4,7 @@ set -euo pipefail
 # agent_moss 安装脚本
 # 用法：bash install.sh [--enable-llm|--disable-llm]
 # 创建 venv + 从 PyPI 安装 agent-moss 包 + 注册 systemd service + 启动服务。
+# 慢网/内网可用 PIP_INDEX_URL / PIP_TRUSTED_HOST 指定镜像（sudo 下会显式透传）。
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -154,6 +155,35 @@ AM_BIN="$VENV_DIR/bin/agent-moss"
 # 提权前缀：空值时 "$SUDO cmd" 等价直接执行 cmd（非 sudo 模式零提权）。
 if [ "$USE_SYSTEMD" = true ]; then SUDO="sudo"; else SUDO=""; fi
 
+# ---- pip 源透传（慢网/内网必备）----
+# sudo 默认 env_reset 且 HOME=/root，读不到当前用户 ~/.config/pip/pip.conf 里的
+# index-url，pip 会静默回落到 pypi.org。慢网下大依赖（pydantic 等）读超时后，
+# pip 报的是 "Could not find a version ... (from versions: none)" —— 看起来像
+# 版本不存在，实际是索引没拉到，极易误判。
+#
+# 优先级：
+#   1) 显式设了 PIP_INDEX_URL → 只透传它（及 PIP_TRUSTED_HOST）；
+#   2) 否则把当前用户的 pip 配置文件整体透传（PIP_CONFIG_FILE），
+#      让 index-url / timeout / retries / trusted-host 全部生效；
+#   3) 两者都没有 → 不传任何参数，保持默认行为。
+PIP_FWD=()
+if [ -n "${PIP_INDEX_URL:-}" ]; then
+    PIP_FWD+=("PIP_INDEX_URL=$PIP_INDEX_URL")
+    if [ -n "${PIP_TRUSTED_HOST:-}" ]; then PIP_FWD+=("PIP_TRUSTED_HOST=$PIP_TRUSTED_HOST"); fi
+else
+    _USER_PIP_CONF="${PIP_CONFIG_FILE:-}"
+    if [ -z "$_USER_PIP_CONF" ]; then
+        for _c in "$HOME/.config/pip/pip.conf" "$HOME/.pip/pip.conf"; do
+            if [ -f "$_c" ]; then _USER_PIP_CONF="$_c"; break; fi
+        done
+    fi
+    if [ -n "$_USER_PIP_CONF" ] && [ -f "$_USER_PIP_CONF" ]; then
+        PIP_FWD+=("PIP_CONFIG_FILE=$_USER_PIP_CONF")
+    fi
+fi
+PIP_ENV=()
+if [ ${#PIP_FWD[@]} -gt 0 ]; then PIP_ENV=(env "${PIP_FWD[@]}"); fi
+
 # 步骤 1：创建 venv + 安装 agent-moss 包
 echo ""
 echo "步骤 1/5：创建 venv 并安装 agent-moss..."
@@ -168,7 +198,7 @@ if [ -d "$VENV_DIR" ] && [ -x "$VENV_DIR/bin/python3" ]; then
             VENV_VALID=true
         else
             echo "venv 中 agent-moss 版本为 ${INSTALLED_VER}，升级到 ${AM_VERSION}..."
-            if $SUDO "$VENV_DIR/bin/pip" install --upgrade agent-moss=="${AM_VERSION}" 2>&1; then
+            if $SUDO "${PIP_ENV[@]}" "$VENV_DIR/bin/pip" install --upgrade agent-moss=="${AM_VERSION}" 2>&1; then
                 VENV_VALID=true
             else
                 echo "⚠️ 升级失败，将重建 venv"
@@ -176,7 +206,7 @@ if [ -d "$VENV_DIR" ] && [ -x "$VENV_DIR/bin/python3" ]; then
         fi
     else
         echo "venv 中 agent-moss 模块导入失败，尝试重新安装..."
-        if $SUDO "$VENV_DIR/bin/pip" install --force-reinstall agent-moss=="${AM_VERSION}" 2>&1; then
+        if $SUDO "${PIP_ENV[@]}" "$VENV_DIR/bin/pip" install --force-reinstall agent-moss=="${AM_VERSION}" 2>&1; then
             echo "✅ 重新安装成功"
             VENV_VALID=true
         else
@@ -194,8 +224,11 @@ if [ "$VENV_VALID" = false ]; then
     $SUDO mkdir -p "$(dirname "$VENV_DIR")"
     $SUDO python3 -m venv "$VENV_DIR"
     echo "安装 agent-moss==${AM_VERSION}（首次安装会下载依赖，可能需要几分钟）..."
-    $SUDO "$VENV_DIR/bin/pip" install agent-moss=="${AM_VERSION}" 2>&1 || {
+    $SUDO "${PIP_ENV[@]}" "$VENV_DIR/bin/pip" install agent-moss=="${AM_VERSION}" 2>&1 || {
         echo "❌ pip install 失败"
+        echo "   慢网/内网环境请先设镜像再重跑："
+        echo "   export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/"
+        echo "   export PIP_TRUSTED_HOST=mirrors.aliyun.com"
         exit 1
     }
     echo "✅ agent-moss 安装成功"
