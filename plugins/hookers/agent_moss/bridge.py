@@ -331,6 +331,17 @@ def _normalize_history_item(h: dict) -> dict:
         except (TypeError, ValueError):
             output = str(output)
     item["output"] = str(output or "")
+    # called_at：该次调用发生的时刻。AgentMoss 的 L2 授权时效窗
+    # （CONSENT_TTL_SECONDS，默认 300s）拿它和 a_next.called_at 相减，判断
+    # 「用户确认后多久才执行」——一小时前的「是」不能给今天的删用户背书。
+    # 宿主 payload 里给的是毫秒时间戳（called_at_ms），这里转 ISO 8601；
+    # 缺了就跳过时间窗，由「最近 5 条」距离兜底（不伪造时刻）。
+    called_at_ms = h.get("called_at_ms")
+    if called_at_ms:
+        try:
+            item["called_at"] = datetime.fromtimestamp(float(called_at_ms) / 1000).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            pass
     return item
 
 
@@ -361,7 +372,13 @@ def _handle_hook_payload(data: dict) -> int:
     tool_input = call.get("input", {})
 
     action_detail = _extract_action_detail(tool_name, tool_input)
-    a_next = {"action_type": tool_name, "action_detail": action_detail}
+    a_next = {
+        "action_type": tool_name,
+        "action_detail": action_detail,
+        # 当前动作就是此刻发生的：AgentMoss 拿它与历史里 ask_user_question 的
+        # called_at 相减，判断「用户刚才的确认是否仍在时效窗内」。
+        "called_at": datetime.now().isoformat(),
+    }
 
     session_id: str = data.get("session_id") or call.get("call_id", "unknown-session")
     prompt_session: str = data.get("prompt_session", "")
