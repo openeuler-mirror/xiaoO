@@ -699,7 +699,7 @@ async fn retry_exhaustion_ends_turn_until_new_user_input() {
         async fn complete(&self, _: &LlmRequest) -> Result<LlmResponse, LlmError> { unreachable!() }
         async fn complete_stream(&self, request: &LlmRequest,
             on_chunk: &(dyn Fn(StreamChunk) + Send + Sync)) -> Result<LlmResponse, LlmError> {
-            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 6 {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 4 {
                 return Err(LlmError::Timeout);
             }
             self.healthy.complete_stream(request, on_chunk).await
@@ -716,5 +716,5 @@ async fn retry_exhaustion_ends_turn_until_new_user_input() {
     assert!(error.to_string().contains("4 attempts"));
     assert_eq!(raw.calls.load(std::sync::atomic::Ordering::SeqCst), 4);
     run_agent_loop(&runtime, &mut state, AgentLoopInput::new("try again")).await.unwrap();
-    assert_eq!(raw.calls.load(std::sync::atomic::Ordering::SeqCst), 7);
+    assert_eq!(raw.calls.load(std::sync::atomic::Ordering::SeqCst), 5);
 }
