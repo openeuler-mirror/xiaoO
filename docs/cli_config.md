@@ -369,6 +369,14 @@ honoured up to a 5-second cap.
 Streaming calls have **no total budget**: liveness is enforced per read. The
 first byte is allowed **60 seconds** for the response head and again for the
 first chunk (slow prefill), then each chunk gap must stay under **30 seconds**.
+These are separate phase budgets: response headers start a fresh first-body-byte
+wait; connection and header waiting do not consume the body's 60-second budget.
+Every nonempty body chunk resets the idle timer, including SSE keep-alives,
+reasoning/tool-call data and incomplete frames. Concurrent requests have
+independent timers, and healthy streams have no total duration limit.
+Deadlines are enforced by each provider's actual HTTP send/read operations;
+there is no outer activity-reporting watchdog or task-local reporting contract.
+Custom providers must enforce equivalent transport deadlines themselves.
 Streaming allows at most **3 retries**, so a dead peer is cut off instead of
 pinning the interactive path.
 

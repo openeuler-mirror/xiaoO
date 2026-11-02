@@ -1173,4 +1173,88 @@ mod wrapper_tests {
         assert!(matches!(error, LlmError::Cancelled));
         assert_eq!(started.elapsed(), std::time::Duration::from_secs(21));
     }
+    #[tokio::test(start_paused = true)]
+    async fn provider_in_another_task_can_complete_without_activity_reports() {
+        struct SpawnedProvider {
+            caps: ProviderCapabilities,
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl LlmProvider for SpawnedProvider {
+            async fn complete(&self, _: &LlmRequest) -> Result<LlmResponse, LlmError> {
+                unreachable!()
+            }
+            async fn complete_stream(
+                &self,
+                _: &LlmRequest,
+                _: &(dyn Fn(StreamChunk) + Send + Sync),
+            ) -> Result<LlmResponse, LlmError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+                    Ok(make_response("done"))
+                })
+                .await
+                .unwrap()
+            }
+            fn capabilities(&self) -> &ProviderCapabilities {
+                &self.caps
+            }
+        }
+        let raw = Arc::new(SpawnedProvider {
+            caps: default_caps(),
+            calls: AtomicUsize::new(0),
+        });
+        let wrapper = wrapper_without_runtime(raw.clone());
+        let started = tokio::time::Instant::now();
+        let response = wrapper
+            .complete_stream(&make_request("hi"), &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(response.message.text.as_deref(), Some("done"));
+        assert_eq!(raw.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(100));
+    }
+
+    #[tokio::test]
+    async fn real_provider_streams_http_heartbeats_through_wrapper_without_activity_scope() {
+        let mut server = mockito::Server::new_async().await;
+        let data = serde_json::json!({"id":"stream-test", "object":"chat.completion.chunk",
+            "created":0, "model":"test", "choices":[{"index":0,
+            "delta":{"content":"done"}, "finish_reason":"stop"}]});
+        let http = server
+            .mock("POST", "/chat/completions")
+            .with_header("content-type", "text/event-stream")
+            .with_body(format!(
+                ": ping\n\ndata: {data}\n\n: ping\n\ndata: [DONE]\n\n"
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+        let wrapper = super::create_llm_provider(
+            &super::LlmProviderConfig::new("openai-compatible", "test")
+                .with_api_key("test")
+                .with_api_base(format!("{}/chat/completions", server.url())),
+            None,
+            None,
+        )
+        .unwrap();
+        let text = Mutex::new(String::new());
+        let resets = AtomicUsize::new(0);
+        let response = wrapper
+            .complete_stream(&make_request("hi"), &|chunk| {
+                if chunk.reset {
+                    resets.fetch_add(1, Ordering::SeqCst);
+                }
+                if let Some(delta) = chunk.delta_text {
+                    text.lock().unwrap().push_str(&delta);
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.message.text.as_deref(), Some("done"));
+        assert_eq!(*text.lock().unwrap(), "done");
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+        http.assert_async().await;
+    }
 }

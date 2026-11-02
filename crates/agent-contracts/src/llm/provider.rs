@@ -14,6 +14,11 @@ pub struct ProviderCapabilities {
 pub trait LlmProvider: Send + Sync {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError>;
 
+    /// Implementations own response-head, first-body and idle read deadlines
+    /// at the transport boundary. Parsed chunk callbacks are not a liveness
+    /// signal: a healthy peer can send heartbeats or partial frames without
+    /// producing a chunk. Wrappers must not infer a total duration cap from
+    /// missing callbacks, and task-local activity reporting is not required.
     async fn complete_stream(
         &self,
         request: &LlmRequest,

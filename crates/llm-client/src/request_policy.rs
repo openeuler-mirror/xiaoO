@@ -29,22 +29,17 @@ pub(crate) const BACKGROUND_REQUEST_OVERALL_BUDGET: Duration = Duration::from_se
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Streaming: time-to-first-byte. The gateway's vLLM prefill is slow even for
-/// tiny prompts, so a small value would time out spuriously. Applied twice on
-/// the way to the first body byte — once to the response-head wait
-/// ([`execute_stream_request`]) and once to the first chunk ([`stream_deadline`])
-/// — because a stalled handshake and a stalled prefill are separate failure
-/// modes.
+/// tiny prompts, so a small value would time out spuriously. Give the response
+/// head (connection/TLS included) and the first body chunk separate 60s budgets.
 pub(crate) const STREAM_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Streaming: idle gap between chunks once the stream is flowing. A dead peer
-/// is cut off here; a slow-but-alive generator keeps flowing.
+/// Streaming: idle gap after body data starts flowing. A slow-but-alive
+/// generator keeps flowing; only a gap of 30s without data times out.
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-
 pub(crate) const MAX_NON_STREAM_RETRIES: u32 = 5;
 
-/// Streaming retries. Each attempt can burn both first-byte deadlines, so
-/// five retries would multiply a dead peer into roughly twelve minutes on the
-/// interactive path; three keep the worst case bounded.
+/// Each stalled streaming attempt may use two first-response budgets; keep
+/// retries at three so repeated prefill does not amplify a slow gateway.
 pub(crate) const MAX_STREAM_RETRIES: u32 = 3;
 
 /// Backoff before a retry that carries no usable `Retry-After` hint; doubled
@@ -113,9 +108,10 @@ where
     .await
 }
 
-/// Streaming variant: no total budget — a slow-but-alive stream must never be
-/// cut off by a fixed deadline, so liveness is left to the provider's tiered
-/// read deadlines ([`STREAM_FIRST_CHUNK_TIMEOUT`] / [`STREAM_IDLE_TIMEOUT`]).
+/// Streaming has no wrapper-level duration cap. Providers enforce response
+/// and idle deadlines at their actual I/O boundary, including across spawned
+/// tasks and raw provider calls. Parsed chunks alone cannot measure liveness:
+/// transport heartbeats and partial frames may not produce callback events.
 /// Retries are capped at [`MAX_STREAM_RETRIES`].
 pub(crate) async fn run_stream<T, F, Fut>(call: F) -> Result<T, LlmError>
 where
@@ -203,10 +199,9 @@ pub(crate) fn stream_deadline(bytes_received: usize) -> Duration {
 }
 
 /// Sends a prepared streaming request and awaits the response head under
-/// [`STREAM_FIRST_CHUNK_TIMEOUT`]. Without this, a peer that completes the
-/// handshake but never answers would pin the attempt forever: `run_stream`
-/// has no total deadline, and [`stream_deadline`] only starts once the head
-/// (and thus the body stream) exists.
+/// [`STREAM_FIRST_CHUNK_TIMEOUT`], also protecting raw provider calls that
+/// bypass the wrapper. The first body read starts its own budget in
+/// [`next_stream_chunk`]; the two phases do not share one deadline.
 pub(crate) async fn execute_stream_request<F>(
     client: &reqwest::Client,
     request: reqwest::Request,
@@ -218,7 +213,14 @@ where
     match tokio::time::timeout(STREAM_FIRST_CHUNK_TIMEOUT, client.execute(request)).await {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(error)) => Err(map_error(error)),
-        Err(_) => Err(LlmError::Timeout),
+        Err(_) => {
+            tracing::warn!(
+                phase = "response_head",
+                timeout_secs = STREAM_FIRST_CHUNK_TIMEOUT.as_secs(),
+                "LLM streaming response timed out"
+            );
+            Err(LlmError::Timeout)
+        }
     }
 }
 
@@ -232,9 +234,23 @@ pub(crate) async fn next_stream_chunk<S, T, E>(
 where
     S: Stream<Item = Result<T, E>> + Unpin,
 {
-    match tokio::time::timeout(stream_deadline(bytes_received), stream.next()).await {
+    let deadline = stream_deadline(bytes_received);
+    match tokio::time::timeout(deadline, stream.next()).await {
         Ok(item) => Ok(item),
-        Err(_) => Err(LlmError::Timeout),
+        Err(_) => {
+            let phase = if bytes_received == 0 {
+                "first_body"
+            } else {
+                "stream_idle"
+            };
+            tracing::warn!(
+                phase,
+                bytes_received,
+                timeout_secs = deadline.as_secs(),
+                "LLM streaming read timed out"
+            );
+            Err(LlmError::Timeout)
+        }
     }
 }
 
