@@ -163,11 +163,8 @@ pub fn build_compression_pipeline(
     // helper layers onto its built-in defaults — identical to the daemon.
     let cc = &config.compact;
     let overrides = CompactOverrides {
-        warning_ratio: cc.warning_ratio,
         auto_compact_ratio: cc.auto_compact_ratio,
         blocking_ratio: cc.blocking_ratio,
-        snip_stale_after_ms: cc.snip_stale_after_ms,
-        snip_preserve_tail: cc.snip_preserve_tail,
         collapse_preserve_tail: cc.collapse_preserve_tail,
         summary_max_tokens: cc.summary_max_tokens,
         summary_preserve_tail: cc.summary_preserve_tail,

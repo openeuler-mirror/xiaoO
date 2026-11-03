@@ -28,11 +28,8 @@ use crate::{
 /// [`build_context_manager`] interprets as "use the built-in defaults".
 #[derive(Debug, Clone, Default)]
 pub struct CompactOverrides {
-    pub warning_ratio: Option<f64>,
     pub auto_compact_ratio: Option<f64>,
     pub blocking_ratio: Option<f64>,
-    pub snip_stale_after_ms: Option<u64>,
-    pub snip_preserve_tail: Option<usize>,
     pub collapse_preserve_tail: Option<usize>,
     pub summary_max_tokens: Option<usize>,
     pub summary_preserve_tail: Option<usize>,
@@ -41,12 +38,9 @@ pub struct CompactOverrides {
 
 // --- Default constants (single source of truth) -----------------------------
 
-pub const DEFAULT_WARNING_RATIO: f64 = 0.6;
 pub const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.75;
 pub const DEFAULT_BLOCKING_RATIO: f64 = 0.9;
 
-pub const DEFAULT_SNIP_STALE_AFTER_MS: u64 = 3_600_000;
-pub const DEFAULT_SNIP_PRESERVE_TAIL: usize = 6;
 pub const DEFAULT_COLLAPSE_PRESERVE_TAIL: usize = 4;
 
 pub const DEFAULT_SUMMARY_MAX_TOKENS: usize = 1024;
@@ -89,7 +83,6 @@ pub fn build_context_manager(
 
     let config = ContextManagerConfig {
         thresholds: ContextThresholds {
-            warning_ratio: ov.warning_ratio.unwrap_or(DEFAULT_WARNING_RATIO),
             auto_compact_ratio: ov.auto_compact_ratio.unwrap_or(DEFAULT_AUTO_COMPACT_RATIO),
             blocking_ratio: ov.blocking_ratio.unwrap_or(DEFAULT_BLOCKING_RATIO),
         },
@@ -103,14 +96,10 @@ pub fn build_context_manager(
                 .summary_preserve_tail
                 .unwrap_or(DEFAULT_SUMMARY_PRESERVE_TAIL),
         },
-        snip_preserve_tail_messages: ov.snip_preserve_tail.unwrap_or(DEFAULT_SNIP_PRESERVE_TAIL),
         collapse_preserve_tail_messages: ov
             .collapse_preserve_tail
             .unwrap_or(DEFAULT_COLLAPSE_PRESERVE_TAIL),
         session_memory_compaction: None,
-        snip_stale_after_ms: ov
-            .snip_stale_after_ms
-            .unwrap_or(DEFAULT_SNIP_STALE_AFTER_MS),
     };
 
     let completion = CompletionConfig {

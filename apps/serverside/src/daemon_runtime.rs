@@ -1163,11 +1163,8 @@ fn build_compression_pipeline(
     // `Pre-check failed` / `context compression triggered` with `removed=0`
     // forever.
     let overrides = compact.map(|c| CompactOverrides {
-        warning_ratio: c.warning_ratio,
         auto_compact_ratio: c.auto_compact_ratio,
         blocking_ratio: c.blocking_ratio,
-        snip_stale_after_ms: c.snip_stale_after_ms,
-        snip_preserve_tail: c.snip_preserve_tail,
         collapse_preserve_tail: c.collapse_preserve_tail,
         summary_max_tokens: c.summary_max_tokens,
         summary_preserve_tail: c.summary_preserve_tail,

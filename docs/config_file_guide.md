@@ -449,20 +449,17 @@ For detailed skills usage instructions, please refer to [skill_usage.md](./skill
 > builds the compression pipeline from its own `[compact]` section. The
 > `[compact]` section is **optional** in both CLI and Daemon configs: when it
 > is missing, a real `ContextManager` is constructed using built-in default
-> thresholds (0.6 / 0.75 / 0.9). Compression is never silently disabled —
+> thresholds (0.75 / 0.9). Compression is never silently disabled —
 > omit the section to accept the defaults.
 
 Controls context management strategy for long conversations:
 
 ```toml
 [compact]
-warning_ratio = 0.6                  # History ratio entering warning stage
 auto_compact_ratio = 0.75            # Ratio that triggers automatic compression
 blocking_ratio = 0.9                 # Ratio entering blocking stage
 summary_max_tokens = 1024            # Token budget for summary
 summary_preserve_tail = 4            # Recent messages to preserve after summary
-snip_stale_after_ms = 3600000        # Stale message snip timeout (milliseconds)
-snip_preserve_tail = 6               # Messages to preserve during snip
 collapse_preserve_tail = 4           # Messages to preserve during collapse
 summary_llm_max_tokens = 4096        # Summary LLM call max_tokens
 ```

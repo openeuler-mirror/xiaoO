@@ -52,11 +52,8 @@ pub struct LlmSection {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct CompactSection {
-    pub warning_ratio: Option<f64>,
     pub auto_compact_ratio: Option<f64>,
     pub blocking_ratio: Option<f64>,
-    pub snip_stale_after_ms: Option<u64>,
-    pub snip_preserve_tail: Option<usize>,
     pub collapse_preserve_tail: Option<usize>,
     pub summary_max_tokens: Option<usize>,
     pub summary_preserve_tail: Option<usize>,

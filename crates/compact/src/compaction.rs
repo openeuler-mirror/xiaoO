@@ -7,13 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::{CompactError, CompactResult};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum CompactMode {
-    HistorySnip,
-    ContextCollapse,
-    AutoCompact,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PartialDirection {
     BeforePivot,
     AfterPivot,
@@ -23,20 +16,6 @@ pub enum PartialDirection {
 pub struct CompactionBoundary {
     pub pivot_message_id: String,
     pub direction: PartialDirection,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct CompactRequest {
-    pub messages: Vec<ChatMessage>,
-    pub mode: CompactMode,
-    pub boundary: Option<CompactionBoundary>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompactionDecision {
-    pub mode: CompactMode,
-    pub boundary: Option<CompactionBoundary>,
-    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

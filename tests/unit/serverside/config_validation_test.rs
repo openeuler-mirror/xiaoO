@@ -116,7 +116,7 @@ fn rejects_invalid_compact_configuration_before_daemon_start() {
     let path = temp.path().join("config.toml");
     std::fs::write(
         &path,
-        "[llm]\nprovider = \"ollama\"\nmodel = \"test\"\n\n[compact]\nwarning_ratio = 0.95\nauto_compact_ratio = 0.75\nblocking_ratio = 0.9\nsummary_llm_max_tokens = 0\n",
+        "[llm]\nprovider = \"ollama\"\nmodel = \"test\"\n\n[compact]\nauto_compact_ratio = 0.95\nblocking_ratio = 0.9\nsummary_llm_max_tokens = 0\n",
     )
     .expect("write config");
 

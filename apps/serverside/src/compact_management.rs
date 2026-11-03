@@ -1,8 +1,7 @@
 use serde::Serialize;
 use xiaoo_api::llm::{
     DEFAULT_AUTO_COMPACT_RATIO, DEFAULT_BLOCKING_RATIO, DEFAULT_COLLAPSE_PRESERVE_TAIL,
-    DEFAULT_SNIP_PRESERVE_TAIL, DEFAULT_SNIP_STALE_AFTER_MS, DEFAULT_SUMMARY_LLM_MAX_TOKENS,
-    DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SUMMARY_PRESERVE_TAIL, DEFAULT_WARNING_RATIO,
+    DEFAULT_SUMMARY_LLM_MAX_TOKENS, DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SUMMARY_PRESERVE_TAIL,
 };
 
 use crate::daemon_config::{CompactConfig, DaemonConfig};
@@ -16,11 +15,8 @@ pub struct CompactIssue {
 
 #[derive(Debug, Serialize)]
 pub struct EffectiveCompactConfig {
-    pub warning_ratio: f64,
     pub auto_compact_ratio: f64,
     pub blocking_ratio: f64,
-    pub snip_stale_after_ms: u64,
-    pub snip_preserve_tail: usize,
     pub collapse_preserve_tail: usize,
     pub summary_max_tokens: usize,
     pub summary_preserve_tail: usize,
@@ -54,7 +50,6 @@ pub fn compact_issues(config: &CompactConfig) -> Vec<CompactIssue> {
     let effective = effective_config(Some(config));
     let mut errors = Vec::new();
     for (name, ratio) in [
-        ("warning_ratio", effective.warning_ratio),
         ("auto_compact_ratio", effective.auto_compact_ratio),
         ("blocking_ratio", effective.blocking_ratio),
     ] {
@@ -67,18 +62,15 @@ pub fn compact_issues(config: &CompactConfig) -> Vec<CompactIssue> {
             );
         }
     }
-    if !(effective.warning_ratio <= effective.auto_compact_ratio
-        && effective.auto_compact_ratio <= effective.blocking_ratio)
-    {
+    if effective.auto_compact_ratio > effective.blocking_ratio {
         issue(
             &mut errors,
             "compact",
             "invalid_threshold_order",
-            "压缩阈值必须满足 warning_ratio ≤ auto_compact_ratio ≤ blocking_ratio",
+            "压缩阈值必须满足 auto_compact_ratio ≤ blocking_ratio",
         );
     }
     for (name, value) in [
-        ("snip_preserve_tail", effective.snip_preserve_tail),
         ("collapse_preserve_tail", effective.collapse_preserve_tail),
         ("summary_max_tokens", effective.summary_max_tokens),
         ("summary_preserve_tail", effective.summary_preserve_tail),
@@ -98,21 +90,12 @@ pub fn compact_issues(config: &CompactConfig) -> Vec<CompactIssue> {
 
 fn effective_config(config: Option<&CompactConfig>) -> EffectiveCompactConfig {
     EffectiveCompactConfig {
-        warning_ratio: config
-            .and_then(|value| value.warning_ratio)
-            .unwrap_or(DEFAULT_WARNING_RATIO),
         auto_compact_ratio: config
             .and_then(|value| value.auto_compact_ratio)
             .unwrap_or(DEFAULT_AUTO_COMPACT_RATIO),
         blocking_ratio: config
             .and_then(|value| value.blocking_ratio)
             .unwrap_or(DEFAULT_BLOCKING_RATIO),
-        snip_stale_after_ms: config
-            .and_then(|value| value.snip_stale_after_ms)
-            .unwrap_or(DEFAULT_SNIP_STALE_AFTER_MS),
-        snip_preserve_tail: config
-            .and_then(|value| value.snip_preserve_tail)
-            .unwrap_or(DEFAULT_SNIP_PRESERVE_TAIL),
         collapse_preserve_tail: config
             .and_then(|value| value.collapse_preserve_tail)
             .unwrap_or(DEFAULT_COLLAPSE_PRESERVE_TAIL),
@@ -131,11 +114,8 @@ fn effective_config(config: Option<&CompactConfig>) -> EffectiveCompactConfig {
 fn configured_fields(config: &CompactConfig) -> Vec<&'static str> {
     let mut fields = Vec::new();
     for (name, configured) in [
-        ("warning_ratio", config.warning_ratio.is_some()),
         ("auto_compact_ratio", config.auto_compact_ratio.is_some()),
         ("blocking_ratio", config.blocking_ratio.is_some()),
-        ("snip_stale_after_ms", config.snip_stale_after_ms.is_some()),
-        ("snip_preserve_tail", config.snip_preserve_tail.is_some()),
         (
             "collapse_preserve_tail",
             config.collapse_preserve_tail.is_some(),

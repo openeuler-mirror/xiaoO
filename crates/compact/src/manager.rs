@@ -3,7 +3,7 @@ use std::sync::Arc;
 use agent_contracts::{CompressionError, CompressionPipeline, TokenBudgetPolicy, TokenEstimator};
 use agent_llm::{ChatMessageExt, CompletionConfigExt};
 use agent_types::compression::{
-    CompressedView, CompressionMeta, ContextAnalysis, ContextSeverity, MicroCompactResult,
+    CompressedView, CompressionMeta, ContextAnalysis, MicroCompactResult,
 };
 use agent_types::{ChatMessage, CompletionConfig, ContentBlock, MessageRole, TokenBudgetConfig};
 use async_trait::async_trait;
@@ -13,8 +13,7 @@ use memory::MemorySnapshot;
 use crate::{
     compaction::{
         adjust_keep_start_for_invariants, apply_candidate_replacement, candidate_indexes,
-        discover_boundary, CompactMode, CompactRequest, CompactionBoundary, CompactionDecision,
-        CompactionResult,
+        discover_boundary, CompactionBoundary, CompactionResult,
     },
     envelope::ContextEnvelope,
     microcompact::{apply_microcompact, MicroCompactionPolicy},
@@ -28,13 +27,8 @@ pub struct ContextManagerConfig {
     pub thresholds: ContextThresholds,
     pub micro_policy: MicroCompactionPolicy,
     pub summary_budget: SummaryCompressionBudget,
-    pub snip_preserve_tail_messages: usize,
     pub collapse_preserve_tail_messages: usize,
     pub session_memory_compaction: Option<SessionMemoryCompactionPolicy>,
-    /// Only snip messages older than this threshold (milliseconds).
-    /// Messages within an active task are recent and should be summarized, not deleted.
-    /// Default: `DEFAULT_SNIP_STALE_AFTER_MS` in `compact::defaults`.
-    pub snip_stale_after_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -85,7 +79,7 @@ impl ContextManagerConfig {
         self.thresholds.validate()?;
         self.summary_budget.validate()?;
 
-        if self.snip_preserve_tail_messages == 0 || self.collapse_preserve_tail_messages == 0 {
+        if self.collapse_preserve_tail_messages == 0 {
             return Err(CompactError::InvalidConfiguration {
                 message: "tail preservation counts must be greater than zero".to_string(),
             });
@@ -155,74 +149,6 @@ impl ContextManager {
             analysis,
             self.config.summary_budget.preserve_tail_messages,
         ))
-    }
-
-    pub fn decide_compaction(
-        &self,
-        messages: &[ChatMessage],
-        analysis: &ContextAnalysis,
-    ) -> CompactResult<Option<CompactionDecision>> {
-        if !analysis.should_compact {
-            return Ok(None);
-        }
-
-        let (mode, reason, preserve_tail_messages) = match analysis.severity {
-            ContextSeverity::Normal => return Ok(None),
-            ContextSeverity::Warning => (
-                CompactMode::HistorySnip,
-                "warning threshold exceeded".to_string(),
-                self.config.snip_preserve_tail_messages,
-            ),
-            ContextSeverity::AutoCompact => (
-                CompactMode::ContextCollapse,
-                "auto compact threshold exceeded".to_string(),
-                self.config.collapse_preserve_tail_messages,
-            ),
-            ContextSeverity::Blocking => (
-                CompactMode::AutoCompact,
-                "blocking threshold exceeded".to_string(),
-                self.config.summary_budget.preserve_tail_messages,
-            ),
-        };
-
-        Ok(Some(CompactionDecision {
-            mode,
-            boundary: discover_boundary(messages, preserve_tail_messages),
-            reason,
-        }))
-    }
-
-    pub async fn run_compaction_request(
-        &self,
-        request: CompactRequest,
-        meta: &CompressionMeta,
-    ) -> CompactResult<CompactionResult> {
-        match request.mode {
-            CompactMode::HistorySnip => self.history_snip(
-                &request.messages,
-                meta,
-                request.boundary,
-                self.config.snip_preserve_tail_messages,
-            ),
-            CompactMode::ContextCollapse => {
-                self.context_collapse(
-                    &request.messages,
-                    meta,
-                    request.boundary,
-                    self.config.collapse_preserve_tail_messages,
-                )
-                .await
-            }
-            CompactMode::AutoCompact => {
-                self.auto_compact(
-                    &request.messages,
-                    meta,
-                    request.boundary,
-                    self.config.summary_budget.preserve_tail_messages,
-                )
-                .await
-            }
-        }
     }
 
     pub fn try_session_memory_compaction(
@@ -340,63 +266,6 @@ impl ContextManager {
             effective_boundary.as_ref(),
         )?;
         Ok((effective_boundary, candidates))
-    }
-
-    fn history_snip(
-        &self,
-        messages: &[ChatMessage],
-        meta: &CompressionMeta,
-        boundary: Option<CompactionBoundary>,
-        preserve_tail_messages: usize,
-    ) -> CompactResult<CompactionResult> {
-        let (boundary, candidates) =
-            self.resolve_candidates(messages, preserve_tail_messages, boundary)?;
-
-        // Snip deletes only stale messages and leaves active-task messages
-        // to summarization — see `CompactOverrides::snip_stale_after_ms`.
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let stale_threshold = self.config.snip_stale_after_ms;
-        let stale_candidates: Vec<usize> = candidates
-            .into_iter()
-            .filter(|&idx| {
-                let msg = &messages[idx];
-                if is_compression_summary(msg) {
-                    return false;
-                }
-                if stale_threshold == 0 {
-                    return true; // no threshold configured, allow all
-                }
-                if msg.timestamp_ms == 0 {
-                    return false; // unknown timestamp, conservatively keep
-                }
-                now_ms.saturating_sub(msg.timestamp_ms) >= stale_threshold
-            })
-            .collect();
-
-        if stale_candidates.is_empty() {
-            return Ok(CompactionResult {
-                messages: messages.to_vec(),
-                summary: None,
-                boundary,
-                updated_meta: meta.clone(),
-                estimated_tokens: self.estimator.estimate_messages_tokens(messages),
-            });
-        }
-
-        let trimmed_messages = apply_candidate_replacement(messages, &stale_candidates, None);
-        let mut updated_meta = meta.clone();
-        updated_meta.last_snip_index = stale_candidates.iter().copied().max();
-
-        Ok(CompactionResult {
-            estimated_tokens: self.estimator.estimate_messages_tokens(&trimmed_messages),
-            messages: trimmed_messages,
-            summary: None,
-            boundary,
-            updated_meta,
-        })
     }
 
     async fn context_collapse(
@@ -613,10 +482,10 @@ impl CompressionPipeline for ContextManager {
         let mut analysis = self
             .checked_analyze(messages, &budget)
             .map_err(CompressionError::from)?;
-        let initial_decision = self
-            .decide_compaction(messages, &analysis)
-            .map_err(CompressionError::from)?;
-        if initial_decision.is_none() {
+        // History must only ever be rewritten with a summary standing in for
+        // the removed messages, so below the auto-compact threshold the
+        // pipeline stays a no-op instead of trimming context silently.
+        if !analysis.should_compact {
             return Ok(CompressedView {
                 messages: messages.to_vec(),
                 removed_count: 0,
@@ -634,50 +503,24 @@ impl CompressionPipeline for ContextManager {
 
         // protect_first_user=true: in the pipeline flow, the first user message
         // (original task instructions) must never be compacted away.
-        if analysis.should_compact && !matches!(analysis.severity, ContextSeverity::Normal) {
-            let result = self
-                .history_snip(
-                    &working_messages,
-                    &updated_meta,
-                    None,
-                    self.config.snip_preserve_tail_messages,
-                )
-                .map_err(CompressionError::from)?;
-            if result.messages != working_messages {
-                working_messages = result.messages;
-                if result.summary.is_some() {
-                    final_summary = result.summary.clone();
-                }
-                updated_meta = result.updated_meta;
-                analysis = self
-                    .checked_analyze(&working_messages, &budget)
-                    .map_err(CompressionError::from)?;
+        let result = self
+            .context_collapse(
+                &working_messages,
+                &updated_meta,
+                None,
+                self.config.collapse_preserve_tail_messages,
+            )
+            .await
+            .map_err(CompressionError::from)?;
+        if result.messages != working_messages {
+            working_messages = result.messages;
+            if result.summary.is_some() {
+                final_summary = result.summary.clone();
             }
-        }
-
-        if matches!(
-            analysis.severity,
-            ContextSeverity::AutoCompact | ContextSeverity::Blocking
-        ) {
-            let result = self
-                .context_collapse(
-                    &working_messages,
-                    &updated_meta,
-                    None,
-                    self.config.collapse_preserve_tail_messages,
-                )
-                .await
+            updated_meta = result.updated_meta;
+            analysis = self
+                .checked_analyze(&working_messages, &budget)
                 .map_err(CompressionError::from)?;
-            if result.messages != working_messages {
-                working_messages = result.messages;
-                if result.summary.is_some() {
-                    final_summary = result.summary.clone();
-                }
-                updated_meta = result.updated_meta;
-                analysis = self
-                    .checked_analyze(&working_messages, &budget)
-                    .map_err(CompressionError::from)?;
-            }
         }
 
         if analysis.estimated_tokens > history_limit {

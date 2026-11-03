@@ -98,7 +98,6 @@ async fn none_overrides_builds_real_context_manager() {
 #[tokio::test]
 async fn overrides_are_applied() {
     let overrides = CompactOverrides {
-        warning_ratio: Some(0.1),
         auto_compact_ratio: Some(0.2),
         blocking_ratio: Some(0.3),
         ..Default::default()
