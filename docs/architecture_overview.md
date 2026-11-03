@@ -92,8 +92,8 @@ max turns, and token-budget policy are frozen
 
 - `crates/compact` implements staged context compression via the `ContextManager`
   pipeline.
-- `crates/memory` implements layered memory: live snapshots, session summaries, durable
-  memory, and the SQLite + FTS5 + embedding semantic store.
+- `crates/memory` implements the working-memory snapshot: the raw loop messages
+  synced per turn and persisted alongside session records.
 - `crates/operation_backend` implements the sandbox/execution substrate behind
   `OperationBackend`.
 

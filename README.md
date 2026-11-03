@@ -17,7 +17,7 @@ xiaoO is the intelligence hub of AgentOS. It provides a self-governing agent run
 
 At its core, xiaoO turns the operating system into a practical home for agents: files, shell commands, Git, web access, LSP diagnostics, skills, hooks, channels, and runtime telemetry are exposed through one coordinated agent loop.
 
-The runtime also includes a layered memory and adaptive context-compression system, so long conversations, tool-heavy tasks, and multi-agent collaboration can remain stable without being overwhelmed by raw history growth.
+The runtime also includes working-memory snapshots and an adaptive context-compression system, so long conversations, tool-heavy tasks, and multi-agent collaboration can remain stable without being overwhelmed by raw history growth.
 
 ## Key Features
 

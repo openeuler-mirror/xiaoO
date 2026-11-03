@@ -6,12 +6,11 @@ use agent_types::compression::{CompressedView, CompressionMeta, ContextAnalysis}
 use agent_types::{ChatMessage, CompletionConfig, ContentBlock, MessageRole, TokenBudgetConfig};
 use async_trait::async_trait;
 use llm_client::LlmProviderWrapper;
-use memory::MemorySnapshot;
 
 use crate::{
     compaction::{
-        adjust_keep_start_for_invariants, apply_candidate_replacement, candidate_indexes,
-        discover_boundary, CompactionBoundary, CompactionResult,
+        apply_candidate_replacement, candidate_indexes, discover_boundary, CompactionBoundary,
+        CompactionResult,
     },
     envelope::ContextEnvelope,
     policy::{CompactionPolicy, CompactionPolicyService, ContextThresholds},
@@ -24,50 +23,6 @@ pub struct ContextManagerConfig {
     pub thresholds: ContextThresholds,
     pub summary_budget: SummaryCompressionBudget,
     pub collapse_preserve_tail_messages: usize,
-    pub session_memory_compaction: Option<SessionMemoryCompactionPolicy>,
-}
-
-#[derive(Clone, Debug)]
-pub struct SessionMemoryCompactionPolicy {
-    pub min_preserved_tokens: usize,
-    pub min_preserved_text_messages: usize,
-    pub max_preserved_tokens: usize,
-    pub compact_max_section_tokens: usize,
-    pub compact_max_total_tokens: usize,
-}
-
-impl SessionMemoryCompactionPolicy {
-    pub fn validate(&self) -> CompactResult<()> {
-        if self.min_preserved_tokens == 0
-            || self.min_preserved_text_messages == 0
-            || self.max_preserved_tokens == 0
-            || self.compact_max_section_tokens == 0
-            || self.compact_max_total_tokens == 0
-        {
-            return Err(CompactError::InvalidConfiguration {
-                message: "session memory compaction policy values must be greater than zero"
-                    .to_string(),
-            });
-        }
-
-        if self.max_preserved_tokens < self.min_preserved_tokens {
-            return Err(CompactError::InvalidConfiguration {
-                message:
-                    "session memory compaction max_preserved_tokens must be greater than or equal to min_preserved_tokens"
-                        .to_string(),
-            });
-        }
-
-        if self.compact_max_total_tokens < self.compact_max_section_tokens {
-            return Err(CompactError::InvalidConfiguration {
-                message:
-                    "session memory compaction compact_max_total_tokens must be greater than or equal to compact_max_section_tokens"
-                        .to_string(),
-            });
-        }
-
-        Ok(())
-    }
 }
 
 impl ContextManagerConfig {
@@ -79,10 +34,6 @@ impl ContextManagerConfig {
             return Err(CompactError::InvalidConfiguration {
                 message: "tail preservation counts must be greater than zero".to_string(),
             });
-        }
-
-        if let Some(policy) = &self.session_memory_compaction {
-            policy.validate()?;
         }
 
         Ok(())
@@ -145,107 +96,6 @@ impl ContextManager {
             analysis,
             self.config.summary_budget.preserve_tail_messages,
         ))
-    }
-
-    pub fn try_session_memory_compaction(
-        &self,
-        snapshot: &MemorySnapshot,
-        meta: &CompressionMeta,
-    ) -> CompactResult<Option<CompactionResult>> {
-        let Some(policy) = &self.config.session_memory_compaction else {
-            return Ok(None);
-        };
-        let Some(session_memory) = snapshot.session_memory.as_ref() else {
-            return Ok(None);
-        };
-        if session_memory.session_id != snapshot.session_id {
-            return Err(CompactError::InvalidConfiguration {
-                message: "snapshot.session_memory.session_id must match snapshot.session_id"
-                    .to_string(),
-            });
-        }
-
-        let keep_start =
-            self.calculate_session_memory_keep_start(&snapshot.messages, session_memory, policy);
-        if keep_start == 0 {
-            return Ok(None);
-        }
-
-        let compacted_prefix = &snapshot.messages[..keep_start];
-        let preserved_tail = snapshot.messages[keep_start..].to_vec();
-        let truncated_summary = memory::truncate_session_memory_summary(
-            &session_memory.summary,
-            self.estimator.as_ref(),
-            policy.compact_max_section_tokens,
-            policy.compact_max_total_tokens,
-        )
-        .map_err(|error| match error {
-            memory::MemoryError::InvalidConfiguration { message } => {
-                CompactError::InvalidConfiguration { message }
-            }
-            memory::MemoryError::SessionMemoryBudgetExhausted { message } => {
-                CompactError::SummaryBudgetExhausted { message }
-            }
-            other => CompactError::InvalidConfiguration {
-                message: other.to_string(),
-            },
-        })?;
-        let summary_message = ChatMessage::new(
-            MessageRole::Assistant,
-            vec![ContentBlock::Text {
-                text: format!("session_memory_compact:\n{}", truncated_summary.summary),
-            }],
-            compacted_prefix
-                .iter()
-                .find_map(|message| message.message_id.clone()),
-            compacted_prefix
-                .last()
-                .map(|message| message.timestamp_ms)
-                .unwrap_or_default(),
-            None,
-        );
-        let mut compacted_messages = vec![summary_message];
-        compacted_messages.extend(preserved_tail);
-
-        let mut updated_meta = meta.clone();
-        updated_meta.compact_summary = Some(truncated_summary.summary.clone());
-        updated_meta.last_compact_turn = Some(meta.last_compact_turn.unwrap_or_default() + 1);
-
-        Ok(Some(CompactionResult {
-            estimated_tokens: self.estimator.estimate_messages_tokens(&compacted_messages),
-            messages: compacted_messages,
-            summary: Some(truncated_summary.summary),
-            boundary: None,
-            updated_meta,
-        }))
-    }
-
-    pub async fn compress_snapshot(
-        &self,
-        snapshot: &MemorySnapshot,
-        budget: &TokenBudgetConfig,
-        meta: &CompressionMeta,
-    ) -> Result<CompressedView, CompressionError> {
-        let history_limit = CompactionPolicy::from_budget(budget)
-            .history_limit()
-            .map_err(CompressionError::from)?;
-        if let Some(result) = self
-            .try_session_memory_compaction(snapshot, meta)
-            .map_err(CompressionError::from)?
-        {
-            if result.estimated_tokens <= history_limit {
-                return Ok(CompressedView {
-                    estimated_tokens: result.estimated_tokens,
-                    messages: result.messages,
-                    removed_count: 0,
-                    summary: result.summary,
-                    updated_meta: result.updated_meta,
-                });
-            }
-        }
-
-        let policy = CompactionPolicy::from_budget(budget);
-        self.compress(&snapshot.messages, &policy, meta).await
     }
 
     fn resolve_candidates(
@@ -399,65 +249,6 @@ impl ContextManager {
             updated_meta,
         })
     }
-
-    fn calculate_session_memory_keep_start(
-        &self,
-        messages: &[ChatMessage],
-        session_memory: &memory::SessionMemorySummary,
-        policy: &SessionMemoryCompactionPolicy,
-    ) -> usize {
-        if messages.is_empty() {
-            return 0;
-        }
-
-        let mut keep_start = session_memory
-            .summarized_through_message_id
-            .as_deref()
-            .and_then(|message_id| {
-                messages
-                    .iter()
-                    .rposition(|message| message.message_id.as_deref() == Some(message_id))
-                    .map(|index| index + 1)
-            })
-            .or_else(|| {
-                session_memory
-                    .summarized_through_timestamp_ms
-                    .map(|timestamp_ms| {
-                        messages
-                            .iter()
-                            .position(|message| message.timestamp_ms > timestamp_ms)
-                            .unwrap_or(messages.len())
-                    })
-            })
-            .unwrap_or(messages.len());
-
-        let mut preserved_tokens = self
-            .estimator
-            .estimate_messages_tokens(&messages[keep_start..]);
-        let mut preserved_text_messages = count_text_messages(&messages[keep_start..]);
-
-        if preserved_tokens >= policy.max_preserved_tokens {
-            return adjust_keep_start_for_invariants(messages, keep_start, 0);
-        }
-
-        while keep_start > 0
-            && (preserved_tokens < policy.min_preserved_tokens
-                || preserved_text_messages < policy.min_preserved_text_messages)
-        {
-            let next_index = keep_start - 1;
-            let next_message = &messages[next_index];
-            let next_tokens = self.estimator.estimate_message_tokens(next_message);
-            if preserved_tokens + next_tokens > policy.max_preserved_tokens {
-                break;
-            }
-
-            keep_start = next_index;
-            preserved_tokens += next_tokens;
-            preserved_text_messages += usize::from(message_has_text_content(next_message));
-        }
-
-        adjust_keep_start_for_invariants(messages, keep_start, 0)
-    }
 }
 
 #[async_trait]
@@ -566,20 +357,4 @@ fn budget_to_config(budget: &dyn TokenBudgetPolicy) -> TokenBudgetConfig {
         reserved_for_system: budget.reserved_for_system(),
         hard_limit_ratio: budget.hard_limit_ratio(),
     }
-}
-
-fn count_text_messages(messages: &[ChatMessage]) -> usize {
-    messages
-        .iter()
-        .filter(|message| message_has_text_content(message))
-        .count()
-}
-
-fn message_has_text_content(message: &ChatMessage) -> bool {
-    message.blocks.iter().any(|block| {
-        matches!(
-            block,
-            ContentBlock::Text { .. } | ContentBlock::Image { .. } | ContentBlock::Document { .. }
-        )
-    })
 }

@@ -541,7 +541,6 @@ dependencies = [
  "agent-types",
  "async-trait",
  "llm-client",
- "memory",
  "serde",
  "serde_json",
  "tempfile",
@@ -1949,22 +1948,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "memory"
 version = "0.1.0"
 dependencies = [
- "agent-contracts",
- "agent-llm",
  "agent-types",
- "async-trait",
- "hex",
- "llm-client",
- "parking_lot",
- "reqwest",
- "rusqlite",
  "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
  "thiserror 1.0.69",
- "tokio",
- "tracing",
 ]
 
 [[package]]
