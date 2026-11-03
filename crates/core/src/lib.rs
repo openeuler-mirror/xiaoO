@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod checkpoint;
 pub mod input;
 pub mod kvcache;
 pub mod loop_state;

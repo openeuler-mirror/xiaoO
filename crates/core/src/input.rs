@@ -19,6 +19,8 @@ pub enum LoopStopRule {
 }
 
 pub struct AgentLoopInput {
+    /// Session-owned checkpoint driver, retained across user turns.
+    pub checkpoint_driver: Option<Arc<crate::checkpoint::CheckpointDriver>>,
     pub user_message: String,
     pub append_user_message: bool,
     pub event_sink: Option<Arc<dyn LoopEventSink>>,
@@ -43,6 +45,7 @@ pub struct AgentLoopInput {
 impl AgentLoopInput {
     pub fn new(user_message: impl Into<String>) -> Self {
         Self {
+            checkpoint_driver: None,
             user_message: user_message.into(),
             append_user_message: true,
             event_sink: None,

@@ -552,6 +552,7 @@ async fn run_once(
     };
     let cancel = CancellationToken::new();
     let bindings = SessionRuntimeBindings {
+        checkpoint_driver: None,
         loop_event_sink,
         tool_event_sink: json_sink.map(|sink| sink as Arc<dyn xiaoo_api::events::ToolEventSink>),
         interaction_handle: None,

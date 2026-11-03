@@ -108,6 +108,30 @@ pub fn open_todo_lines(runtime: &dyn RuntimeView) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Capture the session plan injected into LLM context.
+pub fn checkpoint_todos(session_id: &str) -> Vec<TodoItem> {
+    TODO_STORE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(session_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Restore the plan together with conversation history.
+pub fn restore_checkpoint_todos(session_id: &str, todos: Vec<TodoItem>) {
+    let mut store = TODO_STORE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if todos.is_empty() {
+        store.remove(session_id);
+    } else {
+        store.insert(session_id.to_owned(), todos);
+    }
+}
+
 fn todo_key(runtime: &dyn RuntimeView) -> String {
     let metadata = runtime.agent_context().metadata();
     metadata

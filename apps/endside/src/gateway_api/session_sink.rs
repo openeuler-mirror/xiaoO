@@ -19,6 +19,25 @@ impl ChannelLoopEventSink {
     }
 }
 
+impl xiaoo_api::runtime::checkpoint::CheckpointUpdateSink for ChannelLoopEventSink {
+    fn on_restore(
+        &self,
+        session_id: &str,
+        messages: &[xiaoo_api::chat::ChatMessage],
+        todos: &[xiaoo_api::runtime::checkpoint::CheckpointTodoItem],
+    ) {
+        let plan = xiaoo_shared::plan::todo_snapshot_from_tool_args(
+            &serde_json::json!({"todos": todos}).to_string(),
+        )
+        .expect("checkpoint todos use the todo_write input schema");
+        let _ = self.updates_tx.send(SessionTurnUpdate::CheckpointRestored {
+            session_id: session_id.to_owned(),
+            messages: messages.to_vec(),
+            plan,
+        });
+    }
+}
+
 impl LoopEventSink for ChannelLoopEventSink {
     fn on_turn_start(&self, agent_id: &xiaoo_api::chat::AgentId, turn: u32) {
         let _ = self.updates_tx.send(SessionTurnUpdate::TurnStart {

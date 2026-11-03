@@ -9,7 +9,9 @@ mod source_loader;
 pub mod tool_input;
 
 pub use builtin::file_read;
-pub use builtin::open_todo_lines;
+pub use builtin::{
+    checkpoint_todos, open_todo_lines, restore_checkpoint_todos, CheckpointTodoItem,
+};
 pub use mcp::McpToolSource;
 pub use plugin::{
     declarative_tool_catalog, render_declarative_tool, test_declarative_tool,

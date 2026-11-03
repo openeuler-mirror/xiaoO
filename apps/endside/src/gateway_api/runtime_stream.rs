@@ -50,21 +50,44 @@ impl GatewayRuntime {
             };
             changed = true;
             // Draining after Esc: the turn was cancelled, so only the
-            // terminal `Done`/`Err` update is consumed (`Done` refreshes
-            // `session_messages` with the partial state the backend
-            // persisted on cancellation). Every other update — residual
+            // terminal `Done`/`Err` and checkpoint restore updates are consumed.
+            // `Done` refreshes `session_messages` with the partial state the backend
+            // persisted on cancellation. Every other update — residual
             // TextDeltas, tool events, subagent spawns, prompts — is
             // dropped so the cancelled turn cannot spawn ghost messages
             // or reopen interaction prompts.
             if self.draining_after_cancel
                 && !matches!(
                     update,
-                    SessionTurnUpdate::Done { .. } | SessionTurnUpdate::Err(_)
+                    SessionTurnUpdate::Done { .. }
+                        | SessionTurnUpdate::Err(_)
+                        | SessionTurnUpdate::CheckpointRestored { .. }
                 )
             {
                 continue;
             }
             match update {
+                SessionTurnUpdate::CheckpointRestored {
+                    session_id,
+                    messages,
+                    plan,
+                } => {
+                    if session_id != state.session_id {
+                        continue;
+                    }
+                    self.stream_reveal_buffer.clear();
+                    self.pending_stream_done = None;
+                    self.stream_message_index = None;
+                    state.chat_state.messages =
+                        crate::chat::messages_from_chat_messages(messages.clone());
+                    state.session_messages = messages;
+                    self.apply_todo_snapshot(state, plan);
+                    state.plan_panel.reset_scroll();
+                    state.chat_state.scroll_offset = 0;
+                    state.chat_state.stick_to_bottom = true;
+                    state.transcript_selection = None;
+                    state.render_state = Default::default();
+                }
                 SessionTurnUpdate::TurnStart { agent_id, turn } => {
                     if !is_root_stream_agent(&agent_id, state) {
                         // Use the preserve-metadata variant so a `SubagentSpawn`

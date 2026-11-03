@@ -150,6 +150,9 @@ impl SessionWorker {
         if !input.append_user_message {
             loop_input = loop_input.resume_without_user_message();
         }
+        if is_root_lane {
+            loop_input.checkpoint_driver = resolved.bindings.checkpoint_driver.clone();
+        }
         loop_input.command_context = input.command_context.clone();
         if input.runtime_input.entry.runtime_profile_id.as_deref() == Some(PLAN_AGENT_ID) {
             loop_input = loop_input.with_stop_rules([LoopStopRule::AfterSuccessfulTool {

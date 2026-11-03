@@ -148,6 +148,23 @@ impl App {
         }
 
         loop {
+            #[cfg(unix)]
+            if let Err(error) = self
+                .gateway
+                .prepare_checkpoint_endpoint(
+                    &self.state.session_id,
+                    &self.state.agent_config.checkpoint,
+                )
+                .await
+            {
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::error(format!(
+                        "Checkpoint socket: {error}"
+                    )));
+                needs_redraw = true;
+            }
             #[cfg(debug_assertions)]
             let _tick_start = std::time::Instant::now();
             if needs_redraw {

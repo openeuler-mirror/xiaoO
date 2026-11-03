@@ -23,7 +23,9 @@ mod test_support;
 
 use agent_contracts::backend::capability::filesystem::WriteMode;
 
-pub use todo_write::open_todo_lines;
+pub use todo_write::{
+    checkpoint_todos, open_todo_lines, restore_checkpoint_todos, CheckpointTodoItem,
+};
 pub use tool_source::BuiltinToolSource;
 
 fn preferred_overwrite_mode(supports_atomic_write: bool) -> WriteMode {

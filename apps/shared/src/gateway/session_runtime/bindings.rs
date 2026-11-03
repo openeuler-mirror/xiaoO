@@ -5,6 +5,7 @@ use xiaoo_api::runtime::PendingUserMessageSource;
 
 #[derive(Clone, Default)]
 pub struct SessionRuntimeBindings {
+    pub checkpoint_driver: Option<Arc<xiaoo_api::runtime::checkpoint::CheckpointDriver>>,
     pub loop_event_sink: Option<Arc<dyn LoopEventSink>>,
     pub tool_event_sink: Option<Arc<dyn ToolEventSink>>,
     pub interaction_handle: Option<Arc<dyn InteractionHandle>>,

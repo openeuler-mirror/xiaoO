@@ -1167,3 +1167,175 @@ fn retry_exhaustion_stops_loading_and_waits_for_user_input() {
     runtime.poll_stream_updates(&mut state);
     assert!(!state.chat_state.is_loading);
 }
+
+#[tokio::test]
+async fn checkpoint_restore_refreshes_chat_and_discards_old_reveal_buffer() {
+    use crate::gateway_api::session::ChannelLoopEventSink;
+    use std::sync::{Arc, Mutex};
+    use xiaoo_api::runtime::{checkpoint::*, RuntimeState};
+
+    for cancelled in [false, true] {
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+        let context = SnapshotContext {
+            session_id: state.session_id.clone(),
+        };
+        let backend = create(Default::default()).unwrap();
+        let driver = backend
+            .init(context.clone(), serde_json::json!({}))
+            .await
+            .unwrap()
+            .driver
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(ChannelLoopEventSink::new(
+            tx.clone(),
+            Arc::new(Mutex::new(None)),
+        ));
+        driver.set_update_sink(sink.clone());
+        assert_eq!(
+            Arc::strong_count(&sink),
+            1,
+            "driver must not keep a finished turn alive"
+        );
+        let mut loop_state = RuntimeState::new(context.session_id.clone());
+        let restored = vec![chat_text_message(
+            xiaoo_api::chat::MessageRole::User,
+            "saved question",
+        )];
+        *loop_state.messages.write() = restored.clone();
+        let snapshot = backend.save(context.clone()).unwrap();
+        driver.flush(&mut loop_state, &mut 1).await;
+        assert!(rx.try_recv().is_err(), "save does not refresh the UI");
+        loop_state.messages.write().push(chat_text_message(
+            xiaoo_api::chat::MessageRole::Assistant,
+            "discarded answer",
+        ));
+        backend
+            .restore(
+                context,
+                RestoreRequest {
+                    snapshot_id: snapshot.id,
+                    mode: RestoreMode::EnsureSafeMode,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "accepting restore does not refresh the UI"
+        );
+        state
+            .chat_state
+            .messages
+            .push(Message::assistant_streaming());
+        state.chat_state.is_loading = true;
+        runtime.stream_message_index = Some(0);
+        runtime.stream_reveal_buffer = "discarded buffered answer".repeat(100);
+        runtime.draining_after_cancel = cancelled;
+        tx.send(SessionTurnUpdate::AppendAssistantContent {
+            agent_id: AgentId("cli-agent".into()),
+            delta: "discarded queued answer".into(),
+        })
+        .unwrap();
+        driver.flush(&mut loop_state, &mut 1).await;
+        // A stale session's restore must not overwrite this session's UI.
+        tx.send(SessionTurnUpdate::CheckpointRestored {
+            session_id: "other-session".into(),
+            messages: Vec::new(),
+            plan: xiaoo_shared::plan::TodoSnapshotUpdate {
+                title: "stale plan".into(),
+                items: Vec::new(),
+            },
+        })
+        .unwrap();
+        if cancelled {
+            tx.send(SessionTurnUpdate::Done {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                cached_tokens: 0,
+                estimated_input_tokens: 0,
+                messages: restored.clone(),
+            })
+            .unwrap();
+        } else {
+            tx.send(SessionTurnUpdate::AppendAssistantContent {
+                agent_id: AgentId("cli-agent".into()),
+                delta: "new answer".into(),
+            })
+            .unwrap();
+        }
+        runtime.stream_rx = Some(rx);
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert_eq!(state.session_messages, restored);
+        assert_eq!(state.chat_state.messages[0].content, "saved question");
+        assert!(state
+            .chat_state
+            .messages
+            .iter()
+            .all(|m| !m.content.contains("discarded")));
+        assert!(runtime.stream_reveal_buffer.is_empty());
+        if cancelled {
+            assert_eq!(state.chat_state.messages.len(), 1);
+            assert!(!state.chat_state.is_loading);
+        } else {
+            assert_eq!(state.chat_state.messages.len(), 2);
+            assert_eq!(state.chat_state.messages[1].content, "new answer");
+            assert!(state.chat_state.is_loading);
+        }
+    }
+}
+
+#[test]
+fn checkpoint_restore_replaces_or_clears_todo_panel_even_after_cancel() {
+    use crate::gateway_api::session::ChannelLoopEventSink;
+    use std::sync::{Arc, Mutex};
+    use xiaoo_api::runtime::checkpoint::{CheckpointTodoItem, CheckpointUpdateSink};
+
+    for cancelled in [false, true] {
+        for empty in [false, true] {
+            let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+            let mut state = test_state();
+            runtime.apply_todo_snapshot(
+                &mut state,
+                xiaoo_shared::plan::todo_snapshot_from_tool_args(
+                    r#"{"todos":[{"content":"future task","status":"completed"}]}"#,
+                )
+                .unwrap(),
+            );
+            let todos: Vec<CheckpointTodoItem> = if empty {
+                Vec::new()
+            } else {
+                serde_json::from_value(serde_json::json!([
+                    {"content":"saved completed", "status":"completed"},
+                    {"content":"saved active", "status":"in_progress"},
+                    {"content":"saved pending", "status":"pending"}
+                ]))
+                .unwrap()
+            };
+            let (tx, rx) = mpsc::unbounded_channel();
+            let sink = ChannelLoopEventSink::new(tx, Arc::new(Mutex::new(None)));
+            sink.on_restore(&state.session_id, &[], &todos);
+            // Ignore another session's restore, including its todo payload.
+            sink.on_restore("other-session", &[], &[]);
+            runtime.stream_rx = Some(rx);
+            runtime.draining_after_cancel = cancelled;
+            state.render_state.cached_area = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
+            assert!(runtime.poll_stream_updates(&mut state));
+            if empty {
+                assert!(state.plan_state.is_none());
+            } else {
+                assert_eq!(
+                    state.plan_state.as_ref().unwrap().items,
+                    vec![
+                        (TodoDisplayStatus::Completed, "saved completed".into()),
+                        (TodoDisplayStatus::InProgress, "saved active".into()),
+                        (TodoDisplayStatus::Pending, "saved pending".into()),
+                    ]
+                );
+            }
+            assert!(state.render_state.cached_area.is_none());
+        }
+    }
+}

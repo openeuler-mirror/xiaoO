@@ -180,18 +180,30 @@ impl SessionGateway {
         let memory_automation_state = Arc::clone(&self.memory_automation);
         let memory_health_state = Arc::clone(&self.memory_health);
         let backend_manager = self.backend_manager.clone();
+        #[cfg(unix)]
+        let checkpoints = self.checkpoints.clone();
         tokio::spawn(async move {
             active_session_ids
                 .lock()
                 .await
                 .insert(request.session_id.clone());
 
+            #[cfg(unix)]
+            let checkpoint_driver = checkpoints.driver(&request.session_id).await;
+            #[cfg(not(unix))]
+            let checkpoint_driver = None;
             let loop_summary = Arc::new(Mutex::new(None));
+            let loop_sink = Arc::new(ChannelLoopEventSink::new(
+                updates_tx.clone(),
+                Arc::clone(&loop_summary),
+            ));
+            #[cfg(unix)]
+            if let Some(driver) = checkpoint_driver.as_ref() {
+                driver.set_update_sink(loop_sink.clone());
+            }
             let bindings = SessionRuntimeBindings {
-                loop_event_sink: Some(Arc::new(ChannelLoopEventSink::new(
-                    updates_tx.clone(),
-                    Arc::clone(&loop_summary),
-                ))),
+                checkpoint_driver,
+                loop_event_sink: Some(loop_sink),
                 tool_event_sink: Some(Arc::new(ChannelToolEventSink::new(
                     updates_tx.clone(),
                     runtime_config.descriptor.workspace_root.clone(),
@@ -322,6 +334,8 @@ impl SessionGateway {
     /// Closes all tracked sessions via the lifecycle control plane,
     /// firing the SessionClosed hook for each.
     pub async fn close_all_sessions(&self) {
+        #[cfg(unix)]
+        self.checkpoints.close(None).await;
         let ids: Vec<String> = {
             let mut lock = self.active_session_ids.lock().await;
             let ids: Vec<_> = lock.iter().cloned().collect();
