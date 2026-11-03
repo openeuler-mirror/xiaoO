@@ -1165,7 +1165,6 @@ fn build_compression_pipeline(
     let overrides = compact.map(|c| CompactOverrides {
         auto_compact_ratio: c.auto_compact_ratio,
         blocking_ratio: c.blocking_ratio,
-        collapse_preserve_tail: c.collapse_preserve_tail,
         summary_max_tokens: c.summary_max_tokens,
         summary_preserve_tail: c.summary_preserve_tail,
         summary_llm_max_tokens: c.summary_llm_max_tokens,

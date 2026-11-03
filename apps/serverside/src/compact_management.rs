@@ -1,7 +1,7 @@
 use serde::Serialize;
 use xiaoo_api::llm::{
-    DEFAULT_AUTO_COMPACT_RATIO, DEFAULT_BLOCKING_RATIO, DEFAULT_COLLAPSE_PRESERVE_TAIL,
-    DEFAULT_SUMMARY_LLM_MAX_TOKENS, DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SUMMARY_PRESERVE_TAIL,
+    DEFAULT_AUTO_COMPACT_RATIO, DEFAULT_BLOCKING_RATIO, DEFAULT_SUMMARY_LLM_MAX_TOKENS,
+    DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SUMMARY_PRESERVE_TAIL,
 };
 
 use crate::daemon_config::{CompactConfig, DaemonConfig};
@@ -17,7 +17,6 @@ pub struct CompactIssue {
 pub struct EffectiveCompactConfig {
     pub auto_compact_ratio: f64,
     pub blocking_ratio: f64,
-    pub collapse_preserve_tail: usize,
     pub summary_max_tokens: usize,
     pub summary_preserve_tail: usize,
     pub summary_llm_max_tokens: usize,
@@ -71,7 +70,6 @@ pub fn compact_issues(config: &CompactConfig) -> Vec<CompactIssue> {
         );
     }
     for (name, value) in [
-        ("collapse_preserve_tail", effective.collapse_preserve_tail),
         ("summary_max_tokens", effective.summary_max_tokens),
         ("summary_preserve_tail", effective.summary_preserve_tail),
         ("summary_llm_max_tokens", effective.summary_llm_max_tokens),
@@ -96,9 +94,6 @@ fn effective_config(config: Option<&CompactConfig>) -> EffectiveCompactConfig {
         blocking_ratio: config
             .and_then(|value| value.blocking_ratio)
             .unwrap_or(DEFAULT_BLOCKING_RATIO),
-        collapse_preserve_tail: config
-            .and_then(|value| value.collapse_preserve_tail)
-            .unwrap_or(DEFAULT_COLLAPSE_PRESERVE_TAIL),
         summary_max_tokens: config
             .and_then(|value| value.summary_max_tokens)
             .unwrap_or(DEFAULT_SUMMARY_MAX_TOKENS),
@@ -116,10 +111,6 @@ fn configured_fields(config: &CompactConfig) -> Vec<&'static str> {
     for (name, configured) in [
         ("auto_compact_ratio", config.auto_compact_ratio.is_some()),
         ("blocking_ratio", config.blocking_ratio.is_some()),
-        (
-            "collapse_preserve_tail",
-            config.collapse_preserve_tail.is_some(),
-        ),
         ("summary_max_tokens", config.summary_max_tokens.is_some()),
         (
             "summary_preserve_tail",

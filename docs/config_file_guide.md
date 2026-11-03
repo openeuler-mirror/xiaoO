@@ -460,7 +460,6 @@ auto_compact_ratio = 0.75            # Ratio that triggers automatic compression
 blocking_ratio = 0.9                 # Ratio entering blocking stage
 summary_max_tokens = 1024            # Token budget for summary
 summary_preserve_tail = 4            # Recent messages to preserve after summary
-collapse_preserve_tail = 4           # Messages to preserve during collapse
 summary_llm_max_tokens = 4096        # Summary LLM call max_tokens
 ```
 

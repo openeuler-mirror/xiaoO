@@ -37,8 +37,8 @@ pub use agent_contracts::{CompressionPipeline, LlmProvider, ProviderCapabilities
 #[doc(inline)]
 pub use compact::{
     build_context_manager, CompactOverrides, ContextThresholds, DEFAULT_AUTO_COMPACT_RATIO,
-    DEFAULT_BLOCKING_RATIO, DEFAULT_COLLAPSE_PRESERVE_TAIL, DEFAULT_SUMMARY_LLM_MAX_TOKENS,
-    DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SUMMARY_PRESERVE_TAIL,
+    DEFAULT_BLOCKING_RATIO, DEFAULT_SUMMARY_LLM_MAX_TOKENS, DEFAULT_SUMMARY_MAX_TOKENS,
+    DEFAULT_SUMMARY_PRESERVE_TAIL,
 };
 
 // ---- Token budget and compaction policy ----

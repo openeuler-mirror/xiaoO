@@ -54,7 +54,6 @@ pub struct LlmSection {
 pub struct CompactSection {
     pub auto_compact_ratio: Option<f64>,
     pub blocking_ratio: Option<f64>,
-    pub collapse_preserve_tail: Option<usize>,
     pub summary_max_tokens: Option<usize>,
     pub summary_preserve_tail: Option<usize>,
     pub summary_llm_max_tokens: Option<usize>,

@@ -7,7 +7,7 @@ xiaoO treats context as a managed runtime asset rather than a raw transcript. Th
 In practice, this gives xiaoO three core properties:
 
 - **Working memory**: per-lane message snapshots synced from loop state and persisted with session records.
-- **Adaptive compression**: collapse and auto-compact based on token pressure.
+- **Adaptive compression**: auto-compact based on token pressure.
 - **Opt-in long-term memory**: RAM-A automation recalls and ingests memory through an MCP server, disabled by default.
 
 ## Active Capabilities
@@ -68,10 +68,9 @@ Runtime sequence:
 
 ## Compression Behavior
 
-xiaoO does not use one generic truncation pass. It applies staged compression:
-
-- **Context Collapse**: replaces older ranges with a dense summary message.
-- **Auto Compact**: final safety layer when history is still too large.
+xiaoO does not use one generic truncation pass. When history exceeds the
+auto-compact threshold, it summarizes the compactable range into a single dense
+summary message (**Auto Compact**), preserving the protected ranges below.
 
 The compressor explicitly protects:
 
@@ -130,9 +129,8 @@ Compression-related options are also described in [daemon_config.md](./daemon_co
 
 | Config | Meaning |
 | --- | --- |
-| `[compact].auto_compact_ratio` | context-collapse threshold |
+| `[compact].auto_compact_ratio` | auto-compact threshold |
 | `[compact].blocking_ratio` | final pre-overflow threshold |
-| `[compact].collapse_preserve_tail` | tail preserved during collapse |
 | `[compact].summary_max_tokens` | summary token budget |
 | `[compact].summary_preserve_tail` | tail preserved during summary |
 | `[compact].summary_llm_max_tokens` | max tokens for summary generation |
@@ -149,7 +147,6 @@ max_tokens = 8192
 [compact]
 auto_compact_ratio = 0.75
 blocking_ratio = 0.9
-collapse_preserve_tail = 4
 summary_max_tokens = 1024
 summary_preserve_tail = 4
 summary_llm_max_tokens = 4096
