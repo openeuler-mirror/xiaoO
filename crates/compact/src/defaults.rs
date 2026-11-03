@@ -18,8 +18,8 @@ use agent_types::CompletionConfig;
 use llm_client::LlmProviderWrapper;
 
 use crate::{
-    CompactResult, ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
-    RoughTokenEstimator, RoughTokenEstimatorConfig, SummaryCompressionBudget,
+    CompactResult, ContextManager, ContextManagerConfig, ContextThresholds, RoughTokenEstimator,
+    RoughTokenEstimatorConfig, SummaryCompressionBudget,
 };
 
 /// Optional overrides for every field the user may set under `[compact]`.
@@ -47,9 +47,6 @@ pub const DEFAULT_SUMMARY_MAX_TOKENS: usize = 1024;
 pub const DEFAULT_SUMMARY_PRESERVE_TAIL: usize = 4;
 pub const DEFAULT_SUMMARY_LLM_MAX_TOKENS: usize = 4096;
 pub const DEFAULT_SUMMARY_TEMPERATURE: f64 = 0.2;
-
-pub const DEFAULT_STALE_TOOL_PAIR_AFTER_MS: u64 = 120_000;
-pub const DEFAULT_PRESERVE_RECENT_MESSAGES: usize = 6;
 
 // --- Estimator tuning (mirrors the original local-CLI values) --------------
 
@@ -85,10 +82,6 @@ pub fn build_context_manager(
         thresholds: ContextThresholds {
             auto_compact_ratio: ov.auto_compact_ratio.unwrap_or(DEFAULT_AUTO_COMPACT_RATIO),
             blocking_ratio: ov.blocking_ratio.unwrap_or(DEFAULT_BLOCKING_RATIO),
-        },
-        micro_policy: MicroCompactionPolicy {
-            stale_tool_pair_after_ms: DEFAULT_STALE_TOOL_PAIR_AFTER_MS,
-            preserve_recent_messages: DEFAULT_PRESERVE_RECENT_MESSAGES,
         },
         summary_budget: SummaryCompressionBudget {
             max_summary_tokens: ov.summary_max_tokens.unwrap_or(DEFAULT_SUMMARY_MAX_TOKENS),

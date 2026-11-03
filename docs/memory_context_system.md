@@ -16,7 +16,6 @@ In practice, this gives xiaoO three core properties:
 
 - working-memory snapshots synchronized from loop state;
 - adaptive context compression in `daemon` and `cli`;
-- stale tool-noise microcompression;
 - multi-agent lane memory isolation;
 - traceable compression and prompt-build lifecycle.
 
@@ -24,12 +23,7 @@ Each of these is wired on the default path:
 
 | Claim | Evidence |
 | --- | --- |
-| Stale tool-noise microcompression is default-enabled | `compress()` calls `compression_pipeline.microcompact()` on every turn (`crates/core/src/agent_loop.rs`); the policy is always constructed with non-zero staleness and a protected tail (`crates/compact/src/defaults.rs`, `crates/compact/src/defaults.rs` — 120 s / 6 recent messages). |
 | Multi-agent lane memory isolation is default-enabled | Each lane builds its own `MemoryManager` keyed by session id for the root lane and by `agent_id` for spawned subagent lanes (`apps/shared/src/gateway/session_worker.rs`). |
-
-> Note on microcompression: the staleness threshold and protected tail are compile-time
-> constants, not user-configurable — `[compact]` exposes no microcompact keys
-> (see the configuration table below, and `crates/compact/src/defaults.rs`).
 
 ### Implemented and available for integration
 
@@ -103,7 +97,6 @@ Runtime sequence:
 
 xiaoO does not use one generic truncation pass. It applies staged compression:
 
-- **Microcompact**: removes stale `tool_use` / `tool_result` pairs.
 - **Context Collapse**: replaces older ranges with a dense summary message.
 - **Auto Compact**: final safety layer when history is still too large.
 

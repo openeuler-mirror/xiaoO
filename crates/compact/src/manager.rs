@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use agent_contracts::{CompressionError, CompressionPipeline, TokenBudgetPolicy, TokenEstimator};
 use agent_llm::{ChatMessageExt, CompletionConfigExt};
-use agent_types::compression::{
-    CompressedView, CompressionMeta, ContextAnalysis, MicroCompactResult,
-};
+use agent_types::compression::{CompressedView, CompressionMeta, ContextAnalysis};
 use agent_types::{ChatMessage, CompletionConfig, ContentBlock, MessageRole, TokenBudgetConfig};
 use async_trait::async_trait;
 use llm_client::LlmProviderWrapper;
@@ -16,7 +14,6 @@ use crate::{
         discover_boundary, CompactionBoundary, CompactionResult,
     },
     envelope::ContextEnvelope,
-    microcompact::{apply_microcompact, MicroCompactionPolicy},
     policy::{CompactionPolicy, CompactionPolicyService, ContextThresholds},
     summary::{summarize_messages_with_previous, SummaryCompressionBudget},
     CompactError, CompactResult,
@@ -25,7 +22,6 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct ContextManagerConfig {
     pub thresholds: ContextThresholds,
-    pub micro_policy: MicroCompactionPolicy,
     pub summary_budget: SummaryCompressionBudget,
     pub collapse_preserve_tail_messages: usize,
     pub session_memory_compaction: Option<SessionMemoryCompactionPolicy>,
@@ -547,15 +543,6 @@ impl CompressionPipeline for ContextManager {
             summary: final_summary,
             updated_meta,
         })
-    }
-
-    fn microcompact(&self, messages: &[ChatMessage], now_ms: u64) -> MicroCompactResult {
-        apply_microcompact(
-            messages,
-            now_ms,
-            self.estimator.as_ref(),
-            &self.config.micro_policy,
-        )
     }
 }
 

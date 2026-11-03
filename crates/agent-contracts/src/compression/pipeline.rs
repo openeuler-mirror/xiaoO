@@ -1,7 +1,5 @@
 use crate::context::budget::TokenBudgetPolicy;
-use agent_types::compression::{
-    CompressedView, CompressionMeta, ContextAnalysis, MicroCompactResult,
-};
+use agent_types::compression::{CompressedView, CompressionMeta, ContextAnalysis};
 use agent_types::ChatMessage;
 use async_trait::async_trait;
 
@@ -23,6 +21,4 @@ pub trait CompressionPipeline: Send + Sync {
         budget: &dyn TokenBudgetPolicy,
         meta: &CompressionMeta,
     ) -> Result<CompressedView, CompressionError>;
-
-    fn microcompact(&self, messages: &[ChatMessage], now_ms: u64) -> MicroCompactResult;
 }

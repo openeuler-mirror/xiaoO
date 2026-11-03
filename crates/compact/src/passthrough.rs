@@ -1,7 +1,5 @@
 use agent_contracts::{CompressionError, CompressionPipeline, TokenBudgetPolicy};
-use agent_types::compression::{
-    CompressedView, CompressionMeta, ContextAnalysis, ContextSeverity, MicroCompactResult,
-};
+use agent_types::compression::{CompressedView, CompressionMeta, ContextAnalysis, ContextSeverity};
 use agent_types::{ChatMessage, ContentBlock};
 use async_trait::async_trait;
 
@@ -71,15 +69,5 @@ impl CompressionPipeline for PassthroughCompressionPipeline {
             updated_meta: meta.clone(),
             estimated_tokens: messages.len(),
         })
-    }
-
-    fn microcompact(&self, messages: &[ChatMessage], _now_ms: u64) -> MicroCompactResult {
-        MicroCompactResult {
-            applied: false,
-            removed_count: 0,
-            removed_call_ids: Vec::new(),
-            messages: messages.to_vec(),
-            token_delta: 0,
-        }
     }
 }
