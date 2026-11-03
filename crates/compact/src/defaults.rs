@@ -92,7 +92,6 @@ pub fn build_context_manager(
         collapse_preserve_tail_messages: ov
             .collapse_preserve_tail
             .unwrap_or(DEFAULT_COLLAPSE_PRESERVE_TAIL),
-        session_memory_compaction: None,
     };
 
     let completion = CompletionConfig {

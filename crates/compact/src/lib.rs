@@ -15,7 +15,7 @@ pub use defaults::{
 };
 pub use envelope::{ContextBreakdown, ContextEnvelope, ContextSection};
 pub use estimator::{RoughTokenEstimator, RoughTokenEstimatorConfig};
-pub use manager::{ContextManager, ContextManagerConfig, SessionMemoryCompactionPolicy};
+pub use manager::{ContextManager, ContextManagerConfig};
 pub use passthrough::PassthroughCompressionPipeline;
 pub use policy::{CompactionPolicy, CompactionPolicyService, ContextThresholds};
 pub use summary::{SummaryCompressionBudget, SummaryCompressionResult};
