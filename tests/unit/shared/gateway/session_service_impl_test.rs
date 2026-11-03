@@ -1,9 +1,9 @@
 use super::*;
 use crate::backend::GatewayBackendConfig;
 use crate::gateway::{
-    AppBootstrap, GatewayEntryContext, InMemorySessionStore, SessionInput, SessionInputKind,
-    SessionRuntimeBindings, SessionRuntimeDescriptor, TurnOutcome, ORPHAN_SESSION_THRESHOLD_MS,
-    STALE_LEASE_THRESHOLD_MS,
+    AppBootstrap, GatewayEntryContext, InMemorySessionStore, ReaperPolicy, SessionInput,
+    SessionInputKind, SessionRuntimeBindings, SessionRuntimeDescriptor, TurnOutcome,
+    ORPHAN_SESSION_THRESHOLD_MS, STALE_LEASE_THRESHOLD_MS,
 };
 use agent_contracts::backend::BackendLifecycleState;
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -496,6 +496,7 @@ async fn memory_automation_failed_recall_keeps_user_text_and_turn_execution_unch
             Arc::new(BackendManager::new()),
             Some(automation.clone() as Arc<dyn TurnMemoryAutomation>),
             None,
+            ReaperPolicy::Disabled,
         )
         .expect("dependencies");
 
@@ -1700,6 +1701,74 @@ async fn save_orphan_candidate(
     session.updated_at_ms = updated_at_ms;
     store.save(session.clone()).await;
     session
+}
+
+#[tokio::test]
+async fn reaper_policy_controls_whether_bootstrap_spawns_the_reaper() {
+    // Regression: bootstrap assembly used to spawn the orphan reaper
+    // unconditionally. In local mode no attach lease is ever produced, so
+    // after 2 h of idle the reaper deleted the records of sessions whose
+    // only holder (the TUI process) was still alive. The policy enum is now
+    // the wiring contract: the local constructors must stay `Disabled` and
+    // only daemon-style assembly passes `Enabled`.
+    let workspace = TempDir::new().expect("workspace");
+    let store = Arc::new(InMemorySessionStore::default());
+    let resolver = make_stub_resolver(workspace.path());
+
+    let local_deps = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+        store.clone(),
+        resolver.clone(),
+        HookerRegistryConfig::default(),
+        Arc::new(BackendManager::new()),
+    )
+    .expect("short-form dependencies");
+    assert!(
+        local_deps.reaper_handle.is_none(),
+        "local-mode assembly must not spawn the orphan reaper"
+    );
+
+    let lifecycle_deps = AppBootstrap::lifecycle_only(
+        store.clone(),
+        HookerRegistryConfig::default(),
+        Arc::new(BackendManager::new()),
+    )
+    .expect("lifecycle-only dependencies");
+    assert!(
+        lifecycle_deps.reaper_handle.is_none(),
+        "lifecycle_only assembly must not spawn the orphan reaper"
+    );
+
+    let disabled_deps =
+        AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
+            store.clone(),
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+            None,
+            None,
+            ReaperPolicy::Disabled,
+        )
+        .expect("long-form dependencies");
+    assert!(
+        disabled_deps.reaper_handle.is_none(),
+        "ReaperPolicy::Disabled must not spawn the orphan reaper"
+    );
+
+    let daemon_deps =
+        AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
+            store,
+            make_stub_resolver(workspace.path()),
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+            None,
+            None,
+            ReaperPolicy::Enabled,
+        )
+        .expect("daemon-style dependencies");
+    let reaper = daemon_deps
+        .reaper_handle
+        .expect("ReaperPolicy::Enabled must spawn the orphan reaper");
+    reaper.abort();
 }
 
 #[tokio::test]

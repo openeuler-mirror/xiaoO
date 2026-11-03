@@ -190,9 +190,11 @@ impl CoreBackedSessionService {
     /// session half-applied).
     ///
     /// Returns a `JoinHandle` so callers can `.abort()` it on shutdown. It is
-    /// spawned unconditionally by [`AppBootstrap`](crate::gateway::AppBootstrap)'s
-    /// assembly step, so it runs in every full-bootstrap process. Errors are
-    /// logged and never propagated (best-effort).
+    /// spawned only when the bootstrap's
+    /// [`ReaperPolicy`](crate::gateway::ReaperPolicy) is `Enabled` (the
+    /// daemon); local single-process assembly keeps it off because its store
+    /// never outlives the process. Errors are logged and never propagated
+    /// (best-effort).
     pub(crate) fn spawn_orphan_reaper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         const ORPHAN_THRESHOLD_MS: u64 = crate::gateway::ORPHAN_SESSION_THRESHOLD_MS;
         const STALE_LEASE_MS: u64 = crate::gateway::STALE_LEASE_THRESHOLD_MS;

@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::gateway::{
     AppBootstrap, AppDependencies, AppTurnRequest, AppTurnResult, HostedSessionRuntimeConfig,
-    HostedSessionRuntimeResolver, McpMemoryAutomation, MemoryAutomationHealth, SessionControlPlane,
-    SessionOpenRequest, SessionRecord, SessionRuntimeBindings, SessionStore,
+    HostedSessionRuntimeResolver, McpMemoryAutomation, MemoryAutomationHealth, ReaperPolicy,
+    SessionControlPlane, SessionOpenRequest, SessionRecord, SessionRuntimeBindings, SessionStore,
 };
 use crate::interaction_prompt::UserPromptResult;
 
@@ -228,6 +228,11 @@ impl SessionGateway {
                     // No subagent interaction timeout: channel sessions use
                     // ChannelInteractionHandle which carries its own timeout.
                     None,
+                    // Local single-process mode: the store dies with the TUI
+                    // process and local turns never produce attach leases, so
+                    // idle-time reaping could only delete live sessions'
+                    // records (see ReaperPolicy).
+                    ReaperPolicy::Disabled,
                 ) {
                     Ok(dependencies) => dependencies,
                     Err(error) => {

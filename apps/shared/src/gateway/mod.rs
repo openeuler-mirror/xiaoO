@@ -39,7 +39,7 @@ pub mod workspace_prompt;
 
 pub(crate) use e2b_runtime::finalize_e2b_runtime;
 
-pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
+pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies, ReaperPolicy};
 pub use hosted_runtime_resolver::{
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, SubagentRoleConfigEntry,
 };

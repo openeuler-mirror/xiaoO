@@ -21,8 +21,8 @@ use xiaoo_shared::backend::ProcessGroupCleanupGuard;
 use xiaoo_shared::gateway::{
     session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
-    LlmRuntimeConfig, McpMemoryAutomation, SessionRuntimeBindings, SessionRuntimeDescriptor,
-    SessionRuntimeResolver, SessionStore,
+    LlmRuntimeConfig, McpMemoryAutomation, ReaperPolicy, SessionRuntimeBindings,
+    SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
 };
 
 use xiaoo_api::chat::AgentId;
@@ -582,6 +582,9 @@ async fn run_once(
         memory_automation,
         // No subagent interaction timeout for the local CLI/TUI entry.
         None,
+        // One-shot local process: the store dies at exit, so an idle-time
+        // reaper could only destroy the live session's record mid-turn.
+        ReaperPolicy::Disabled,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -666,9 +669,6 @@ async fn run_once(
     )
     .await;
     let duration_ms = turn_started.elapsed().as_millis() as u64;
-    if let Some(reaper) = deps.reaper_handle {
-        reaper.abort();
-    }
     if let Some(automation) = memory_automation_for_shutdown {
         match tokio::time::timeout(std::time::Duration::from_secs(5), automation.close()).await {
             Ok(Ok(())) => {}
