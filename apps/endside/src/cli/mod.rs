@@ -165,7 +165,6 @@ pub fn build_compression_pipeline(
     let overrides = CompactOverrides {
         auto_compact_ratio: cc.auto_compact_ratio,
         blocking_ratio: cc.blocking_ratio,
-        collapse_preserve_tail: cc.collapse_preserve_tail,
         summary_max_tokens: cc.summary_max_tokens,
         summary_preserve_tail: cc.summary_preserve_tail,
         summary_llm_max_tokens: cc.summary_llm_max_tokens,

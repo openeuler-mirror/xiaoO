@@ -10,8 +10,8 @@ pub mod summary;
 pub use compaction::{CompactionBoundary, CompactionResult, PartialDirection};
 pub use defaults::{
     build_context_manager, CompactOverrides, DEFAULT_AUTO_COMPACT_RATIO, DEFAULT_BLOCKING_RATIO,
-    DEFAULT_COLLAPSE_PRESERVE_TAIL, DEFAULT_SUMMARY_LLM_MAX_TOKENS, DEFAULT_SUMMARY_MAX_TOKENS,
-    DEFAULT_SUMMARY_PRESERVE_TAIL, DEFAULT_SUMMARY_TEMPERATURE,
+    DEFAULT_SUMMARY_LLM_MAX_TOKENS, DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SUMMARY_PRESERVE_TAIL,
+    DEFAULT_SUMMARY_TEMPERATURE,
 };
 pub use envelope::{ContextBreakdown, ContextEnvelope, ContextSection};
 pub use estimator::{RoughTokenEstimator, RoughTokenEstimatorConfig};

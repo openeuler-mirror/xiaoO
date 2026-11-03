@@ -22,19 +22,12 @@ use crate::{
 pub struct ContextManagerConfig {
     pub thresholds: ContextThresholds,
     pub summary_budget: SummaryCompressionBudget,
-    pub collapse_preserve_tail_messages: usize,
 }
 
 impl ContextManagerConfig {
     pub fn validate(&self) -> CompactResult<()> {
         self.thresholds.validate()?;
         self.summary_budget.validate()?;
-
-        if self.collapse_preserve_tail_messages == 0 {
-            return Err(CompactError::InvalidConfiguration {
-                message: "tail preservation counts must be greater than zero".to_string(),
-            });
-        }
 
         Ok(())
     }
@@ -112,70 +105,6 @@ impl ContextManager {
             effective_boundary.as_ref(),
         )?;
         Ok((effective_boundary, candidates))
-    }
-
-    async fn context_collapse(
-        &self,
-        messages: &[ChatMessage],
-        meta: &CompressionMeta,
-        boundary: Option<CompactionBoundary>,
-        preserve_tail_messages: usize,
-    ) -> CompactResult<CompactionResult> {
-        let (boundary, candidates) =
-            self.resolve_candidates(messages, preserve_tail_messages, boundary)?;
-
-        if candidates.is_empty() {
-            return Ok(CompactionResult {
-                messages: messages.to_vec(),
-                summary: None,
-                boundary,
-                updated_meta: meta.clone(),
-                estimated_tokens: self.estimator.estimate_messages_tokens(messages),
-            });
-        }
-
-        let candidate_messages = candidates
-            .iter()
-            .map(|index| messages[*index].clone())
-            .collect::<Vec<_>>();
-
-        let summary = summarize_messages_with_previous(
-            &candidate_messages,
-            meta.compact_summary.as_deref(),
-            self.estimator.as_ref(),
-            &self.config.summary_budget,
-            self.summary_provider.as_ref(),
-            &self.summary_request,
-        )
-        .await?;
-        let inherited_message_id = candidate_messages
-            .iter()
-            .find_map(|message| message.message_id.clone());
-        let collapse_message = ChatMessage::new(
-            MessageRole::Assistant,
-            vec![ContentBlock::Text {
-                text: format!("context_collapse:\n{}", summary.summary),
-            }],
-            inherited_message_id,
-            candidate_messages
-                .last()
-                .map(|message| message.timestamp_ms)
-                .unwrap_or_default(),
-            None,
-        );
-        let collapsed_messages =
-            apply_candidate_replacement(messages, &candidates, Some(collapse_message));
-        let mut updated_meta = meta.clone();
-        updated_meta.last_collapse_index = candidates.iter().copied().max();
-        updated_meta.compact_summary = Some(summary.summary.clone());
-
-        Ok(CompactionResult {
-            estimated_tokens: self.estimator.estimate_messages_tokens(&collapsed_messages),
-            messages: collapsed_messages,
-            summary: Some(summary.summary),
-            boundary,
-            updated_meta,
-        })
     }
 
     async fn auto_compact(
@@ -266,7 +195,7 @@ impl CompressionPipeline for ContextManager {
         meta: &CompressionMeta,
     ) -> Result<CompressedView, CompressionError> {
         let budget = budget_to_config(budget);
-        let mut analysis = self
+        let analysis = self
             .checked_analyze(messages, &budget)
             .map_err(CompressionError::from)?;
         // History must only ever be rewritten with a summary standing in for
@@ -282,70 +211,38 @@ impl CompressionPipeline for ContextManager {
             });
         }
 
-        let policy = CompactionPolicy::from_budget(&budget);
-        let history_limit = policy.history_limit().map_err(CompressionError::from)?;
-        let mut working_messages = messages.to_vec();
-        let mut updated_meta = meta.clone();
-        let mut final_summary = meta.compact_summary.clone();
-
-        // protect_first_user=true: in the pipeline flow, the first user message
-        // (original task instructions) must never be compacted away.
+        // The first user message (original task instructions) is never a
+        // compaction candidate — see `candidate_indexes`.
         let result = self
-            .context_collapse(
-                &working_messages,
-                &updated_meta,
+            .auto_compact(
+                messages,
+                meta,
                 None,
-                self.config.collapse_preserve_tail_messages,
+                self.config.summary_budget.preserve_tail_messages,
             )
             .await
             .map_err(CompressionError::from)?;
-        if result.messages != working_messages {
-            working_messages = result.messages;
-            if result.summary.is_some() {
-                final_summary = result.summary.clone();
-            }
-            updated_meta = result.updated_meta;
-            analysis = self
-                .checked_analyze(&working_messages, &budget)
-                .map_err(CompressionError::from)?;
-        }
 
-        if analysis.estimated_tokens > history_limit {
-            let result = self
-                .auto_compact(
-                    &working_messages,
-                    &updated_meta,
-                    None,
-                    self.config.summary_budget.preserve_tail_messages,
-                )
-                .await
-                .map_err(CompressionError::from)?;
-            working_messages = result.messages;
-            final_summary = result.summary;
-            updated_meta = result.updated_meta;
-        }
-
+        let working_messages = result.messages;
         let removed_count = messages.len().saturating_sub(working_messages.len());
 
         Ok(CompressedView {
             estimated_tokens: self.estimator.estimate_messages_tokens(&working_messages),
             messages: working_messages,
             removed_count,
-            summary: final_summary,
-            updated_meta,
+            summary: result.summary,
+            updated_meta: result.updated_meta,
         })
     }
 }
 
-/// A compression summary message is one produced by context_collapse or auto_compact.
+/// A compression summary message is one produced by auto_compact.
 fn is_compression_summary(message: &ChatMessage) -> bool {
     if !matches!(message.role, MessageRole::Assistant) {
         return false;
     }
     message.blocks.iter().any(|block| match block {
-        ContentBlock::Text { text } => {
-            text.starts_with("context_collapse:\n") || text.starts_with("auto_compact:\n")
-        }
+        ContentBlock::Text { text } => text.starts_with("auto_compact:\n"),
         _ => false,
     })
 }

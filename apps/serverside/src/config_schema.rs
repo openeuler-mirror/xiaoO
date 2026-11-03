@@ -142,7 +142,6 @@ pub fn config_schema() -> Value {
             section("compact", "上下文压缩", "object", &[
                 field("auto_compact_ratio", "number", false),
                 field("blocking_ratio", "number", false),
-                field("collapse_preserve_tail", "integer", false),
                 field("summary_max_tokens", "integer", false),
                 field("summary_preserve_tail", "integer", false),
                 field("summary_llm_max_tokens", "integer", false),

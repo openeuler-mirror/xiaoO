@@ -30,7 +30,6 @@ use crate::{
 pub struct CompactOverrides {
     pub auto_compact_ratio: Option<f64>,
     pub blocking_ratio: Option<f64>,
-    pub collapse_preserve_tail: Option<usize>,
     pub summary_max_tokens: Option<usize>,
     pub summary_preserve_tail: Option<usize>,
     pub summary_llm_max_tokens: Option<usize>,
@@ -40,8 +39,6 @@ pub struct CompactOverrides {
 
 pub const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.75;
 pub const DEFAULT_BLOCKING_RATIO: f64 = 0.9;
-
-pub const DEFAULT_COLLAPSE_PRESERVE_TAIL: usize = 4;
 
 pub const DEFAULT_SUMMARY_MAX_TOKENS: usize = 1024;
 pub const DEFAULT_SUMMARY_PRESERVE_TAIL: usize = 4;
@@ -89,9 +86,6 @@ pub fn build_context_manager(
                 .summary_preserve_tail
                 .unwrap_or(DEFAULT_SUMMARY_PRESERVE_TAIL),
         },
-        collapse_preserve_tail_messages: ov
-            .collapse_preserve_tail
-            .unwrap_or(DEFAULT_COLLAPSE_PRESERVE_TAIL),
     };
 
     let completion = CompletionConfig {

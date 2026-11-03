@@ -393,8 +393,6 @@ pub struct CompactConfig {
     #[serde(default)]
     pub blocking_ratio: Option<f64>,
     #[serde(default)]
-    pub collapse_preserve_tail: Option<usize>,
-    #[serde(default)]
     pub summary_max_tokens: Option<usize>,
     #[serde(default)]
     pub summary_preserve_tail: Option<usize>,
