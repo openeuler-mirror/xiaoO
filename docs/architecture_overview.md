@@ -90,8 +90,8 @@ max turns, and token-budget policy are frozen
 
 ### 3.3 Intermediate crates
 
-- `crates/compact` implements staged context compression: `apply_microcompact` for stale
-  tool pairs (`crates/compact/src/microcompact.rs`) and the `ContextManager` pipeline.
+- `crates/compact` implements staged context compression via the `ContextManager`
+  pipeline.
 - `crates/memory` implements layered memory: live snapshots, session summaries, durable
   memory, and the SQLite + FTS5 + embedding semantic store.
 - `crates/operation_backend` implements the sandbox/execution substrate behind

@@ -4,4 +4,4 @@ pub mod view;
 
 pub use analysis::{ContextAnalysis, ContextSeverity};
 pub use meta::CompressionMeta;
-pub use view::{CompressedView, MicroCompactResult};
+pub use view::CompressedView;

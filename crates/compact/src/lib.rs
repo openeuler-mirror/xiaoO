@@ -3,7 +3,6 @@ pub mod defaults;
 pub mod envelope;
 pub mod estimator;
 pub mod manager;
-pub mod microcompact;
 pub mod passthrough;
 pub mod policy;
 pub mod summary;
@@ -11,14 +10,12 @@ pub mod summary;
 pub use compaction::{CompactionBoundary, CompactionResult, PartialDirection};
 pub use defaults::{
     build_context_manager, CompactOverrides, DEFAULT_AUTO_COMPACT_RATIO, DEFAULT_BLOCKING_RATIO,
-    DEFAULT_COLLAPSE_PRESERVE_TAIL, DEFAULT_PRESERVE_RECENT_MESSAGES, DEFAULT_STALE_TOOL_PAIR_AFTER_MS,
-    DEFAULT_SUMMARY_LLM_MAX_TOKENS, DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SUMMARY_PRESERVE_TAIL,
-    DEFAULT_SUMMARY_TEMPERATURE,
+    DEFAULT_COLLAPSE_PRESERVE_TAIL, DEFAULT_SUMMARY_LLM_MAX_TOKENS, DEFAULT_SUMMARY_MAX_TOKENS,
+    DEFAULT_SUMMARY_PRESERVE_TAIL, DEFAULT_SUMMARY_TEMPERATURE,
 };
 pub use envelope::{ContextBreakdown, ContextEnvelope, ContextSection};
 pub use estimator::{RoughTokenEstimator, RoughTokenEstimatorConfig};
 pub use manager::{ContextManager, ContextManagerConfig, SessionMemoryCompactionPolicy};
-pub use microcompact::MicroCompactionPolicy;
 pub use passthrough::PassthroughCompressionPipeline;
 pub use policy::{CompactionPolicy, CompactionPolicyService, ContextThresholds};
 pub use summary::{SummaryCompressionBudget, SummaryCompressionResult};
