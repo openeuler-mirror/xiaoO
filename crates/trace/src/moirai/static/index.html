@@ -147,6 +147,14 @@
                 <div id="trace-list-content">
                     <p class="text-gray-600">Loading...</p>
                 </div>
+                <!-- 没有下一页（next_cursor 为 null）时整体隐藏，
+                     由 app.js 的 updateLoadMoreButton 控制 -->
+                <div id="load-more" class="hidden mt-4 flex flex-col items-center gap-2">
+                    <button id="btn-load-more" class="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+                        加载更多
+                    </button>
+                    <span class="text-sm text-gray-500">已显示 <span id="loaded-count">0</span> 条</span>
+                </div>
             </div>
 
             <div id="span-tree" class="hidden p-6 h-full flex flex-col">

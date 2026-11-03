@@ -110,7 +110,7 @@ async fn compressed_requests_responses_and_tool_outputs_round_trip_after_reopen(
         output
     );
     assert_eq!(
-        storage.list_traces(10).await.unwrap()[0]
+        storage.list_traces(10, None).await.unwrap()[0]
             .task_description
             .as_deref(),
         Some("task")
@@ -852,4 +852,123 @@ async fn suspend_resume_chain_includes_previous_and_next_segments() {
         })
         .collect::<Vec<_>>();
     assert_eq!(tool_names, vec!["spawn_subagent", "join_subagent"]);
+}
+
+// Seed one root span per trace. A root span without an END marker keeps
+// the trace alive for list_alive_traces. span_id is the table's primary
+// key, so roots must not share one literal id across traces.
+async fn insert_trace(storage: &SqliteStorage, trace_id: &str, start_time: i64, ended: bool) {
+    let span_type = if ended { "END" } else { "USER" };
+    let end_time = if ended { Some(start_time + 10) } else { None };
+    storage
+        .insert_span(&span(
+            &format!("root-{trace_id}"),
+            trace_id,
+            None,
+            span_type,
+            start_time,
+            end_time,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn list_traces_pagination_returns_all_rows_in_order() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+
+    // 12 traces with page size 5: pages of 5 + 5 + 2 must cover every row
+    // exactly once.
+    for i in 0..12 {
+        insert_trace(&storage, &format!("trace-{i:02}"), (i + 1) * 100, true).await;
+    }
+    let mut collected: Vec<String> = Vec::new();
+    let mut cursor: Option<(i64, String)> = None;
+    loop {
+        let page = storage.list_traces(5, cursor).await.unwrap();
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|t| (t.start_time, t.trace_id.clone()));
+        collected.extend(page.iter().map(|t| t.trace_id.clone()));
+    }
+
+    let expected: Vec<String> = (0..12).rev().map(|i| format!("trace-{i:02}")).collect();
+    assert_eq!(
+        collected, expected,
+        "paged walks must concatenate into the full (start_time DESC, trace_id DESC) order \
+         without duplicates or gaps"
+    );
+}
+
+#[tokio::test]
+async fn pagination_survives_start_time_ties_via_trace_id_tiebreaker() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+
+    // All traces share one start_time, so only the trace_id tiebreaker can
+    // disambiguate the cursor.
+    for trace_id in ["b", "c", "a"] {
+        insert_trace(&storage, trace_id, 500, true).await;
+    }
+
+    let first = storage.list_traces(2, None).await.unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|t| t.trace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["c", "b"],
+        "DESC order: lexicographically greater trace_id sorts first on ties"
+    );
+
+    let remaining = storage
+        .list_traces(5, Some((500, "b".to_string())))
+        .await
+        .unwrap();
+    assert_eq!(
+        remaining
+            .iter()
+            .map(|t| t.trace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a"],
+        "a cursor landing on a tie must resume strictly after its trace_id"
+    );
+}
+
+#[tokio::test]
+async fn list_alive_traces_pagination_excludes_ended_traces() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+
+    for trace_id in ["alive-1", "alive-2", "alive-3"] {
+        insert_trace(&storage, trace_id, 600, false).await;
+    }
+    // END markers make these traces ended; alive paging must skip them even
+    // though their start_times are distinct.
+    for trace_id in ["ended-1", "ended-2"] {
+        insert_trace(&storage, trace_id, 550, true).await;
+    }
+
+    let first = storage.list_alive_traces(2, None).await.unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|t| t.trace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alive-3", "alive-2"]
+    );
+
+    let last = first.last().unwrap();
+    let second = storage
+        .list_alive_traces(2, Some((last.start_time, last.trace_id.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        second
+            .iter()
+            .map(|t| t.trace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alive-1"],
+        "alive paging continues past the cursor and never surfaces ended traces"
+    );
 }

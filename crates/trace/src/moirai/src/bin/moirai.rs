@@ -165,9 +165,9 @@ async fn cmd_list(
     let storage = SqliteStorage::new(db_path.to_str().unwrap())?;
 
     let traces = if alive {
-        storage.list_alive_traces(limit).await?
+        storage.list_alive_traces(limit, None).await?
     } else {
-        storage.list_traces(limit).await?
+        storage.list_traces(limit, None).await?
     };
 
     if traces.is_empty() {
@@ -176,7 +176,7 @@ async fn cmd_list(
     }
 
     let alive_trace_ids = if !alive {
-        let alive_traces = storage.list_alive_traces(limit * 2).await?;
+        let alive_traces = storage.list_alive_traces(limit * 2, None).await?;
         alive_traces
             .iter()
             .map(|t| t.trace_id.clone())
