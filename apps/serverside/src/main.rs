@@ -53,7 +53,7 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use xiaoo_shared::backend::{BackendManager, ProcessGroupCleanupGuard};
 use xiaoo_shared::gateway::{
-    AppBootstrap, InMemorySessionStore, McpMemoryAutomation, SessionStore,
+    AppBootstrap, InMemorySessionStore, McpMemoryAutomation, ReaperPolicy, SessionStore,
 };
 
 #[tokio::main]
@@ -625,9 +625,14 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
             backend_manager.clone(),
             memory_automation,
             Some(std::time::Duration::from_secs(interaction_timeout_secs)),
+            // Daemon-only: remote TUIs refresh their attach leases over HTTP,
+            // so the reaper's "no live lease = no holder" criteria hold here
+            // (and only here — see ReaperPolicy).
+            ReaperPolicy::Enabled,
         )?;
         let session_service = app.session_service.clone();
         let session_control_plane = app.session_control_plane.clone();
+        let reaper_handle = app.reaper_handle;
         let feishu_config = config.feishu_config()?;
         let telegram_config = config.telegram_config()?;
         let channel_manager = Arc::new(ChannelManager::new(
@@ -786,6 +791,17 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
             .with_graceful_shutdown(shutdown_signal())
             .await
             .context("axum server exited unexpectedly");
+
+        // Stop the reaper before tearing down backends so a sweep that raced
+        // the shutdown signal cannot force-close sessions mid-teardown.
+        // `abort()` only schedules cancellation for the reaper's next await
+        // point, so the handle must also be awaited: once it resolves the
+        // task has fully terminated and no in-flight sweep can interleave
+        // with the backend teardown below.
+        if let Some(reaper) = reaper_handle {
+            reaper.abort();
+            let _ = reaper.await;
+        }
 
         // Gracefully shutdown cron scheduler
         if let Some(scheduler) = cron_scheduler {
