@@ -1,7 +1,6 @@
 let currentTraceId = null;
 let currentSpan = null;
 let currentSpans = [];
-let currentTraceIds = [];
 let autoRefreshInterval = null;
 let isAutoRefreshing = false;
 
@@ -31,60 +30,174 @@ function showToast() {
 
 // ============ Trace List ============
 
-async function loadTraces() {
+// 首屏/每页条数；是否还有下一页由后端返回的 next_cursor 表达。
+const PAGE_SIZE = 50;
+
+// 每次点击「加载更多」追加的条数。比 PAGE_SIZE 大一档，纯为减少深翻页
+// （千条级历史）时的点击次数；请求成本对页大小不敏感。
+const LOAD_MORE_PAGE = 200;
+
+// 已加载的 trace，跨多次「加载更多」累积。
+let loadedTraces = [];
+// 下一页游标（后端原样返回的 "{start_time}.{trace_id}"），null 表示没有更多。
+let nextCursor = null;
+let isLoadingMore = false;
+
+// trace_id -> { row: <tr>, trace: 该行最后一次渲染的快照 }。已渲染行的
+// single source of truth：新行判定、原地更新、消失行清理都从它读取；
+// trace 用于变更比较，深度重拉时多数行未变化，跳过 DOM 写入。
+let traceRows = new Map();
+
+// 串行化对 loadedTraces/nextCursor 的读写：自动刷新若与「加载更多」并发，
+// 刷新会按旧深度截断列表，「加载更多」会向新列表拼接按过期游标取回的页，
+// 两种交错都会留下重复或丢失行；排队执行则各自都基于最新状态。
+let traceListOp = Promise.resolve();
+
+function runSerializedTraceListOp(task) {
+    const result = traceListOp.then(task, task);
+    // 任务内部已自行捕获异常；兜底 catch 防止链路因意外 rejection 永久卡死。
+    traceListOp = result.catch(() => {});
+    return result;
+}
+
+function hasMoreTraces() {
+    return nextCursor !== null;
+}
+
+function tracesUrl(limit, cursor) {
     const alive = document.getElementById('filter-alive').checked;
-    const url = `/api/traces?limit=50&alive=${alive}`;
-    
-    try {
-        const response = await fetch(url);
-        const traces = await response.json();
-        renderTraceList(traces);
-    } catch (error) {
-        document.getElementById('trace-list-content').innerHTML = 
-            `<p class="text-red-600">Error loading traces: ${error.message}</p>`;
+    let url = `/api/traces?limit=${limit}&alive=${alive}`;
+    if (cursor) {
+        url += `&cursor=${encodeURIComponent(cursor)}`;
     }
+    return url;
+}
+
+async function fetchTraces(limit, cursor) {
+    const response = await fetch(tracesUrl(limit, cursor));
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+    }
+    return await response.json();
+}
+
+// keepDepth：按已加载数量请求，避免「加载更多」展开的列表在刷新后回缩。
+// 深度不设上限：本地单用户规模下整表查询为毫秒级，且渲染走行级调和
+// （见 reconcileTraceRows），多数行未变化时零 DOM 写入；真正撑不住的
+// 规模下，先触顶的是把全部已加载行挂在 DOM 里这件事本身，而不是这次
+// 重拉，封顶拦不住前者，只会挡住用户翻完整历史。
+// quiet：自动刷新时网络抖动不应清掉现有列表，只打日志。
+function reloadTraces({ keepDepth = false, animate = false, toast = false, quiet = false } = {}) {
+    return runSerializedTraceListOp(async () => {
+        try {
+            const limit = Math.max(PAGE_SIZE, keepDepth ? loadedTraces.length : 0);
+            const data = await fetchTraces(limit, null);
+            loadedTraces = data.items;
+            nextCursor = data.next_cursor;
+            renderTraceList(loadedTraces, animate);
+            if (toast) showToast();
+        } catch (error) {
+            if (quiet) {
+                console.error('Auto refresh failed:', error);
+                return;
+            }
+            // 错误态整体替换容器，map 里的行已随之脱离 DOM；
+            // 在此同步清空，避免下次渲染把陈旧行重新挂回。
+            traceRows.clear();
+            document.getElementById('trace-list-content').innerHTML =
+                `<p class="text-red-600">Error loading traces: ${error.message}</p>`;
+            nextCursor = null;
+        }
+        updateLoadMoreButton();
+    });
+}
+
+async function loadTraces() {
+    await reloadTraces();
 }
 
 async function refreshTraces() {
-    const alive = document.getElementById('filter-alive').checked;
-    const url = `/api/traces?limit=50&alive=${alive}`;
-    
-    try {
-        const response = await fetch(url);
-        const traces = await response.json();
-        renderTraceList(traces);
-        showToast();
-    } catch (error) {
-        document.getElementById('trace-list-content').innerHTML = 
-            `<p class="text-red-600">Error loading traces: ${error.message}</p>`;
-    }
+    await reloadTraces({ keepDepth: true, toast: true });
 }
 
-function renderTraceList(traces, animate = false) {
-    const container = document.getElementById('trace-list-content');
-    
-    if (traces.length === 0) {
-        container.innerHTML = '<p class="text-gray-600">No traces found</p>';
-        currentTraceIds = [];
-        return;
-    }
+function loadMore() {
+    if (!hasMoreTraces() || isLoadingMore) return;
+    isLoadingMore = true;
+    updateLoadMoreButton();
+    return runSerializedTraceListOp(async () => {
+        try {
+            // 排队期间状态可能已被前面的刷新任务改写，执行时再校验一次。
+            if (!hasMoreTraces()) return;
+            const data = await fetchTraces(LOAD_MORE_PAGE, nextCursor);
+            nextCursor = data.next_cursor;
+            const page = data.items;
+            loadedTraces = loadedTraces.concat(page);
+            appendTraceRows(page);
+        } catch (error) {
+            alert('Error loading more traces: ' + error.message);
+        } finally {
+            isLoadingMore = false;
+            updateLoadMoreButton();
+        }
+    });
+}
 
-    // FLIP 动画：记录旧位置
-    let firstPositions = new Map();
-    if (animate && container.querySelector('tbody')) {
-        const rows = container.querySelectorAll('tr[data-id]');
-        rows.forEach(row => {
-            const rect = row.getBoundingClientRect();
-            firstPositions.set(row.dataset.id, { top: rect.top, left: rect.left });
-        });
-    }
+function updateLoadMoreButton() {
+    const container = document.getElementById('load-more');
+    if (!container) return;
+    document.getElementById('loaded-count').textContent = loadedTraces.length;
+    container.classList.toggle('hidden', !hasMoreTraces());
+    const btn = document.getElementById('btn-load-more');
+    if (btn) btn.disabled = isLoadingMore;
+}
 
-    const newTraceIds = traces.map(t => t.trace_id);
-    const newIds = animate ? newTraceIds.filter(id => !currentTraceIds.includes(id)) : [];
-    
-    currentTraceIds = newTraceIds;
+// 行内六个单元格的内部 HTML，新建行与变更行的原地更新共用同一份拼装。
+function traceRowInnerHtml(trace) {
+    const taskCell = trace.task_description
+        ? `<span class="block truncate max-w-md" title="${escapeAttr(trace.task_description)}">${escapeHtml(trace.task_description)}</span>`
+        : '<span class="text-gray-400">-</span>';
+    return `
+        <td class="border p-2 font-mono text-sm">${escapeHtml(trace.trace_id.substring(0, 12))}</td>
+        <td class="border p-2">${taskCell}</td>
+        <td class="border p-2">${trace.span_count}</td>
+        <td class="border p-2">${formatTime(trace.start_time)}</td>
+        <td class="border p-2">
+            ${trace.end_time ? 
+                '<span class="text-gray-600">ended</span>' : 
+                '<span class="text-green-600 font-semibold">alive</span>'}
+        </td>
+        <td class="border p-2 text-center">
+            <button data-action="delete"
+                    class="text-red-600 hover:text-red-800 p-1"
+                    title="Delete trace">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                </svg>
+            </button>
+        </td>
+    `;
+}
 
-    const table = `
+// data-id 经 dataset 赋值，元素属性天然安全，无需手动转义。
+function createTraceRow(trace, isNew) {
+    const row = document.createElement('tr');
+    row.className = `hover:bg-gray-100 trace-row cursor-pointer${isNew ? ' new-trace-row' : ''}`;
+    row.dataset.id = trace.trace_id;
+    row.innerHTML = traceRowInnerHtml(trace);
+    return row;
+}
+
+// 参与比较的字段即建行后仍会变化的单元格（task/spans/started/status）；
+// trace_id 建行后不变，无需比较。
+function traceChanged(a, b) {
+    return a.task_description !== b.task_description
+        || a.span_count !== b.span_count
+        || a.start_time !== b.start_time
+        || a.end_time !== b.end_time;
+}
+
+function traceTableHtml(rowsHtml) {
+    return `
         <table class="w-full border-collapse">
             <thead>
                 <tr class="bg-gray-200">
@@ -97,64 +210,134 @@ function renderTraceList(traces, animate = false) {
                 </tr>
             </thead>
             <tbody>
-                ${traces.map((trace, idx) => {
-                    const isNew = newIds.includes(trace.trace_id);
-                    const taskCell = trace.task_description
-                        ? `<span class="block truncate max-w-md" title="${escapeAttr(trace.task_description)}">${escapeHtml(trace.task_description)}</span>`
-                        : '<span class="text-gray-400">-</span>';
-                    return `
-                    <tr class="hover:bg-gray-100 trace-row ${isNew ? 'new-trace-row' : ''}" data-id="${trace.trace_id}">
-                        <td class="border p-2 font-mono text-sm cursor-pointer" onclick="viewTrace('${trace.trace_id}')">${trace.trace_id.substring(0, 12)}</td>
-                        <td class="border p-2 cursor-pointer" onclick="viewTrace('${trace.trace_id}')">${taskCell}</td>
-                        <td class="border p-2 cursor-pointer" onclick="viewTrace('${trace.trace_id}')">${trace.span_count}</td>
-                        <td class="border p-2 cursor-pointer" onclick="viewTrace('${trace.trace_id}')">${formatTime(trace.start_time)}</td>
-                        <td class="border p-2 cursor-pointer" onclick="viewTrace('${trace.trace_id}')">
-                            ${trace.end_time ? 
-                                '<span class="text-gray-600">ended</span>' : 
-                                '<span class="text-green-600 font-semibold">alive</span>'}
-                        </td>
-                        <td class="border p-2 text-center">
-                            <button onclick="confirmDelete(event, '${trace.trace_id}')" 
-                                    class="text-red-600 hover:text-red-800 p-1" 
-                                    title="Delete trace">
-                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                                </svg>
-                            </button>
-                        </td>
-                    </tr>
-                `}).join('')}
+                ${rowsHtml}
             </tbody>
         </table>
     `;
-    container.innerHTML = table;
+}
 
-    // FLIP 动画：应用位置变换
-    if (animate && firstPositions.size > 0) {
-        requestAnimationFrame(() => {
-            const rows = container.querySelectorAll('tr[data-id]');
-            rows.forEach(row => {
-                const id = row.dataset.id;
-                const first = firstPositions.get(id);
-                if (!first) return; // 新行已有 bounceIn 动画
-                
-                const last = row.getBoundingClientRect();
-                const deltaY = first.top - last.top;
-                
-                if (Math.abs(deltaY) > 1) {
-                    // Invert: 反转到旧位置
-                    row.style.transform = `translateY(${deltaY}px)`;
-                    row.style.transition = 'none';
-                    
-                    // Play: 播放动画
-                    requestAnimationFrame(() => {
-                        row.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
-                        row.style.transform = '';
-                    });
-                }
-            });
-        });
+// 「加载更多」只往 tbody 末尾追加行，避免全量重绘丢滚动位置。
+function appendTraceRows(newTraces) {
+    const tbody = document.querySelector('#trace-list-content tbody');
+    if (!tbody) return;
+    for (const trace of newTraces) {
+        const row = createTraceRow(trace, false);
+        tbody.appendChild(row);
+        traceRows.set(trace.trace_id, { row, trace });
     }
+}
+
+// 表格骨架与空态提示只创建一次，此后渲染只做行级调和，
+// 不再每次整表 innerHTML 重解析。
+function ensureTraceDom() {
+    const container = document.getElementById('trace-list-content');
+    if (!container.querySelector('table')) {
+        container.innerHTML = `
+            <p id="trace-empty" class="text-gray-600 hidden">No traces found</p>
+            ${traceTableHtml('')}
+        `;
+    }
+    return container;
+}
+
+// 行级调和：服务端顺序即 keyset 分页的全序，旧行按 id 原地更新、新行按
+// 位插入、消失行移除。ref 指向当前行应落位其前的元素，双指针一遍走完
+// 插入与删除后的重排。
+function reconcileTraceRows(tbody, traces, newIds) {
+    const incomingIds = new Set(traces.map(t => t.trace_id));
+
+    let ref = tbody.firstElementChild;
+    for (const trace of traces) {
+        const entry = traceRows.get(trace.trace_id);
+        let row;
+        if (entry) {
+            row = entry.row;
+            // 先比较再覆写快照：多数行未变化时零 DOM 写入
+            if (traceChanged(entry.trace, trace)) {
+                row.innerHTML = traceRowInnerHtml(trace);
+            }
+            entry.trace = trace;
+        } else {
+            row = createTraceRow(trace, newIds.has(trace.trace_id));
+            traceRows.set(trace.trace_id, { row, trace });
+        }
+        if (row !== ref) {
+            tbody.insertBefore(row, ref);
+        }
+        ref = row.nextElementSibling;
+    }
+
+    // Map 迭代中删除已访问项是规范保证安全的
+    for (const [id, entry] of traceRows) {
+        if (!incomingIds.has(id)) {
+            entry.row.remove();
+            traceRows.delete(id);
+        }
+    }
+}
+
+// FLIP Last/Invert/Play：批量读出新位置、批量写入反向变换、再于嵌套
+// rAF 批量清除。各相内读写不交错，整轮至多 2 次强制 layout 刷新，
+// 而非逐行各刷一次。
+function applyFlip(firstPositions) {
+    if (firstPositions.size === 0) return;
+    requestAnimationFrame(() => {
+        const moves = [];
+        for (const [id, entry] of traceRows) {
+            const firstTop = firstPositions.get(id);
+            // 不在 firstPositions 里的必是新行，已有 bounceIn 入场动画
+            if (firstTop === undefined) continue;
+            const delta = firstTop - entry.row.getBoundingClientRect().top;
+            if (Math.abs(delta) > 1) {
+                moves.push({ row: entry.row, delta });
+            }
+        }
+        if (moves.length === 0) return;
+        for (const { row, delta } of moves) {
+            row.style.transform = `translateY(${delta}px)`;
+            row.style.transition = 'none';
+        }
+        requestAnimationFrame(() => {
+            for (const { row } of moves) {
+                row.style.transition = 'transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94)';
+                row.style.transform = '';
+            }
+        });
+    });
+}
+
+function renderTraceList(traces, animate = false) {
+    const container = ensureTraceDom();
+    const table = container.querySelector('table');
+    const emptyMsg = container.querySelector('#trace-empty');
+    const tbody = container.querySelector('tbody');
+
+    const isEmpty = traces.length === 0;
+    table.classList.toggle('hidden', isEmpty);
+    emptyMsg.classList.toggle('hidden', !isEmpty);
+    if (isEmpty) {
+        for (const entry of traceRows.values()) {
+            entry.row.remove();
+        }
+        traceRows.clear();
+        return;
+    }
+
+    // FLIP First：调和前批量读旧位置；之后的写集中在 reconcileTraceRows，
+    // 读写全程不交错。
+    const firstPositions = new Map();
+    if (animate) {
+        for (const [id, entry] of traceRows) {
+            firstPositions.set(id, entry.row.getBoundingClientRect().top);
+        }
+    }
+
+    const prevIds = new Set(traceRows.keys());
+    const newIds = animate
+        ? new Set(traces.filter(t => !prevIds.has(t.trace_id)).map(t => t.trace_id))
+        : new Set();
+    reconcileTraceRows(tbody, traces, newIds);
+    applyFlip(firstPositions);
 }
 
 // ============ Trace Detail ============
@@ -183,8 +366,7 @@ async function loadTraceDetail(traceId) {
 
 let traceToDelete = null;
 
-function confirmDelete(event, traceId) {
-    event.stopPropagation();
+function confirmDelete(traceId) {
     traceToDelete = traceId;
     document.getElementById('delete-modal').classList.remove('hidden');
     document.getElementById('delete-modal').classList.add('flex');
@@ -301,15 +483,7 @@ async function doAutoRefresh() {
     const spanTreeVisible = !document.getElementById('span-tree').classList.contains('hidden');
     
     if (traceListVisible) {
-        const alive = document.getElementById('filter-alive').checked;
-        const url = `/api/traces?limit=50&alive=${alive}`;
-        try {
-            const response = await fetch(url);
-            const traces = await response.json();
-            renderTraceList(traces, true);
-        } catch (error) {
-            console.error('Auto refresh failed:', error);
-        }
+        await reloadTraces({ keepDepth: true, animate: true, quiet: true });
     } else if (spanTreeVisible && currentTraceId) {
         try {
             const response = await fetch(`/api/traces/${currentTraceId.substring(0, 12)}`);
@@ -349,6 +523,21 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('btn-cancel-delete').addEventListener('click', hideDeleteModal);
     document.getElementById('btn-confirm-delete').addEventListener('click', deleteTrace);
     document.getElementById('btn-auto-refresh').addEventListener('click', toggleAutoRefresh);
+    document.getElementById('btn-load-more').addEventListener('click', loadMore);
+
+    // 行由渲染动态创建与销毁，内联 onclick 会随之丢失，且内插 trace_id
+    // 有注入风险；统一委托给常驻容器，trace_id 从 data-id 读取
+    //（dataset 赋值天然安全）。
+    document.getElementById('trace-list-content').addEventListener('click', (event) => {
+        const row = event.target.closest('tr[data-id]');
+        if (!row) return;
+        const traceId = row.dataset.id;
+        if (event.target.closest('button[data-action="delete"]')) {
+            confirmDelete(traceId);
+        } else {
+            viewTrace(traceId);
+        }
+    });
 
     loadTraces();
 });

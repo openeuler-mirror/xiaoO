@@ -51,11 +51,26 @@ pub trait SpanStorage: Send + Sync {
     /// Retrieve all spans for a given trace
     async fn get_trace_spans(&self, trace_id: &str) -> Result<Vec<Span>>;
 
-    /// List all traces with optional limit
-    async fn list_traces(&self, limit: usize) -> Result<Vec<TraceSummary>>;
+    /// List traces newest-first, optionally starting after a cursor.
+    ///
+    /// `before` is a `(start_time, trace_id)` keyset cursor taken from the
+    /// last row of a previous page; `None` starts from the newest trace.
+    /// Keyset pagination (rather than OFFSET) keeps pages stable while the
+    /// database is being written to (e.g. the web UI's 3s auto-refresh):
+    /// rows inserted after the first page never shift later pages.
+    async fn list_traces(
+        &self,
+        limit: usize,
+        before: Option<(i64, String)>,
+    ) -> Result<Vec<TraceSummary>>;
 
-    /// List only traces that are still alive (end_time is None)
-    async fn list_alive_traces(&self, limit: usize) -> Result<Vec<TraceSummary>>;
+    /// List only traces that are still alive (end_time is None), with the
+    /// same keyset-cursor contract as [`SpanStorage::list_traces`].
+    async fn list_alive_traces(
+        &self,
+        limit: usize,
+        before: Option<(i64, String)>,
+    ) -> Result<Vec<TraceSummary>>;
 
     /// Get a trace ID that matches the given prefix
     /// Returns Ok(Some(trace_id)) if exactly one trace matches

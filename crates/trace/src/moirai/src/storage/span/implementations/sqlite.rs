@@ -710,13 +710,24 @@ impl SpanStorage for SqliteStorage {
         .map_err(|e| MoiraiError::Storage(e.to_string()))?
     }
 
-    async fn list_traces(&self, limit: usize) -> Result<Vec<TraceSummary>> {
+    async fn list_traces(
+        &self,
+        limit: usize,
+        before: Option<(i64, String)>,
+    ) -> Result<Vec<TraceSummary>> {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || {
             let conn = conn
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
+
+            // Sentinel cursor sits above every real key: start_time is epoch
+            // millis (< i64::MAX), so every row passes the "strictly after
+            // the cursor" condition and one SQL statement serves both the
+            // first page and continuations.
+            let (cursor_time, cursor_id) =
+                before.unwrap_or((i64::MAX, String::new()));
 
             let mut stmt = conn.prepare(&format!(
                 r#"
@@ -731,12 +742,17 @@ impl SpanStorage for SqliteStorage {
                     {TRACE_TASK_DESCRIPTION_SQL}
                 FROM spans s
                 GROUP BY s.trace_id
-                ORDER BY start_time DESC
+                -- trace_id is a tiebreaker: start_time is millisecond-grained
+                -- and ties are common, and cursors need a total order to resume
+                -- from exactly.
+                HAVING MIN(s.start_time) < ?2
+                    OR (MIN(s.start_time) = ?2 AND s.trace_id < ?3)
+                ORDER BY start_time DESC, s.trace_id DESC
                 LIMIT ?1
                 "#,
             ))?;
 
-            let rows = stmt.query_map(rusqlite::params![limit], |row| {
+            let rows = stmt.query_map(rusqlite::params![limit, cursor_time, cursor_id], |row| {
                 Ok(TraceSummary {
                     trace_id: row.get(0)?,
                     span_count: row.get(1)?,
@@ -757,13 +773,20 @@ impl SpanStorage for SqliteStorage {
         .map_err(|e| MoiraiError::Storage(e.to_string()))?
     }
 
-    async fn list_alive_traces(&self, limit: usize) -> Result<Vec<TraceSummary>> {
+    async fn list_alive_traces(
+        &self,
+        limit: usize,
+        before: Option<(i64, String)>,
+    ) -> Result<Vec<TraceSummary>> {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || {
             let conn = conn
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
+
+            let (cursor_time, cursor_id) =
+                before.unwrap_or((i64::MAX, String::new()));
 
             let mut stmt = conn.prepare(&format!(
                 r#"
@@ -779,12 +802,14 @@ impl SpanStorage for SqliteStorage {
                     SELECT DISTINCT trace_id FROM spans WHERE span_type = 'END'
                 )
                 GROUP BY s.trace_id
-                ORDER BY start_time DESC
+                HAVING MIN(s.start_time) < ?2
+                    OR (MIN(s.start_time) = ?2 AND s.trace_id < ?3)
+                ORDER BY start_time DESC, s.trace_id DESC
                 LIMIT ?1
                 "#,
             ))?;
 
-            let rows = stmt.query_map(rusqlite::params![limit], |row| {
+            let rows = stmt.query_map(rusqlite::params![limit, cursor_time, cursor_id], |row| {
                 Ok(TraceSummary {
                     trace_id: row.get(0)?,
                     span_count: row.get(1)?,
