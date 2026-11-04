@@ -237,7 +237,7 @@ impl OpenAiFamilyProvider {
                 crate::request_policy::read_error_body_with_deadline(response).await?;
             return Err(crate::error::map_protocol_mismatch(
                 url,
-                &redactor,
+                redactor,
                 status.as_u16(),
                 &headers,
                 format!("unexpected content type: {}", content_type),
@@ -270,7 +270,7 @@ impl OpenAiFamilyProvider {
             let bytes = chunk_result.map_err(|e| {
                 crate::error::map_stream_read_error(
                     url,
-                    &redactor,
+                    redactor,
                     status.as_u16(),
                     &headers,
                     &e,
@@ -434,7 +434,7 @@ impl OpenAiFamilyProvider {
                 match self.try_endpoint(url, request, &call, &mut redactor).await {
                     Ok(response) => {
                         tracing::info!(
-                            url = %redactor.url(&url),
+                            url = %redactor.url(url),
                             attempt_number = idx + 1,
                             total_candidates = final_urls.len(),
                             "✓ URL fallback succeeded{} - caching this URL for future calls",
@@ -485,7 +485,7 @@ impl OpenAiFamilyProvider {
                         if is_configuration_error(&error) {
                             tracing::error!(
                                 error = %redactor.error(error.clone()),
-                                url = %redactor.url(&url),
+                                url = %redactor.url(url),
                                 "Configuration/parameter error detected{} - not trying more URLs",
                                 label
                             );
@@ -498,7 +498,7 @@ impl OpenAiFamilyProvider {
                         // "All N candidates failed" summary.
                         if !has_more_candidates && is_http_unauthorized_error(&error) {
                             tracing::error!(
-                                url = %redactor.url(&url),
+                                url = %redactor.url(url),
                                 error = %redactor.error(error.clone()),
                                 "All candidates returned HTTP 401{} - surfacing real auth error instead of wrapped URL fallback",
                                 label

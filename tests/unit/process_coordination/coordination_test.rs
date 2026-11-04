@@ -63,12 +63,12 @@ fn unwinding_and_error_paths_release_permits() {
         panic!("writer failed");
     }));
     assert!(panic.is_err());
-    let result = (|| -> std::io::Result<()> {
+    let result: std::io::Result<()> = {
         let _permit = Permit {
             _request: c.request(Group::Spawn),
         };
         Err(std::io::Error::other("spawn failed"))
-    })();
+    };
     assert!(result.is_err());
     let write = c.request(Group::Write);
     assert!(admitted(&c, &write));

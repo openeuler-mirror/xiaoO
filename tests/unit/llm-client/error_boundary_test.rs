@@ -330,7 +330,7 @@ async fn cached_retry(key: &str, status: usize, body: &str, name: &str, trace_ch
     let capture = TraceCapture(Arc::new(Mutex::new(String::new())));
     let _guard = tracing::subscriber::set_default(capture.clone());
     let mut server = mockito::Server::new_async().await;
-    let mut good = server
+    let good = server
         .mock("POST", mockito::Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")

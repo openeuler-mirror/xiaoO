@@ -1,7 +1,7 @@
 use super::tool_exec::{
-    char_boundary_before, filter_ask_user_question_output, is_parallel_safe, is_valid_tool_call,
-    should_stop_after_tool_result, synthesize_missing_call_ids, truncate_tool_output,
-    MAX_TOOL_OUTPUT_BYTES, MAX_TOOL_OUTPUT_LINES,
+    char_boundary_before, filter_ask_user_question_output, is_parallel_safe,
+    should_stop_after_tool_result, truncate_tool_output, MAX_TOOL_OUTPUT_BYTES,
+    MAX_TOOL_OUTPUT_LINES,
 };
 use super::*;
 use crate::input::LoopStopRule;
