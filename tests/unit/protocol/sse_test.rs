@@ -4,8 +4,6 @@
 //! `RuntimeSseEvent` round-trips: deserialize + re-serialize to the same
 //! JSON.
 
-#![cfg(test)]
-
 use super::*;
 use serde_json::Value;
 

@@ -81,10 +81,8 @@ fn is_binary_file_extension(path: &str) -> bool {
         if ext == PDF_PATH_SUFFIX || IMAGE_PATH_SUFFIXES.contains(&ext) {
             return false;
         }
-        if ext.len() > 1 && ext.len() <= 5 {
-            if !TEXT_FILE_EXTENSIONS.contains(&ext) {
-                return true;
-            }
+        if ext.len() > 1 && ext.len() <= 5 && !TEXT_FILE_EXTENSIONS.contains(&ext) {
+            return true;
         }
     }
 

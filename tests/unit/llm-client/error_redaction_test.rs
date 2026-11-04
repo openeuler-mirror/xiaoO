@@ -493,6 +493,12 @@ async fn diagnostic_headers_and_body() {
     }
 }
 
+// Eight params mirror the case matrix this helper sweeps (provider kind,
+// status, content type, body, stream mode, extra headers, log expectation);
+// a params struct would just relocate the matrix, so the clippy threshold
+// is waived (same call as the router builder in
+// apps/serverside/src/httpserver/router.rs).
+#[allow(clippy::too_many_arguments)]
 async fn response_error(
     name: &str,
     kind: &str,
@@ -508,7 +514,7 @@ async fn response_error(
     let server = Endpoint::new(
         status,
         ct,
-        format!("{body}"),
+        body.to_string(),
         false,
         &format!("x-request-id: KEEP-CASE-{name}\r\n{extra}"),
         false,

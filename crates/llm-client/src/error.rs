@@ -306,6 +306,11 @@ struct StreamErrorReport<'a> {
 /// `bytes_received` counts body bytes read before the failing chunk, so 0
 /// means a header-only stall. Consolidated here so every provider reports
 /// identically instead of hand-rolling the report/log/message trio.
+// Eight params are the raw facts of one failed read; folding them into a
+// struct would just mirror `StreamErrorReport` minus redaction, so the
+// clippy threshold is waived here (same call as the router builder in
+// apps/serverside/src/httpserver/router.rs).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn map_stream_read_error(
     url: &str,
     redactor: &ErrorRedactor,
