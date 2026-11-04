@@ -152,6 +152,7 @@ is absent from `allowed_agent_roles` deliberately skips recall and ingest.
 | `max_tokens` | ❌ | ✅ | ✅ |
 | `reasoning_effort` | ❌ | ✅ | ✅ (per-request HTTP field) |
 | `profiles`, `active_profile`, `context_window` | ❌ | ❌ | ✅ |
+| `rate_limit` | ❌ | ❌ | ✅ |
 
 ### Native Model Profiles (Daemon only)
 
@@ -257,6 +258,47 @@ export NODE_TLS_REJECT_UNAUTHORIZED=0   # daemon / CLI / TUI that talks to the g
   environment that actually needs it, not globally in a shared container or CI
   profile.
 - Implementation: `crates/llm-client/src/http.rs`.
+
+### Request Admission Gate: `[llm.rate_limit]` (Daemon only)
+
+> ⚠️ **Daemon-only**: `[llm.rate_limit]` is parsed **only by the daemon**
+> (`apps/serverside/src/daemon_config.rs`). CLI/TUI processes keep the
+> built-in defaults below; their single-lane traffic (~5 req/min peak) never
+> approaches them.
+
+An in-process admission gate wraps every remote LLM endpoint, capping two
+dimensions per `(api_base, api_key)` pair — requests to different keys never
+share a budget, requests to the same key from the same process do:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `max_concurrent` | `8` | Requests in flight at the same time (semaphore permits; a streaming response holds one permit for its whole duration) |
+| `requests_per_minute` | `40` | Sustained request rate (continuously refilled token bucket) |
+
+```toml
+[llm.rate_limit]
+max_concurrent = 8        # 0 disables the gate
+requests_per_minute = 40  # 0 disables the gate
+```
+
+Behavior notes:
+
+- **Scope is one process.** The daemon hosts every lane in one process, so all
+  fan-out traffic shares the gate; separate processes (tool CLI) each carry
+  their own low-volume gate. Multiple processes sharing one key have no
+  cross-process coordination — residual overflow falls back to the 429 retry
+  backoff.
+- The gate counts **every attempt, including retries**, because each retry
+  consumes gateway quota too.
+- The token bucket's burst allowance equals `max_concurrent`, so at most
+  `requests_per_minute + max_concurrent` requests are sent in any 60-second
+  window. Keep that sum under your gateway's real quota — the defaults
+  (40 + 8 = 48) target a 50 req/min + 10-concurrent gateway with margin.
+- Omitting the whole section keeps the defaults **and** exempts local
+  endpoints (Ollama) from gating — a local runtime has no quota. Providing
+  the section, even empty, applies the gate to every endpoint including
+  local ones.
+- Implementation: `crates/llm-client/src/rate_limit.rs`.
 
 ### Provider Types
 

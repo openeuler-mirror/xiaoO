@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xiaoo_api::chat::{HookerRegistryConfig, ReasoningEffort};
+use xiaoo_api::llm::{apply_global_settings, RateLimitSettings};
 use xiaoo_shared::backend::GatewayBackendConfig;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_shared::cron::{CronExpression, CronJobConfig};
@@ -93,6 +94,39 @@ pub struct LlmConfig {
     pub kvcache_enabled: Option<bool>,
     #[serde(default)]
     pub kvcache_debug_enabled: Option<bool>,
+    /// Optional in-process request admission gate (concurrency + rate).
+    /// `None` means the section is absent: the built-in defaults still apply
+    /// to remote endpoints while local endpoints (Ollama) stay exempt. Full
+    /// semantics, including how presence lifts that exemption, live on
+    /// [`LlmRateLimitConfig`].
+    #[serde(default)]
+    pub rate_limit: Option<LlmRateLimitConfig>,
+}
+
+/// `[llm.rate_limit]` section: the per-endpoint admission gate applied by the
+/// daemon process before any request leaves the factory.
+///
+/// Semantics:
+/// - Field defaults come from [`RateLimitSettings::default()`], so this TOML
+///   layer and the llm-client gate share a single source of truth.
+/// - Presence of the section (even if empty) marks the gate as explicitly
+///   configured, which lifts the local-endpoint (Ollama) exemption; absence
+///   leaves local endpoints ungated.
+/// - Either field set to `0` disables the gate entirely.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct LlmRateLimitConfig {
+    #[serde(default = "default_rate_limit_max_concurrent")]
+    pub max_concurrent: usize,
+    #[serde(default = "default_rate_limit_requests_per_minute")]
+    pub requests_per_minute: u32,
+}
+
+fn default_rate_limit_max_concurrent() -> usize {
+    RateLimitSettings::default().max_concurrent
+}
+
+fn default_rate_limit_requests_per_minute() -> u32 {
+    RateLimitSettings::default().requests_per_minute
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -486,6 +520,16 @@ impl DaemonConfig {
         app.llm
             .activate_profile(None)
             .with_context(|| format!("invalid llm config {}", config_path.display()))?;
+        // Gate settings are process-global state, so they must be fixed before
+        // the first provider is created. Every config load path funnels through
+        // this function, and loading always precedes any provider assembly in
+        // the daemon lifecycle — that ordering is the load-bearing constraint.
+        if let Some(rate_limit) = app.llm.rate_limit {
+            apply_global_settings(RateLimitSettings {
+                max_concurrent: rate_limit.max_concurrent,
+                requests_per_minute: rate_limit.requests_per_minute,
+            });
+        }
         validate_agents(&app)
             .with_context(|| format!("invalid agents config {}", config_path.display()))?;
         install_builtin_agent_roles(&mut app.agent)
