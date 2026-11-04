@@ -69,6 +69,92 @@ fn map_api_status_error_classifies_529_as_rate_limited_with_retry() {
     }
 }
 
+fn headers_with_retry_after(value: &str) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::HeaderName::from_static("retry-after"),
+        reqwest::header::HeaderValue::from_str(value).expect("valid header value"),
+    );
+    headers
+}
+
+#[test]
+fn map_api_status_error_parses_retry_after_seconds_for_429() {
+    let error = map_api_status_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        r#"{"error":{"message":"quota exceeded"}}"#,
+        "{}",
+        Some(&headers_with_retry_after("60")),
+    );
+
+    match error {
+        LlmError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 60_000),
+        other => panic!("expected RateLimited for 429, got {:?}", other),
+    }
+}
+
+#[test]
+fn map_api_status_error_parses_retry_after_ms_suffix_for_429() {
+    // Regression: the incident gateway sends `retry-after: 60000ms`; the
+    // seconds-only parser used to reject it and fall back to 0, collapsing
+    // the backoff onto the sub-second exponential floor.
+    let error = map_api_status_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        r#"{"error":{"message":"quota exceeded"}}"#,
+        "{}",
+        Some(&headers_with_retry_after("60000ms")),
+    );
+
+    match error {
+        LlmError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 60_000),
+        other => panic!("expected RateLimited for 429, got {:?}", other),
+    }
+}
+
+#[test]
+fn map_api_status_error_missing_429_retry_after_yields_default_window() {
+    // The default is substituted at construction; a missing header must not
+    // leak a zero sentinel into `retry_after_ms`.
+    let error = map_api_status_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        r#"{"error":{"message":"quota exceeded"}}"#,
+        "{}",
+        None,
+    );
+
+    match error {
+        LlmError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 30_000),
+        other => panic!("expected RateLimited for 429, got {:?}", other),
+    }
+}
+
+#[test]
+fn map_api_status_error_parses_retry_after_for_529() {
+    let status = StatusCode::from_u16(529).expect("529 should be a valid status code");
+    let error = map_api_status_error(
+        status,
+        r#"{"error":{"type":"overloaded_error","message":"busy"}}"#,
+        "{}",
+        Some(&headers_with_retry_after("30")),
+    );
+
+    match error {
+        LlmError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 30_000),
+        other => panic!("expected RateLimited for 529, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_retry_after_value_accepts_seconds_ms_suffix_and_fractions() {
+    assert_eq!(parse_retry_after_value("60"), Some(60_000));
+    assert_eq!(parse_retry_after_value(" 60 "), Some(60_000));
+    assert_eq!(parse_retry_after_value("60000ms"), Some(60_000));
+    assert_eq!(parse_retry_after_value("60000MS"), Some(60_000));
+    assert_eq!(parse_retry_after_value("1.5"), Some(1_500));
+    assert_eq!(parse_retry_after_value("soon"), None);
+    assert_eq!(parse_retry_after_value("-1"), None);
+}
+
 #[test]
 fn parse_stream_error_classifies_context_length_exceeded() {
     let error = parse_stream_error(

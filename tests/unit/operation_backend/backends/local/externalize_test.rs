@@ -401,7 +401,7 @@ fn policy_is_preserved_when_rebuilding_from_source_config() {
     use agent_contracts::backend::{OperationBackendBuildInput, OperationBackendBuilder};
 
     #[cfg(target_os = "linux")]
-    install_fake_dynsandbox();
+    crate::test_support::install_fake_dyn_sandbox();
 
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
@@ -482,30 +482,6 @@ fn policy_is_preserved_when_rebuilding_from_source_config() {
         }))
         .expect_err("out-of-root write denied in subprocess mode");
     assert!(matches!(denial, OperationError::SandboxPolicyDenied { .. }));
-}
-
-/// One-time fake `dyn-sandbox` on PATH so `linux_dynsandbox` isolation can
-/// be built in tests (the availability probe only needs the binary to exist).
-#[cfg(target_os = "linux")]
-fn install_fake_dynsandbox() -> &'static std::path::PathBuf {
-    use std::sync::OnceLock;
-    static FAKE: OnceLock<std::path::PathBuf> = OnceLock::new();
-    FAKE.get_or_init(|| {
-        let root = std::env::temp_dir().join(format!(
-            "xiaoo-externalize-fake-dyn-sandbox-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let bin = root.join("dyn-sandbox");
-        crate::test_support::write_script(&bin, "#!/bin/sh\nexit 0\n");
-        make_executable(&bin);
-        let mut paths = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .collect::<Vec<_>>();
-        paths.insert(0, root.clone());
-        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-        root
-    })
 }
 
 #[test]

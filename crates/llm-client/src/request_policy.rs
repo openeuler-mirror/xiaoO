@@ -1,6 +1,7 @@
 //! Shared retry policy for streaming and non-streaming LLM calls.
 use crate::LlmError;
 use futures::{Stream, StreamExt};
+use rand::Rng;
 use std::future::Future;
 use std::time::Duration;
 
@@ -44,9 +45,25 @@ pub(crate) const MAX_STREAM_RETRIES: u32 = 3;
 
 /// Backoff before a retry that carries no usable `Retry-After` hint; doubled
 /// per attempt and capped at [`MAX_RETRY_BACKOFF`] so a flapping upstream is
-/// not hammered.
+/// not hammered. Rate-limited responses do NOT use this cap — see
+/// [`RATE_LIMITED_BACKOFF_CAP`].
 const RETRY_BACKOFF_BASE: Duration = Duration::from_millis(200);
 const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Cap for a server-provided `Retry-After` hint. Rate-limit windows run far
+/// longer than the 5s transport-error cap, so `RateLimited` gets its own
+/// ceiling; the cap still protects callers from a misbehaving gateway that
+/// hints at eternity. Hint parsing clamps to this same bound (see
+/// `crate::error::parse_retry_after_value`) so user-visible errors and hook
+/// payloads never advertise a wait the policy would not honor.
+pub(crate) const RATE_LIMITED_BACKOFF_CAP: Duration = Duration::from_secs(120);
+
+/// Streaming-only retry allowance for `RateLimited`. Waiting out the quota
+/// window usually succeeds on the next attempt, so streams (which have no
+/// overall budget) may wait more often for a rate limit than for transport
+/// errors — but finitely often, so a permanently exhausted quota cannot
+/// stall a stream indefinitely.
+const MAX_STREAM_RATE_LIMIT_RETRIES: u32 = 5;
 
 fn is_retryable(error: &LlmError) -> bool {
     matches!(
@@ -60,18 +77,41 @@ fn is_retryable(error: &LlmError) -> bool {
         && crate::url_fallback::is_retryable_network_error(error)
 }
 
+/// ±20% jitter for transport-error backoffs: lanes that fail together would
+/// otherwise wake in lockstep and re-crush a still-recovering upstream
+/// (thundering herd), so wake-up moments are spread around the backoff.
+fn jittered(base: Duration) -> Duration {
+    let factor = rand::thread_rng().gen_range(0.8f64..1.2f64);
+    base.mul_f64(factor)
+}
+
+/// Backward-only jitter for rate-limit waits: waking before the server's
+/// `Retry-After` hint lands inside the quota window and burns one of the few
+/// [`MAX_STREAM_RATE_LIMIT_RETRIES`] allowances, so wake-ups spread into
+/// [base, 1.2·base) — still staggered enough to break the same herd.
+fn rate_limit_jittered(base: Duration) -> Duration {
+    let factor = rand::thread_rng().gen_range(1.0f64..1.2f64);
+    base.mul_f64(factor)
+}
+
 /// Pause before retry `attempt` (0-based). A rate-limited upstream supplies a
-/// `Retry-After` hint that supersedes the exponential floor, but is capped so
-/// a huge hint cannot stall the caller past [`MAX_RETRY_BACKOFF`].
+/// `Retry-After` hint that supersedes the exponential floor; the hint is
+/// capped at [`RATE_LIMITED_BACKOFF_CAP`] rather than [`MAX_RETRY_BACKOFF`]
+/// because quota windows (30-60s) far outlast the transport-error ceiling.
+/// The error layer substitutes its quota-window default for a missing hint,
+/// so a zero here only arises from a hand-built error and falls through to
+/// the exponential floor.
 fn retry_backoff(error: &LlmError, attempt: u32) -> Duration {
     let exponential = RETRY_BACKOFF_BASE
         .saturating_mul(1u32 << attempt.min(5))
         .min(MAX_RETRY_BACKOFF);
     match error {
-        LlmError::RateLimited { retry_after_ms, .. } => Duration::from_millis(*retry_after_ms)
-            .max(exponential)
-            .min(MAX_RETRY_BACKOFF),
-        _ => exponential,
+        LlmError::RateLimited { retry_after_ms, .. } => rate_limit_jittered(
+            Duration::from_millis(*retry_after_ms)
+                .max(exponential)
+                .min(RATE_LIMITED_BACKOFF_CAP),
+        ),
+        _ => jittered(exponential),
     }
 }
 
@@ -112,7 +152,9 @@ where
 /// and idle deadlines at their actual I/O boundary, including across spawned
 /// tasks and raw provider calls. Parsed chunks alone cannot measure liveness:
 /// transport heartbeats and partial frames may not produce callback events.
-/// Retries are capped at [`MAX_STREAM_RETRIES`].
+/// Retries are capped at [`MAX_STREAM_RETRIES`]; rate-limited attempts draw
+/// from the larger [`MAX_STREAM_RATE_LIMIT_RETRIES`] allowance because
+/// waiting out the quota window usually succeeds on the next attempt.
 pub(crate) async fn run_stream<T, F, Fut>(call: F) -> Result<T, LlmError>
 where
     F: FnMut(u32) -> Fut,
@@ -132,7 +174,8 @@ where
     Fut: Future<Output = Result<T, LlmError>>,
 {
     let overall_deadline = overall_budget.map(|budget| tokio::time::Instant::now() + budget);
-    for attempt in 0..=max_retries {
+    let mut attempt: u32 = 0;
+    loop {
         let remaining = overall_deadline
             .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()));
         if remaining.is_some_and(|remaining| remaining.is_zero()) {
@@ -162,7 +205,18 @@ where
         if !is_retryable(&error) {
             return Err(error);
         }
-        if attempt == max_retries {
+        // Streaming carries no overall budget, so RateLimited gets its own
+        // finite allowance larger than the transport-retry cap (see
+        // [`MAX_STREAM_RATE_LIMIT_RETRIES`]). Non-streaming keeps the plain
+        // cap: its overall budget already bounds how long rate-limit waits
+        // may accumulate.
+        let effective_max_retries =
+            if overall_budget.is_none() && matches!(error, LlmError::RateLimited { .. }) {
+                max_retries.max(MAX_STREAM_RATE_LIMIT_RETRIES)
+            } else {
+                max_retries
+            };
+        if attempt >= effective_max_retries {
             return Err(LlmError::RetryExhausted {
                 attempts: attempt + 1,
                 message: error.to_string(),
@@ -179,11 +233,12 @@ where
                 });
             }
         }
-        tracing::warn!(retry = attempt + 1, max_retries, error = %error,
+        tracing::warn!(retry = attempt + 1, max_retries = effective_max_retries,
+            backoff_ms = backoff.as_millis() as u64, error = %error,
             "LLM request failed; retrying");
         tokio::time::sleep(backoff).await;
+        attempt += 1;
     }
-    unreachable!("the last attempt always returns")
 }
 
 /// Next stream read deadline: time-to-first-byte before any bytes arrive,
