@@ -40,23 +40,59 @@ async fn permanent_errors_and_cancellation_are_never_retried() {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
-#[tokio::test(start_paused = true)]
-async fn retry_after_is_capped_by_max_backoff() {
-    let start = tokio::time::Instant::now();
-    let result: Result<(), _> = run(|_| async {
-        Err(LlmError::RateLimited {
+#[test]
+fn rate_limited_backoff_honors_retry_after_hint() {
+    // Regression: the hint used to be clamped to MAX_RETRY_BACKOFF (5s), so
+    // every retry landed inside the 30-60s punishment window and rate-limited
+    // lanes died as RetryExhausted.
+    let backoff = retry_backoff(
+        &LlmError::RateLimited {
+            retry_after_ms: 60_000,
+            message: "busy".into(),
+        },
+        0,
+    );
+    // Backward-only jitter: the wait is at least the hint itself.
+    assert!(backoff >= Duration::from_secs(60));
+    assert!(backoff <= Duration::from_secs(72));
+}
+
+#[test]
+fn rate_limited_backoff_caps_huge_retry_after_hint() {
+    let backoff = retry_backoff(
+        &LlmError::RateLimited {
             retry_after_ms: 600_000,
             message: "busy".into(),
-        })
-    })
-    .await;
-    assert!(matches!(
-        result,
-        Err(LlmError::RetryExhausted { attempts: 6, .. })
-    ));
-    // The huge Retry-After hint is capped, so five backoffs cost at most
-    // 5 * MAX_RETRY_BACKOFF.
-    assert_eq!(start.elapsed(), MAX_RETRY_BACKOFF * MAX_NON_STREAM_RETRIES);
+        },
+        0,
+    );
+    // RATE_LIMITED_BACKOFF_CAP (120s) plus backward-only jitter:
+    // [120s, 144s).
+    assert!(backoff >= Duration::from_secs(120));
+    assert!(backoff <= Duration::from_secs(144));
+}
+
+#[test]
+fn transport_backoff_keeps_max_retry_backoff_cap() {
+    let backoff = retry_backoff(&LlmError::Timeout, 10);
+    // The exponential floor saturates at MAX_RETRY_BACKOFF (5s) ± 20% jitter.
+    assert!(backoff >= Duration::from_secs(4));
+    assert!(backoff <= Duration::from_secs(6));
+}
+
+#[test]
+fn backoff_jitter_spreads_and_stays_within_twenty_percent() {
+    let base = Duration::from_secs(30);
+    let mut distinct = std::collections::HashSet::new();
+    for _ in 0..64 {
+        let backoff = jittered(base);
+        assert!(backoff >= Duration::from_secs(24));
+        assert!(backoff <= Duration::from_secs(36));
+        distinct.insert(backoff);
+    }
+    // Identical samples would wake every lane in the same instant — the
+    // exact thundering herd the jitter exists to break.
+    assert!(distinct.len() > 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -138,4 +174,77 @@ async fn stalled_transport_retries_at_most_three_times() {
         result,
         Err(LlmError::RetryExhausted { attempts: 4, .. })
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_rate_limited_retries_draw_their_own_allowance() {
+    let calls = AtomicU32::new(0);
+    let start = tokio::time::Instant::now();
+    let result: Result<(), _> = run_stream(|_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async {
+            Err(LlmError::RateLimited {
+                retry_after_ms: 60_000,
+                message: "busy".into(),
+            })
+        }
+    })
+    .await;
+    // One initial attempt plus the dedicated rate-limit allowance; the plain
+    // transport cap of MAX_STREAM_RETRIES would have stopped at four calls.
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    assert!(matches!(
+        result,
+        Err(LlmError::RetryExhausted { attempts: 6, .. })
+    ));
+    // Five backward-jittered 60s waits: [5 * 60s, 5 * 72s).
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_secs(300));
+    assert!(elapsed <= Duration::from_secs(360));
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_recovers_after_rate_limit_window() {
+    let calls = AtomicU32::new(0);
+    let start = tokio::time::Instant::now();
+    let result: Result<u32, _> = run_stream(|attempt| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async move {
+            if attempt == 0 {
+                Err(LlmError::RateLimited {
+                    retry_after_ms: 60_000,
+                    message: "busy".into(),
+                })
+            } else {
+                Ok(attempt)
+            }
+        }
+    })
+    .await;
+    assert_eq!(result.unwrap(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    // The retry never precedes the 60s window: backward-only jitter puts
+    // the wait in [60s, 72s).
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_secs(60));
+    assert!(elapsed <= Duration::from_secs(72));
+}
+
+#[tokio::test(start_paused = true)]
+async fn non_stream_rate_limited_waits_stay_inside_overall_budget() {
+    let start = tokio::time::Instant::now();
+    let result: Result<(), _> = run(|_| async {
+        Err(LlmError::RateLimited {
+            retry_after_ms: 60_000,
+            message: "busy".into(),
+        })
+    })
+    .await;
+    // With seconds-long rate-limit backoffs the overall budget — not the
+    // attempt counter — is what bounds the non-streaming path.
+    assert!(matches!(result, Err(LlmError::RetryExhausted { .. })));
+    // Five backward-jittered 60s waits, each in [60s, 72s).
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_secs(300));
+    assert!(elapsed < REQUEST_OVERALL_BUDGET);
 }

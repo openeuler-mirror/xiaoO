@@ -13,6 +13,8 @@ use serde_json::Value;
 mod redaction;
 pub(crate) use redaction::ErrorRedactor;
 
+use crate::request_policy::RATE_LIMITED_BACKOFF_CAP;
+
 pub(crate) fn map_reqwest_error_raw(err: reqwest::Error) -> LlmError {
     let cause_chain = render_error_chain(&err);
     if err.is_timeout() {
@@ -76,25 +78,22 @@ pub(crate) fn map_api_status_error(
     _request_body: &str,
     headers: Option<&reqwest::header::HeaderMap>,
 ) -> LlmError {
-    if status.as_u16() == 529 {
-        let message = if response_body.trim().is_empty() {
-            "no response body".to_string()
-        } else {
-            response_body.to_string()
-        };
-        return LlmError::RateLimited {
-            retry_after_ms: 5000,
-            message,
-        };
-    }
-
-    if status == StatusCode::TOO_MANY_REQUESTS {
-        let retry_after_ms = headers
-            .and_then(|h| h.get("retry-after"))
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(|secs| secs * 1000)
-            .unwrap_or(0);
+    // 429 (quota exhausted) and 529 (overloaded site) map to the same
+    // `RateLimited` shape and differ only in the wait substituted when the
+    // response carries no usable hint (magnitude rationale lives on the two
+    // default consts below). The default is substituted here, at
+    // construction, so every consumer of `RateLimited` (retry policy, hook
+    // payloads) sees a usable wait instead of a sentinel it must know how
+    // to decode.
+    let default_retry_after_ms = if status.as_u16() == 529 {
+        Some(OVERLOADED_DEFAULT_RETRY_AFTER_MS)
+    } else if status == StatusCode::TOO_MANY_REQUESTS {
+        Some(RATE_LIMITED_DEFAULT_RETRY_AFTER_MS)
+    } else {
+        None
+    };
+    if let Some(default) = default_retry_after_ms {
+        let retry_after_ms = retry_after_ms_from_headers(headers).unwrap_or(default);
         let message = if response_body.trim().is_empty() {
             "no response body".to_string()
         } else {
@@ -122,6 +121,53 @@ fn format_api_status_message(status: StatusCode, response_body: &str) -> String 
         response_body
     };
     format!("HTTP {status}: {body}")
+}
+
+/// Default wait for a 429 carrying no usable `Retry-After` hint: observed
+/// quota windows run 30-60s, so retrying on the sub-second exponential floor
+/// just burns attempts inside the window. Substituted when the error is
+/// built, so a missing or unparseable hint never leaks a zero sentinel into
+/// `retry_after_ms`.
+const RATE_LIMITED_DEFAULT_RETRY_AFTER_MS: u64 = 30_000;
+
+/// Default wait for a 529 carrying no usable hint. An overloaded site
+/// recovers far faster than a quota window resets, so the floor stays small.
+const OVERLOADED_DEFAULT_RETRY_AFTER_MS: u64 = 5_000;
+
+fn retry_after_ms_from_headers(headers: Option<&reqwest::header::HeaderMap>) -> Option<u64> {
+    let value = headers
+        .and_then(|h| h.get("retry-after"))
+        .and_then(|v| v.to_str().ok())?;
+    parse_retry_after_value(value)
+}
+
+/// Parse a `Retry-After` value into milliseconds, clamped at
+/// [`RATE_LIMITED_BACKOFF_CAP`]: the field flows into user-visible error
+/// text and hook payloads, which must not advertise a wait the retry policy
+/// would never honor. The RFC form is integer seconds, but gateways in the
+/// wild also send `60000ms` and fractional seconds; all three are accepted.
+/// The HTTP-date form is not: no gateway observed in this deployment uses
+/// it, and misparsing it as seconds would produce an absurd multi-decade
+/// hint.
+fn parse_retry_after_value(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    let (amount, unit_ms) = match lowered.strip_suffix("ms") {
+        Some(digits) => (digits, true),
+        None => (trimmed, false),
+    };
+    let parsed: f64 = amount.trim().parse().ok()?;
+    if !parsed.is_finite() || parsed < 0.0 {
+        return None;
+    }
+    let millis = if unit_ms { parsed } else { parsed * 1000.0 };
+    // `f64 as u64` saturates rather than wraps, so an absurd hint cannot
+    // smuggle a wrapped value past the clamp.
+    Some(
+        std::time::Duration::from_millis(millis as u64)
+            .min(RATE_LIMITED_BACKOFF_CAP)
+            .as_millis() as u64,
+    )
 }
 
 pub(crate) fn parse_stream_error(data: &str) -> Option<LlmError> {

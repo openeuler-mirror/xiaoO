@@ -1786,6 +1786,7 @@ dependencies = [
  "futures",
  "hook",
  "mockito",
+ "rand 0.8.7",
  "regex",
  "reqwest",
  "serde",

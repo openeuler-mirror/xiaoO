@@ -11,7 +11,7 @@ use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Interaction handle that answers every dyn-sandbox AUTH prompt with a
@@ -91,40 +91,6 @@ fn command_from_spec_builds_linux_dynsandbox_args() {
     );
 }
 
-/// Install a fake `dyn-sandbox` script on PATH (once per test process). The
-/// real binary is not installed in this environment, and the streaming
-/// tests need the backend's `linux_dynsandbox_available()` PATH probe to pass.
-/// The script plays the sandbox side of the AUTH protocol: it announces a
-/// blocked path on stderr, reads the decision from stdin (the AUTH control
-/// channel), and echoes it back so tests can observe what was written.
-fn install_fake_linux_dynsandbox() -> &'static PathBuf {
-    static FAKE_DYN_SANDBOX: OnceLock<PathBuf> = OnceLock::new();
-    FAKE_DYN_SANDBOX.get_or_init(|| {
-        let root = std::env::temp_dir().join(format!(
-            "xiaoo-fake-dyn-sandbox-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(root.as_path());
-        std::fs::create_dir_all(root.as_path()).unwrap();
-        let bin = root.join("dyn-sandbox");
-        crate::test_support::write_script(
-            bin.as_path(),
-            "#!/bin/sh\necho \"AUTH_REQ:shadow:/etc/shadow\" >&2\nIFS= read -r response\necho \"verdict:$response\"\nexit 0\n",
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(bin.as_path(), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
-        let mut paths =
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
-        paths.insert(0, root.clone());
-        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-        root
-    })
-}
-
 fn linux_dynsandbox_backend(
     workspace: PathBuf,
     writable: PathBuf,
@@ -171,7 +137,7 @@ fn linux_dynsandbox_exec_with_auth(
     let _guard = crate::test_support::process_group_test_lock()
         .lock()
         .unwrap();
-    install_fake_linux_dynsandbox();
+    crate::test_support::install_fake_dyn_sandbox();
     let root = test_workspace_root("xiaoo-dyn-sandbox-", "auth");
     let writable = workspace.join("tmp");
     std::fs::create_dir_all(writable.as_path()).unwrap();
@@ -253,7 +219,7 @@ fn linux_dynsandbox_exec_streaming_does_not_recurse() {
     let _guard = crate::test_support::process_group_test_lock()
         .lock()
         .unwrap();
-    install_fake_linux_dynsandbox();
+    crate::test_support::install_fake_dyn_sandbox();
     let root = test_workspace_root("xiaoo-dyn-sandbox-", "stream-norecurse");
     let workspace = root.join("workspace");
     let writable = workspace.join("tmp");
