@@ -275,6 +275,45 @@ with a reverse proxy if you need access control.
 
 ---
 
+### [llm.rate_limit] - LLM Request Admission Gate (Daemon)
+
+An in-process gate that caps outgoing LLM requests per `(api_base, api_key)`
+pair **before** they leave the daemon, so orchestrator fan-out stays under the
+gateway quota instead of triggering a 429 storm. This is distinct from
+`[http.rate_limit]` above, which throttles **incoming** HTTP API callers.
+
+```toml
+[llm.rate_limit]
+max_concurrent = 8        # In-flight requests per endpoint; 0 disables the gate
+requests_per_minute = 40  # Sustained rate per endpoint; 0 disables the gate
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `max_concurrent` | `8` | Simultaneous in-flight requests (a streaming response holds one slot for its whole duration) |
+| `requests_per_minute` | `40` | Sustained request rate (continuously refilled token bucket) |
+
+- **Scope is one process, keyed by `(api_base, api_key)`.** The daemon hosts
+  every lane in one process, so all fan-out shares the budget; other processes
+  (the tool CLI) carry their own gate. Requests to different keys never share a
+  budget.
+- **Every attempt counts, including retries**, because each retry consumes
+  gateway quota.
+- Burst allowance equals `max_concurrent`, so at most
+  `requests_per_minute + max_concurrent` requests are sent in any 60-second
+  window (defaults `40 + 8 = 48`, sized for a 50 req/min + 10-concurrent
+  gateway). Keep that sum under your gateway's real quota.
+- **Omitting the section keeps the defaults but exempts local endpoints
+  (Ollama)** — a local runtime has no quota. Providing the section, even empty,
+  applies the gate to every endpoint including local ones.
+- Admission queueing counts toward the per-call retry budget, so a saturated
+  gate can surface as a request timeout even though the gateway never received
+  the request; the daemon logs `llm rate-limit gate throttled a request` when
+  this happens.
+- Implementation: `crates/llm-client/src/rate_limit.rs`.
+
+---
+
 ### [agents] - Multi-Agent Management
 
 ```toml
@@ -549,6 +588,12 @@ active_profile = "main"
 provider = "openrouter"
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"
+
+# Daemon-only LLM request admission gate (per api_base + api_key).
+# Omit the whole section to keep the defaults while exempting local endpoints.
+[llm.rate_limit]
+max_concurrent = 8                   # 0 disables the gate
+requests_per_minute = 40             # 0 disables the gate
 
 # Predefined subagent roles (common configuration)
 # Note: Tools configuration supports two formats. See config_file_guide.md for details.

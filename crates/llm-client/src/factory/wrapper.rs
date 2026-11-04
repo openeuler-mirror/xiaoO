@@ -60,7 +60,10 @@ impl LlmProviderWrapper {
         }
     }
 
-    /// Returns the raw inner provider that this wrapper delegates to.
+    /// Returns the provider this wrapper delegates to. In the factory path
+    /// that is the admission-gated provider (not the bare HTTP provider), so
+    /// re-wrapping the result keeps the process-wide rate/concurrency gate —
+    /// see [`crate::rate_limit`].
     pub fn inner(&self) -> Arc<dyn LlmProvider> {
         self.inner.clone()
     }

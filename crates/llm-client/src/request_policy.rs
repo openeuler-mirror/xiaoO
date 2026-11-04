@@ -186,6 +186,11 @@ where
         }
         // Keep each attempt inside what is left of the overall budget so one
         // slow attempt cannot overshoot the cap by a full attempt length.
+        // The budget also covers any admission-gate queueing inside the
+        // provider: the LLM gate sits under `LlmProviderWrapper`'s retry loop,
+        // so a saturated gate can surface as `Timeout` even though the gateway
+        // never received the request. The gate logs throttling separately;
+        // see `crate::rate_limit`.
         let budget = match (attempt_budget, remaining) {
             (Some(attempt), Some(remaining)) => Some(attempt.min(remaining)),
             (Some(attempt), None) => Some(attempt),

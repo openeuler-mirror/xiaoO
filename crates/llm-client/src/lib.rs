@@ -4,6 +4,7 @@ pub mod factory;
 pub mod http;
 pub mod models;
 pub mod provider_registry;
+pub mod rate_limit;
 pub mod resolver;
 
 pub(crate) mod convert;
@@ -37,6 +38,7 @@ pub use provider_registry::{
     supported_providers, ProtocolFamily, ProviderMetadata, ProviderProfile,
 };
 pub use providers::{OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig, ReasoningDialect};
+pub use rate_limit::{apply_global_settings, global_settings, RateLimitSettings};
 pub use resolver::{resolve_config, ResolveError, ResolveInput, ResolvedConfig};
 pub use url_fallback::{
     build_base_url_candidates, build_final_candidates, is_configuration_error,

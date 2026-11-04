@@ -698,3 +698,75 @@ fn refuses_to_reuse_nonempty_chatbot_workspace() {
     assert!(error.to_string().contains("must be empty"));
     assert!(workspace.join("keep.txt").is_file());
 }
+
+#[test]
+fn llm_rate_limit_section_parses_explicit_values() {
+    let content = r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+
+[llm.rate_limit]
+max_concurrent = 4
+requests_per_minute = 120
+"#;
+    let config: AppConfig = toml::from_str(content).expect("config should parse");
+    let rate_limit = config.llm.rate_limit.expect("rate_limit section");
+    assert_eq!(rate_limit.max_concurrent, 4);
+    assert_eq!(rate_limit.requests_per_minute, 120);
+}
+
+#[test]
+fn llm_rate_limit_section_absent_and_empty_section_defaults() {
+    // Absent section → None (built-in defaults apply, local endpoints exempt)
+    let content = r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+"#;
+    let config: AppConfig = toml::from_str(content).expect("config should parse");
+    assert!(config.llm.rate_limit.is_none());
+
+    // Present-but-empty section → field defaults mirror the llm-client gate,
+    // and presence alone lifts the local-endpoint exemption
+    let content = r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+
+[llm.rate_limit]
+"#;
+    let config: AppConfig = toml::from_str(content).expect("config should parse");
+    let rate_limit = config.llm.rate_limit.expect("rate_limit section");
+    let defaults = xiaoo_api::llm::RateLimitSettings::default();
+    assert_eq!(rate_limit.max_concurrent, defaults.max_concurrent);
+    assert_eq!(rate_limit.requests_per_minute, defaults.requests_per_minute);
+}
+
+#[test]
+fn llm_rate_limit_section_is_applied_to_process_gate_on_load() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+
+[llm.rate_limit]
+max_concurrent = 3
+requests_per_minute = 90
+"#,
+    )
+    .expect("write config");
+    DaemonConfig::load_from(&config_path).expect("load config");
+
+    let applied = xiaoo_api::llm::global_settings();
+    assert_eq!(applied.max_concurrent, 3);
+    assert_eq!(applied.requests_per_minute, 90);
+
+    // Restore defaults: the gate is process-global and this test binary shares
+    // it with every other case that assembles providers.
+    xiaoo_api::llm::apply_global_settings(xiaoo_api::llm::RateLimitSettings::default());
+}

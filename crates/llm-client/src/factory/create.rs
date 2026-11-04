@@ -2,6 +2,7 @@ use std::env;
 use std::sync::Arc;
 
 use agent_contracts::runtime::RuntimeView;
+use agent_contracts::LlmProvider;
 
 use crate::error::LlmError;
 use crate::provider_registry::{
@@ -74,7 +75,10 @@ fn create_provider_by_protocol(
     agent_id: Option<String>,
     runtime_view: Option<Arc<dyn RuntimeView>>,
 ) -> Result<LlmProviderWrapper, LlmError> {
-    match protocol {
+    // 注册表键先行克隆：各协议分支会消费原始 api_key，限流器则按
+    // (api_base, api_key) 归一后共享（见下方 gate_provider 调用）。
+    let registry_api_key = api_key.clone();
+    let raw: Arc<dyn LlmProvider> = match protocol {
         ProtocolFamily::OpenAiCompatible => {
             let api_key = if profile.api_key_required {
                 api_key.ok_or_else(|| {
@@ -86,57 +90,47 @@ fn create_provider_by_protocol(
             // reasoning_effort 方言来自 provider 注册表声明（zai-coding-plan
             // 等端点为 Zhipu API 的 OpenAI 兼容 provider 在此声明 Zhipu 方言），
             // 新增 provider 无需改工厂代码。
-            Ok(LlmProviderWrapper::new(
-                Arc::new(
-                    OpenAiFamilyProvider::new(
-                        api_key,
-                        api_base,
-                        model,
-                        OpenAiFamilyAuthStyle::Bearer,
-                        vec![],
-                    )
-                    .with_reasoning_dialect(profile.reasoning_dialect),
-                ),
-                agent_id,
-                runtime_view,
-            ))
+            Arc::new(
+                OpenAiFamilyProvider::new(
+                    api_key,
+                    api_base.clone(),
+                    model,
+                    OpenAiFamilyAuthStyle::Bearer,
+                    vec![],
+                )
+                .with_reasoning_dialect(profile.reasoning_dialect),
+            )
         }
         ProtocolFamily::Anthropic => {
             let api_key = api_key.ok_or_else(|| {
                 LlmError::ConfigError(format!("{} API key required", profile.display_name))
             })?;
-            Ok(LlmProviderWrapper::new(
-                Arc::new(AnthropicProvider::new(api_key, api_base, model)),
-                agent_id,
-                runtime_view,
-            ))
+            Arc::new(AnthropicProvider::new(api_key, api_base.clone(), model))
         }
         ProtocolFamily::Gemini => {
             let api_key = api_key.ok_or_else(|| {
                 LlmError::ConfigError(format!("{} API key required", profile.display_name))
             })?;
-            Ok(LlmProviderWrapper::new(
-                Arc::new(GeminiProvider::new(api_key, api_base, model)),
-                agent_id,
-                runtime_view,
-            ))
+            Arc::new(GeminiProvider::new(api_key, api_base.clone(), model))
         }
-        ProtocolFamily::Ollama => Ok(LlmProviderWrapper::new(
-            Arc::new(OllamaProvider::new(api_base, model)),
-            agent_id,
-            runtime_view,
-        )),
+        ProtocolFamily::Ollama => Arc::new(OllamaProvider::new(api_base.clone(), model)),
         ProtocolFamily::Zhipu => {
             let api_key = api_key.ok_or_else(|| {
                 LlmError::ConfigError(format!("{} API key required", profile.display_name))
             })?;
-            Ok(LlmProviderWrapper::new(
-                Arc::new(ZhipuProvider::new(api_key, api_base, model)),
-                agent_id,
-                runtime_view,
-            ))
+            Arc::new(ZhipuProvider::new(api_key, api_base.clone(), model))
         }
-    }
+    };
+    // 准入闸门套在裸 provider 上、wrapper 之内：位于重试循环之下，每次
+    // 重试尝试都经过闸门计数（重试同样消耗网关配额）。Ollama 为本地
+    // 运行时，无外部配额，仅在显式配置后受闸门约束。
+    let gated = crate::rate_limit::gate_provider(
+        raw,
+        &api_base,
+        registry_api_key,
+        protocol == ProtocolFamily::Ollama,
+    );
+    Ok(LlmProviderWrapper::new(gated, agent_id, runtime_view))
 }
 
 fn resolve_api_base(

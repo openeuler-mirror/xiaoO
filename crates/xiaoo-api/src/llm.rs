@@ -3,6 +3,9 @@
 //!
 //! - [`create_llm_provider`] + [`LlmProviderWrapper`]: build a provider instance
 //! - [`resolve_config`] + [`ResolveInput`]: resolve provider / model / api_base / api_key
+//! - [`apply_global_settings`] / [`global_settings`] / [`RateLimitSettings`]:
+//!   process-wide request admission gate (concurrency + rate) shared per
+//!   (api_base, api_key) endpoint
 //! - [`resolve_model_context_length`] / [`resolve_protocol_family`] /
 //!   [`ProtocolFamily`]: context-window probing chain
 //! - [`build_context_manager`] + [`CompactOverrides`]: build the compression pipeline
@@ -13,6 +16,10 @@
 // ---- Provider construction ----
 #[doc(inline)]
 pub use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper, RetryBudget};
+
+// ---- Request admission gate ----
+#[doc(inline)]
+pub use llm_client::{apply_global_settings, global_settings, RateLimitSettings};
 
 // ---- Provider / model resolution ----
 #[doc(inline)]
