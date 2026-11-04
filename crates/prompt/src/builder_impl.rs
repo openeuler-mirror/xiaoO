@@ -76,7 +76,7 @@ impl PromptBuilderImpl {
             max_tokens: Some(input.budget.reserved_for_output),
             temperature: None,
             response_format: decision.response_format,
-            reasoning_effort: ReasoningEffort::Off,
+            reasoning_effort: ReasoningEffort::Default,
         };
 
         Ok(PromptBuildResult {

@@ -19,16 +19,16 @@ fn profile_reasoning_is_default_and_explicit_turn_value_wins() {
     );
 }
 
-/// Pins that `SessionSupervisor::new` initializes both sink fields
+/// Pins that `SessionSupervisor::new` initializes the root-turn context
 /// to `None`, so `run_lane_until_terminal`'s `is_none()` guard
 /// correctly skips injection when no root turn is in progress.
 #[tokio::test]
-async fn new_initializes_sink_inheritance_fields_to_none() {
+async fn new_initializes_root_turn_context_to_none() {
     let supervisor = test_supervisor().await;
 
     assert!(
-        supervisor.current_root_sinks.lock().await.is_none(),
-        "current_root_sinks should start as None"
+        supervisor.current_root_turn.lock().await.is_none(),
+        "current_root_turn should start as None"
     );
 }
 

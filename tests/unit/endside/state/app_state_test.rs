@@ -177,17 +177,19 @@ fn toggle_theme_switches_between_dark_and_light() {
 }
 
 #[test]
-fn cycle_reasoning_effort_rotates_off_high_max() {
+fn cycle_reasoning_effort_rotates_default_off_high_max() {
     let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
         .expect("app state should initialize");
 
+    assert_eq!(state.reasoning_effort, ReasoningEffort::Default);
+    state.cycle_reasoning_effort();
     assert_eq!(state.reasoning_effort, ReasoningEffort::Off);
     state.cycle_reasoning_effort();
     assert_eq!(state.reasoning_effort, ReasoningEffort::High);
     state.cycle_reasoning_effort();
     assert_eq!(state.reasoning_effort, ReasoningEffort::Max);
     state.cycle_reasoning_effort();
-    assert_eq!(state.reasoning_effort, ReasoningEffort::Off);
+    assert_eq!(state.reasoning_effort, ReasoningEffort::Default);
 }
 
 #[test]

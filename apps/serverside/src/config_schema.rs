@@ -18,7 +18,7 @@ pub fn config_schema() -> Value {
                 secret_field("api_key_env"),
                 field("context_window", "integer", false),
                 field("max_tokens", "integer", false),
-                enum_field("reasoning_effort", &["off", "high", "max"]),
+                enum_field("reasoning_effort", &["default", "off", "high", "max"]),
                 field_default("kvcache_enabled", "boolean", false, json!(false)),
                 field_default("kvcache_debug_enabled", "boolean", false, json!(false)),
             ]),

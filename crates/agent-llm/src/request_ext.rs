@@ -72,7 +72,7 @@ impl LlmRequestExt for LlmRequest {
             max_tokens: None,
             temperature: None,
             response_format: ResponseFormat::Text,
-            reasoning_effort: ReasoningEffort::Off,
+            reasoning_effort: ReasoningEffort::Default,
         }
     }
 

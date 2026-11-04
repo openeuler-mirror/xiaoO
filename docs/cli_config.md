@@ -126,7 +126,7 @@ limits without an additional flag.
 | `--max-turns` | Maximum number of turns | 10 |
 | `--no-tools` | Disable tool execution | false |
 | `--tools` | Comma-separated allowlist of tool names; empty/unset = all tools | - |
-| `--reasoning-effort` | Reasoning effort: off, high, max | off |
+| `--reasoning-effort` | Reasoning effort: default, off, high, max | default |
 | `--format` | Output format: `default` (human-readable) or `json` (one event object per line) | `default` |
 | `--title` | Human-readable session title | - |
 | `-s, --session` | Resume an existing session by ID | new random UUID |

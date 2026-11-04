@@ -558,16 +558,16 @@ fn classify_model(model: &str) -> ModelFamily {
     }
 }
 
-/// `reasoning_effort` tier → request-body value. High is always `high`; the
-/// deviations sit at the Off end (send explicitly or omit) and the Max end
-/// (`xhigh` vs `max`):
+/// `reasoning_effort` tier → request-body value. Default always omits the
+/// parameter (provider default); High is always `high`; the deviations sit at
+/// the Off end (send explicitly or omit) and the Max end (`xhigh` vs `max`):
 ///
-/// | Endpoint / model                | Off     | Max     |
-/// |---------------------------------|---------|---------|
-/// | generic OpenAI-compatible       | omit    | `xhigh` |
-/// | GPT-5.6                         | `none`  | `max`   |
-/// | Kimi K3 / GLM-5.2               | omit    | `max`   |
-/// | Zhipu dialect (any model)       | omit    | `max`   |
+/// | Endpoint / model                | Default | Off     | Max     |
+/// |---------------------------------|---------|---------|---------|
+/// | generic OpenAI-compatible       | omit    | omit    | `xhigh` |
+/// | GPT-5.6                         | omit    | `none`  | `max`   |
+/// | Kimi K3 / GLM-5.2               | omit    | omit    | `max`   |
+/// | Zhipu dialect (any model)       | omit    | omit    | `max`   |
 ///
 /// The table covers only the `reasoning_effort` field; on Off, GLM-5.2's
 /// `build_body` additionally sends `thinking: {"type": "disabled"}`
@@ -583,12 +583,14 @@ fn reasoning_effort_for_model(
         // Off omits the parameter and lets the server default take over
         // (glm-5.3+ does not support thinking.type: disabled).
         return match effort {
-            ReasoningEffort::Off => None,
+            ReasoningEffort::Default | ReasoningEffort::Off => None,
             ReasoningEffort::High => Some("high"),
             ReasoningEffort::Max => Some("max"),
         };
     }
     match (effort, family) {
+        // Default follows the provider default by omitting the parameter.
+        (ReasoningEffort::Default, _) => None,
         // GPT-5.6 needs an explicit `none` to turn reasoning off; other
         // models omit the parameter.
         (ReasoningEffort::Off, ModelFamily::Gpt56) => Some("none"),

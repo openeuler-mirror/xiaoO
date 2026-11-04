@@ -3,6 +3,7 @@ use crate::gateway::{GatewayEntryContext, LlmRuntimeConfig};
 use agent_contracts::backend::BackendInstance;
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+use agent_types::ReasoningEffort;
 use memory::MemorySnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -159,6 +160,14 @@ pub struct SessionAgentRecord {
     pub parent_agent_id: Option<AgentId>,
     #[serde(default)]
     pub subagent_role_id: Option<String>,
+    /// Effort this lane runs with, resolved from the DIRECT parent at
+    /// spawn time (root-turn context for the root agent's children,
+    /// the parent lane's own value for deeper nesting). Grandchildren
+    /// inherit from this field, so inheritance survives the spawning
+    /// root turn exiting and cannot bleed across turns. `None` only on
+    /// records persisted without the field (serde default).
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
     #[serde(default)]
