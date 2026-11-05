@@ -3,9 +3,11 @@
 //!
 //! - [`create_llm_provider`] + [`LlmProviderWrapper`]: build a provider instance
 //! - [`resolve_config`] + [`ResolveInput`]: resolve provider / model / api_base / api_key
-//! - [`apply_global_settings`] / [`global_settings`] / [`RateLimitSettings`]:
-//!   process-wide request admission gate (concurrency + rate) shared per
-//!   (api_base, api_key) endpoint
+//! - [`apply_global_settings`] / [`global_settings`] / [`RateLimitSettings`] /
+//!   [`RateLimitSection`]: process-wide request admission gate (concurrency +
+//!   rate) shared per (api_base, api_key) endpoint; `RateLimitSection` is the
+//!   `[llm.rate_limit]` TOML layer both the daemon and CLI configs
+//!   deserialize into
 //! - [`resolve_model_context_length`] / [`resolve_protocol_family`] /
 //!   [`ProtocolFamily`]: context-window probing chain
 //! - [`build_context_manager`] + [`CompactOverrides`]: build the compression pipeline
@@ -19,7 +21,7 @@ pub use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper,
 
 // ---- Request admission gate ----
 #[doc(inline)]
-pub use llm_client::{apply_global_settings, global_settings, RateLimitSettings};
+pub use llm_client::{apply_global_settings, global_settings, RateLimitSection, RateLimitSettings};
 
 // ---- Provider / model resolution ----
 #[doc(inline)]

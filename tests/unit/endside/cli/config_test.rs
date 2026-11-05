@@ -154,3 +154,53 @@ writable_roots = ["/home/alice/project/.xiaoo-tmp"]
         "/home/alice/project/.xiaoo-tmp"
     );
 }
+
+#[test]
+fn llm_rate_limit_section_parses_explicit_values() {
+    let config_content = r#"
+[llm]
+provider = "openai"
+
+[llm.rate_limit]
+max_concurrent = 2
+requests_per_minute = 10
+"#;
+
+    let mut temp_file = NamedTempFile::new().unwrap();
+    temp_file.write_all(config_content.as_bytes()).unwrap();
+    temp_file.flush().unwrap();
+
+    let config = FileConfig::load_from_path(temp_file.path(), false);
+    let rate_limit = config
+        .llm
+        .and_then(|llm| llm.rate_limit)
+        .expect("llm.rate_limit");
+    assert_eq!(rate_limit.max_concurrent, 2);
+    assert_eq!(rate_limit.requests_per_minute, 10);
+}
+
+#[test]
+fn llm_rate_limit_section_defaults_missing_fields() {
+    let config_content = r#"
+[llm]
+provider = "openai"
+
+[llm.rate_limit]
+max_concurrent = 3
+"#;
+
+    let mut temp_file = NamedTempFile::new().unwrap();
+    temp_file.write_all(config_content.as_bytes()).unwrap();
+    temp_file.flush().unwrap();
+
+    let config = FileConfig::load_from_path(temp_file.path(), false);
+    let rate_limit = config
+        .llm
+        .and_then(|llm| llm.rate_limit)
+        .expect("llm.rate_limit");
+    assert_eq!(rate_limit.max_concurrent, 3);
+    assert_eq!(
+        rate_limit.requests_per_minute,
+        xiaoo_api::llm::RateLimitSettings::default().requests_per_minute
+    );
+}

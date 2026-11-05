@@ -30,6 +30,7 @@ use std::time::Duration;
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::llm::{LlmError, LlmRequest, LlmResponse, StreamChunk};
 use async_trait::async_trait;
+use serde::Deserialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// 默认并发上限 8：事故网关实测并发上限 10，留 2 个余量吸收网关侧统计
@@ -67,6 +68,43 @@ impl RateLimitSettings {
     /// 上界失去意义。
     fn is_enabled(&self) -> bool {
         self.max_concurrent > 0 && self.requests_per_minute > 0
+    }
+}
+
+/// `[llm.rate_limit]` 配置节：TOML 层的闸门参数。daemon 与 one-shot CLI
+/// 的配置文件反序列化到同一类型，避免两份结构定义各自漂移。
+///
+/// 语义：
+/// - 字段默认值取自 [`RateLimitSettings::default()`]，TOML 层与闸门
+///   共享同一默认值来源。
+/// - 该节存在（即使为空）即视为显式配置，解除本地端点（Ollama）豁免；
+///   缺省时本地端点不受闸门约束。
+/// - 任一字段为 0 即整体关闭闸门（判定见 [`RateLimitSettings`] 的
+///   `is_enabled`）。
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct RateLimitSection {
+    #[serde(default = "default_rate_limit_max_concurrent")]
+    pub max_concurrent: usize,
+    #[serde(default = "default_rate_limit_requests_per_minute")]
+    pub requests_per_minute: u32,
+}
+
+fn default_rate_limit_max_concurrent() -> usize {
+    RateLimitSettings::default().max_concurrent
+}
+
+fn default_rate_limit_requests_per_minute() -> u32 {
+    RateLimitSettings::default().requests_per_minute
+}
+
+impl From<RateLimitSection> for RateLimitSettings {
+    // 字段一一对应；新增字段时编译器强制此处同步，各 app 的接线点
+    // 无需随字段演进改动。
+    fn from(section: RateLimitSection) -> Self {
+        Self {
+            max_concurrent: section.max_concurrent,
+            requests_per_minute: section.requests_per_minute,
+        }
     }
 }
 
