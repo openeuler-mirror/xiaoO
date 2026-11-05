@@ -578,8 +578,10 @@ provider = "openrouter"              # openai, anthropic, gemini, ollama, openro
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"
 max_tokens = 128000
-# Note: daemon's [llm] does NOT read reasoning_effort; pass it per-turn via the
-# HTTP API `reasoning_effort` field in RuntimeTurnRequest.
+# Note: the daemon's top-level [llm] does NOT read reasoning_effort; set it per
+# profile in [llm.profiles.*] or pass it per-turn via the HTTP API
+# `reasoning_effort` field in RuntimeTurnRequest. Accepted values are
+# "default", "off", "high", and "max"; the default is "default".
 # `active_profile` is REQUIRED as soon as any [llm.profiles.*] entry exists.
 active_profile = "main"
 
@@ -588,6 +590,7 @@ active_profile = "main"
 provider = "openrouter"
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"
+reasoning_effort = "default"
 
 # Daemon-only LLM request admission gate (per api_base + api_key).
 # Omit the whole section to keep the defaults while exempting local endpoints.
@@ -859,7 +862,7 @@ jq -n \
     reply_to_message_id: null,
     root_message_id: null,
     mentions: [],
-    reasoning_effort: "off",
+    reasoning_effort: "default",
     llm: null
   }' > /tmp/xiaoo_initial_turn.json
 
@@ -955,7 +958,7 @@ jq -n --arg runtime "$RUNTIME" --arg conv "$CONV" --arg text "$PARENT_TEXT" \
     reply_to_message_id: null,
     root_message_id: null,
     mentions: [],
-    reasoning_effort: "off",
+    reasoning_effort: "default",
     llm: null
   }' > /tmp/xiaoo_parent_final.json
 
@@ -979,7 +982,7 @@ jq -n --arg runtime "$CHILD_RUNTIME" --arg text "$CHILD_TEXT" \
     reply_to_message_id: null,
     root_message_id: null,
     mentions: [],
-    reasoning_effort: "off",
+    reasoning_effort: "default",
     llm: null
   }' > /tmp/xiaoo_child_final.json
 

@@ -50,7 +50,7 @@ impl AgentLoopInput {
             agent_id: None,
             visible_tools: Vec::new(),
             runtime_view: None,
-            reasoning_effort: ReasoningEffort::Off,
+            reasoning_effort: ReasoningEffort::Default,
             stop_rules: Vec::new(),
             pending_user_messages: None,
             command_context: None,

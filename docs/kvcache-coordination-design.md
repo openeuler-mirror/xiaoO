@@ -51,7 +51,7 @@ provider = "local"
 model = "glm4.7"
 api_base = "http://localhost:8080/v1"
 max_tokens = 20000
-reasoning_effort = "off"
+reasoning_effort = "default"
 kvcache_enabled = true
 kvcache_debug_enabled = false   # 打开 debug 文件生成
 ```

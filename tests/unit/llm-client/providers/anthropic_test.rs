@@ -253,23 +253,39 @@ fn build_body_sets_thinking_budget_for_reasoning_effort() {
 }
 
 #[test]
-fn build_body_omits_thinking_when_reasoning_effort_is_off() {
+fn build_body_omits_thinking_when_reasoning_effort_is_default_or_off() {
     let provider = make_provider();
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
 
-    let body = provider.build_body(&request, false);
+    for effort in [ReasoningEffort::Default, ReasoningEffort::Off] {
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.reasoning_effort = effort;
 
-    assert!(body.get("thinking").is_none());
+        let body = provider.build_body(&request, false);
+
+        assert!(body.get("thinking").is_none(), "effort={effort}");
+    }
 }
 
 #[test]
 fn sonnet_5_disables_thinking_when_reasoning_effort_is_off() {
     let provider = make_provider_for_model("claude-sonnet-5");
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+    let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+    request.reasoning_effort = ReasoningEffort::Off;
 
     let body = provider.build_body(&request, false);
 
     assert_eq!(body["thinking"]["type"], "disabled");
+    assert!(body.get("output_config").is_none());
+}
+
+#[test]
+fn sonnet_5_default_omits_thinking() {
+    let provider = make_provider_for_model("claude-sonnet-5");
+    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+
+    let body = provider.build_body(&request, false);
+
+    assert!(body.get("thinking").is_none());
     assert!(body.get("output_config").is_none());
 }
 

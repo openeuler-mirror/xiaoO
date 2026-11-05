@@ -85,7 +85,7 @@ pub(crate) fn normalize_model_name(model: &str) -> String {
     }
 }
 
-pub(crate) fn build_gemini_request_body(request: &LlmRequest, _model: &str) -> GeminiRequestBody {
+pub(crate) fn build_gemini_request_body(request: &LlmRequest, model: &str) -> GeminiRequestBody {
     let wire_messages = crate::convert::chat_messages_to_wire(&request.messages);
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
@@ -178,7 +178,7 @@ pub(crate) fn build_gemini_request_body(request: &LlmRequest, _model: &str) -> G
             temperature: request.temperature.map(|t| t as f32),
             response_mime_type,
             response_json_schema,
-            thinking_config: gemini_thinking_budget(request.reasoning_effort)
+            thinking_config: gemini_thinking_budget(model, request.reasoning_effort)
                 .map(|thinking_budget| GeminiThinkingConfig { thinking_budget }),
         },
         tools,
@@ -186,12 +186,43 @@ pub(crate) fn build_gemini_request_body(request: &LlmRequest, _model: &str) -> G
     }
 }
 
-fn gemini_thinking_budget(effort: ReasoningEffort) -> Option<i32> {
+/// Gemini `thinkingBudget` per effort tier. Pro-tier models (2.5-pro,
+/// 3-pro …) enforce a positive minimum budget and reject
+/// `thinkingBudget: 0` with a 400, so `off` must omit the whole
+/// thinking config there (provider default) instead of hard-failing the
+/// request. Only models whitelisted by [`supports_disabling_thinking`]
+/// send the zero budget; anything unrecognized stays on the safe side
+/// and omits.
+fn gemini_thinking_budget(model: &str, effort: ReasoningEffort) -> Option<i32> {
     match effort {
-        ReasoningEffort::Off => None,
+        ReasoningEffort::Default => None,
+        ReasoningEffort::Off => supports_disabling_thinking(model).then_some(0),
         ReasoningEffort::High => Some(8192),
         ReasoningEffort::Max => Some(24576),
     }
+}
+
+/// Whether the model is verified to accept an explicit
+/// `thinkingBudget: 0`. Deliberately a whitelist: acceptance is
+/// per-family (the pro tier rejects the zero budget outright, and a
+/// future flash variant may too), so a model is only trusted to take
+/// the explicit disable once confirmed against the API — an unlisted
+/// model must degrade to the provider default rather than risk a 400.
+/// A family joins this list via prefix match, which also covers its
+/// -lite / -latest / -preview-NN suffixes; `gemini-flash-latest` and
+/// `-lite-latest` are the rolling aliases that always resolve into the
+/// 2.5/3 flash families.
+fn supports_disabling_thinking(model: &str) -> bool {
+    let leaf = model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    leaf.starts_with("gemini-2.5-flash")
+        || leaf.starts_with("gemini-3-flash")
+        || leaf.starts_with("gemini-flash-latest")
+        || leaf.starts_with("gemini-flash-lite-latest")
 }
 
 #[inline]

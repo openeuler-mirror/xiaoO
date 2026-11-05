@@ -13,7 +13,7 @@ This crate provides a unified client interface for multiple LLM providers. It is
 - **Model Discovery**: `ModelCatalog` trait for listing available models
 - **Provider Abstraction**: OpenAI, DeepSeek, Anthropic, Gemini, Ollama, Zhipu, OpenRouter, and more
 - **Provider Capabilities**: Each provider declares its capabilities (streaming, tools, JSON mode, context window)
-- **Reasoning Support**: `ReasoningEffort` on requests, `StreamChunk.delta_reasoning` for streamed reasoning content, and per-provider `ReasoningDialect` translation
+- **Reasoning Support**: `ReasoningEffort` (`default`/`off`/`high`/`max`) on requests, `StreamChunk.delta_reasoning` for streamed reasoning content, and per-provider `ReasoningDialect` translation. `default` omits reasoning parameters so the model API default applies; `off` explicitly disables reasoning where the provider supports it.
 
 ## Architecture
 

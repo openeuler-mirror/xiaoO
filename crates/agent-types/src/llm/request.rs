@@ -56,6 +56,7 @@ pub struct CompletionConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     #[default]
+    Default,
     Off,
     High,
     Max,
@@ -64,14 +65,16 @@ pub enum ReasoningEffort {
 impl ReasoningEffort {
     pub fn next(self) -> Self {
         match self {
+            Self::Default => Self::Off,
             Self::Off => Self::High,
             Self::High => Self::Max,
-            Self::Max => Self::Off,
+            Self::Max => Self::Default,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Default => "default",
             Self::Off => "off",
             Self::High => "high",
             Self::Max => "max",
@@ -90,11 +93,12 @@ impl FromStr for ReasoningEffort {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "default" | "auto" => Ok(Self::Default),
             "off" | "none" | "disabled" => Ok(Self::Off),
             "high" => Ok(Self::High),
             "max" | "xhigh" | "maximum" => Ok(Self::Max),
             other => Err(format!(
-                "invalid reasoning effort '{other}' (expected off, high, or max)"
+                "invalid reasoning effort '{other}' (expected default, off, high, or max)"
             )),
         }
     }

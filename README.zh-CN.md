@@ -25,7 +25,7 @@ xiaoO 的运行时还内置了工作记忆快照（working-memory snapshots）�
 - 完整工具能力：文件操作、Shell 执行、代码搜索（glob/grep）、Web 搜索/浏览、子 Agent，以及 MCP 与自定义 TOML 工具清单。
 - 自适应上下文管理：Token 预算跟踪、配置化压缩、上下文超限后的强制恢复和 prefix-cache 遥测。
 - 流式推理展示：在模型工作时展示 provider 返回的 reasoning/thinking 增量。
-- 推理强度分级：支持 `off`、`high`、`max`；TUI 中可用 `Ctrl+T` 循环切换。
+- 推理强度分级：支持 `default`、`off`、`high`、`max`；TUI 中可用 `Ctrl+T` 循环切换。
 - 会话管理：支持保存和恢复长时间运行的任务。
 - LSP 诊断：编辑后通过 `rust-analyzer`、`pyright`、`typescript-language-server`、`gopls`、`clangd` 等服务展示错误和警告。
 - Skills 技能系统：从本地目录或 Git 来源安装可复用的指令包。
@@ -93,7 +93,7 @@ rm -rf ~/.xiaoo/skills/{xiaoo-guardian,block-analyzer,security-rules-tester}
 provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"   # 从这个环境变量读取 API 密钥
-reasoning_effort = "off"             # 可选: off, high, 或 max（仅 TUI 支持；CLI 使用 --reasoning-effort；Daemon 使用 HTTP API 字段）
+reasoning_effort = "default"         # 可选: default, off, high, 或 max（仅 TUI 支持；CLI 使用 --reasoning-effort；Daemon 使用 HTTP API 字段）
 
 # 预定义 subagent 角色（CLI/TUI/Daemon 均支持） ⭐
 # 更多角色配置项见 docs/config_file_guide.md

@@ -182,7 +182,7 @@ api_base = "https://example.com/compatible-mode/v1"
 api_key_env = "QWEN_API_KEY"
 context_window = 128000
 max_tokens = 16384
-reasoning_effort = "off"
+reasoning_effort = "default"
 kvcache_enabled = false
 kvcache_debug_enabled = false
 
@@ -193,8 +193,10 @@ model = "deepseek-chat"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
 
-`reasoning_effort` 是 Profile 的默认推理强度。HTTP/daemon 客户端省略单轮请求的
-`reasoning_effort` 时使用此值；显式传入 `off`、`high` 或 `max` 时只覆盖当前请求。
+`reasoning_effort` 是 Profile 的默认推理强度，默认值为 `default`。HTTP/daemon 客户端
+省略单轮请求的 `reasoning_effort` 时使用此值；`default` 表示不发送推理参数、遵循模型
+API 默认值，`off` 表示尽量显式关闭推理，`high`/`max` 逐级提高推理强度。显式传入
+`default`、`off`、`high` 或 `max` 时只覆盖当前请求。
 
 Profile IDs are the keys below `llm.profiles`. When profiles exist,
 `active_profile` is required and must reference an enabled profile.
@@ -221,7 +223,7 @@ model = "z-ai/glm-5"                 # Model name (required)
 api_key_env = "OPENROUTER_API_KEY"   # API key environment variable (recommended)
 api_base = "https://..."             # Custom API base URL (optional)
 max_tokens = 128000                  # Maximum tokens per response (TUI/Daemon only; CLI ignores this field)
-reasoning_effort = "off"             # Reasoning effort: off, high, max (TUI only; CLI uses --reasoning-effort; Daemon uses HTTP API field)
+reasoning_effort = "default"         # Reasoning effort: default, off, high, max (TUI only; CLI uses --reasoning-effort; Daemon uses HTTP API field)
 kvcache_enabled = false              # KV cache enabled (optional)
 kvcache_debug_enabled = false        # KV cache debug (optional)
 ```

@@ -395,7 +395,7 @@ bash = false                         # Planning phase does not execute commands
 
 In TUI:
 - `Tab` key - Switch agent role (also completes a slash command when the line starts with `/`)
-- `Ctrl+T` - Switch reasoning effort (off/high/max), `apps/endside/src/input/event_key.rs`
+- `Ctrl+T` - Switch reasoning effort (default/off/high/max), `apps/endside/src/input/event_key.rs`
 - Status bar shows current agent role name
 
 ---
@@ -487,7 +487,7 @@ Source: `apps/endside/src/input/core.rs`.
 | `Ctrl+Insert` / `Ctrl+Shift+Insert` | Copy the active selection (input or transcript) |
 | `Ctrl+X` | Cut the selected input text |
 | `Ctrl+C` | Quit (or copy, when a selection is active) |
-| `Ctrl+T` | Cycle reasoning effort |
+| `Ctrl+T` | Cycle reasoning effort (default/off/high/max) |
 | `Tab` | Cycle agent role / complete slash command / accept file mention |
 | `Up` / `Down` | Input history when the input is empty, else caret movement |
 | `Home` / `End` | Move the caret to the start / end of the current input line |
@@ -547,7 +547,7 @@ provider = "openrouter"
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"
 max_tokens = 128000
-reasoning_effort = "off"
+reasoning_effort = "default"
 
 # Predefined subagent roles (common configuration)
 # Note: Tools configuration supports two formats. See config_file_guide.md for details.

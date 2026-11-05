@@ -82,11 +82,28 @@ fn build_gemini_request_body_sets_thinking_budget() {
 }
 
 #[test]
-fn build_gemini_request_body_omits_thinking_config_when_off() {
+fn build_gemini_request_body_uses_provider_default_when_default_and_disables_when_off() {
     let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+    request.reasoning_effort = agent_types::ReasoningEffort::Default;
+
+    let body = build_gemini_request_body(&request, "gemini-2.5-flash");
+    assert!(body.generation_config.thinking_config.is_none());
+
     request.reasoning_effort = agent_types::ReasoningEffort::Off;
 
-    let body = build_gemini_request_body(&request, "gemini-pro");
+    // gemini-2.5-flash is whitelisted, so off sends the explicit zero
+    // budget; the pro tier rejects thinkingBudget=0 with a 400, so off
+    // can only omit the thinking config there (see
+    // supports_disabling_thinking).
+    let body = build_gemini_request_body(&request, "gemini-2.5-flash");
+    assert_eq!(
+        body.generation_config
+            .thinking_config
+            .expect("whitelisted flash models accept a zero budget")
+            .thinking_budget,
+        0
+    );
 
+    let body = build_gemini_request_body(&request, "gemini-2.5-pro");
     assert!(body.generation_config.thinking_config.is_none());
 }

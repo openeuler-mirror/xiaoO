@@ -25,7 +25,7 @@ The runtime also includes working-memory snapshots and an adaptive context-compr
 - Full tool suite: file operations, shell execution, code search (glob/grep), web search/browse, sub-agents, and MCP / custom TOML tool manifests.
 - Adaptive context management: token-budget tracking, configured compaction, forced recovery after context-limit errors, and prefix-cache telemetry.
 - Streaming reasoning: provider reasoning/thinking deltas can be surfaced while the model works.
-- Reasoning-effort tiers: switch among `off`, `high`, and `max`; the TUI cycles them with `Ctrl+T`.
+- Reasoning-effort tiers: switch among `default`, `off`, `high`, and `max`; the TUI cycles them with `Ctrl+T`.
 - Session management: save and resume long-running work.
 - LSP diagnostics: inline errors and warnings after edits through servers such as `rust-analyzer`, `pyright`, `typescript-language-server`, `gopls`, and `clangd`.
 - Skills system: installable instruction packs loaded from local directories or Git sources.
@@ -93,7 +93,7 @@ Create `~/.config/xiaoo/config.toml`:
 provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"   # Read the API key from this environment variable
-reasoning_effort = "off"             # Optional: off, high, or max (TUI only; CLI uses --reasoning-effort; Daemon uses HTTP API field)
+reasoning_effort = "default"         # Optional: default, off, high, or max (TUI only; CLI uses --reasoning-effort; Daemon uses HTTP API field)
 
 # Predefined subagent roles (CLI/TUI/Daemon all support) ⭐
 # More role options: docs/config_file_guide.md

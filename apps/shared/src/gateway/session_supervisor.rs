@@ -58,8 +58,9 @@ enum JoinWaitResult {
 }
 
 /// Root turn's sinks, inherited by spawned subagent lanes in remote
-/// (daemon) mode where the resolver returns default bindings. Set in
-/// `run_root_turn`, read in `run_lane_until_terminal`, cleared on exit.
+/// (daemon) mode where the resolver returns default bindings.
+/// Lifecycle: see [`SessionSupervisor::current_root_turn`].
+#[derive(Clone)]
 struct RootTurnSinks {
     loop_event_sink: Option<Arc<dyn LoopEventSink>>,
     tool_event_sink: Option<Arc<dyn ToolEventSink>>,
@@ -70,6 +71,17 @@ struct RootTurnSinks {
     /// here so `request_interaction` can forward subagent questions to the
     /// user through the same channel/SSE the root turn uses.
     interaction_handle: Option<Arc<dyn InteractionHandle>>,
+}
+
+/// The live root turn's inheritable context: its sinks, cancellation
+/// token, and the effective reasoning effort the root lane runs with.
+/// Why it is stored and snapshotted as one unit: see
+/// [`SessionSupervisor::current_root_turn`].
+#[derive(Clone)]
+struct RootTurnContext {
+    sinks: RootTurnSinks,
+    cancel_token: Option<CancellationToken>,
+    reasoning_effort: ReasoningEffort,
 }
 
 struct LaneRunInput {
@@ -111,22 +123,20 @@ pub(crate) struct SessionSupervisor {
     /// [`Self::force_close`] so no lane outlives the session. A sync
     /// mutex: the critical sections (push/retain/take) never await.
     lane_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// Root turn's sinks, inherited by spawned subagent lanes in remote
-    /// (daemon) mode where the resolver returns default bindings. Set in
-    /// `run_root_turn`, read in `run_lane_until_terminal`, cleared
-    /// on exit. Kept as a single `Mutex<Option<RootTurnSinks>>` so the
-    /// pair is always set/cleared atomically.
-    current_root_sinks: Mutex<Option<RootTurnSinks>>,
-    /// The root turn's cancellation token, inherited by spawned subagent
-    /// lanes so an Esc/Ctrl+C cancel propagates into every subagent's
-    /// agent loop (their LLM streams race the token — see `llm_call` —
-    /// and `decide()` returns `ReturnCancelled`) and into their pending
-    /// forwarded interactions (see `request_interaction`). Set together
-    /// with `current_root_sinks` in `run_root_turn`, captured by
-    /// `apply_host_actions_internal` BEFORE the subagent task is
-    /// spawned (so a root-turn exit racing task scheduling cannot lose
-    /// it), cleared on `run_root_turn`'s single exit point.
-    current_root_cancel: Mutex<Option<CancellationToken>>,
+    /// The live root turn's [`RootTurnContext`]. Authoritative story
+    /// for the whole root-turn inheritance protocol: set in one write
+    /// at the top of `run_root_turn`, captured by
+    /// `apply_host_actions_internal` BEFORE a subagent task is spawned
+    /// (so a root-turn exit racing task scheduling cannot lose it),
+    /// cleared on `run_root_turn`'s single exit point. Subagent lanes
+    /// that outlive their root turn do NOT read this for their own
+    /// children — they pass their own effort down via
+    /// [`SessionAgentRecord::reasoning_effort`] — so inheritance never
+    /// bleeds across turns. One mutex because the snapshot must be
+    /// read and written whole: a reader could otherwise pair one
+    /// turn's token with another turn's effort, or catch one field
+    /// already cleared by a racing turn exit.
+    current_root_turn: Mutex<Option<RootTurnContext>>,
     /// Optional cap on how long a forwarded subagent interaction
     /// (`ask_user_question`) may wait for the user to reply. Only armed
     /// when the handle does not enforce its own timeout (see
@@ -156,8 +166,7 @@ impl SessionSupervisor {
             root_turn_lock: Mutex::new(()),
             close_token: CancellationToken::new(),
             lane_tasks: std::sync::Mutex::new(Vec::new()),
-            current_root_sinks: Mutex::new(None),
-            current_root_cancel: Mutex::new(None),
+            current_root_turn: Mutex::new(None),
             interaction_timeout,
         }
     }
@@ -292,8 +301,10 @@ impl SessionSupervisor {
         // no root-turn handle is stored (local CLI/TUI / channel mode where
         // the handle lives in the resolver's static bindings).
         let interaction_handle = {
-            let sinks = self.current_root_sinks.lock().await;
-            sinks.as_ref().and_then(|s| s.interaction_handle.clone())
+            let root_turn = self.current_root_turn.lock().await;
+            root_turn
+                .as_ref()
+                .and_then(|ctx| ctx.sinks.interaction_handle.clone())
         };
         let interaction_handle = match interaction_handle {
             Some(handle) => Some(handle),
@@ -466,6 +477,14 @@ impl SessionSupervisor {
             }
         }
 
+        // Snapshot the root-turn context BEFORE taking the session lock
+        // (never held together): the child lane's effort is resolved from
+        // its DIRECT parent — the live root-turn context when the root
+        // agent spawns, the parent lane's own record for deeper nesting —
+        // so a subagent that outlives its root turn still hands its own
+        // effort down instead of picking up whatever turn is live then.
+        let root_turn = self.current_root_turn.lock().await.clone();
+
         let mut session = self.session.lock().await;
         let decision = self.coordinator.spawn(
             &mut session.subagent_state,
@@ -473,12 +492,17 @@ impl SessionSupervisor {
             child_agent_id.clone(),
             now_ms,
         )?;
+        let reasoning_effort =
+            lane_reasoning_effort(&session, &request.parent_agent_id, root_turn.as_ref());
         session.agents.insert(
             child_agent_id.0.clone(),
             SessionAgentRecord {
                 agent_id: child_agent_id.clone(),
                 parent_agent_id: Some(request.parent_agent_id.clone()),
                 subagent_role_id: request.subagent_role_id.clone(),
+                // Single source of truth for this lane's effort: the lane
+                // task and any grandchild spawn both read it from here.
+                reasoning_effort: Some(reasoning_effort),
                 loop_state: None,
                 memory_snapshot: None,
                 tool_manifest: None,
@@ -539,28 +563,33 @@ impl SessionSupervisor {
         self.set_session_status(SessionLifecycleStatus::Running, None)
             .await;
 
-        // Store the parent turn's sinks so spawned subagent lanes can
-        // inherit them in remote (daemon) mode. Store the MERGED loop
-        // sink so subagents inherit the same effective sink the root
-        // lane uses.
-        let stored_root_sinks = RootTurnSinks {
-            loop_event_sink: super::session_worker::merge_loop_event_sinks(
-                resolved_runtime.bindings.loop_event_sink.clone(),
-                loop_event_sink_override.clone(),
-            ),
-            tool_event_sink: resolved_runtime.bindings.tool_event_sink.clone(),
-            // Store the parent turn's real interaction handle so spawned
-            // subagent lanes can route their `ask_user_question` through it
-            // via `request_interaction`. The root lane itself still uses the
-            // override directly (injected into its worker), so this does not
-            // affect root-lane interaction.
-            interaction_handle: interaction_handle_override.clone(),
+        let reasoning_effort = effective_reasoning_effort(
+            request.reasoning_effort,
+            resolved_runtime.descriptor.llm.as_ref(),
+        );
+        // Store the root turn's whole context in one write (see
+        // `current_root_turn` for the snapshot rationale and the sinks'
+        // inheritance story). The loop sink is stored MERGED so
+        // subagents inherit the same effective sink the root lane uses;
+        // the root lane itself still uses the interaction-handle
+        // override directly (injected into its worker), so storing it
+        // here does not affect root-lane interaction.
+        let stored_root_turn = RootTurnContext {
+            sinks: RootTurnSinks {
+                loop_event_sink: super::session_worker::merge_loop_event_sinks(
+                    resolved_runtime.bindings.loop_event_sink.clone(),
+                    loop_event_sink_override.clone(),
+                ),
+                tool_event_sink: resolved_runtime.bindings.tool_event_sink.clone(),
+                interaction_handle: interaction_handle_override.clone(),
+            },
+            // The root lane itself gets the original below via
+            // `LaneRunInput`; subagent lanes spawned during this turn
+            // inherit it at spawn time.
+            cancel_token: cancellation_token.clone(),
+            reasoning_effort,
         };
-        *self.current_root_sinks.lock().await = Some(stored_root_sinks);
-        // Store the root turn's cancel token so subagent lanes spawned
-        // during this turn inherit it (see `current_root_cancel`). The
-        // root lane itself gets the original below via `LaneRunInput`.
-        *self.current_root_cancel.lock().await = cancellation_token.clone();
+        *self.current_root_turn.lock().await = Some(stored_root_turn);
 
         let root_agent_id = {
             let session = self.session.lock().await;
@@ -572,10 +601,6 @@ impl SessionSupervisor {
         // must inherit the snapshot and never touch the host source again.
         runtime_input.workspace = None;
         runtime_input.skills = None;
-        let reasoning_effort = effective_reasoning_effort(
-            request.reasoning_effort,
-            resolved_runtime.descriptor.llm.as_ref(),
-        );
         let result = self
             .run_lane_until_terminal(LaneRunInput {
                 agent_id: root_agent_id.clone(),
@@ -592,13 +617,13 @@ impl SessionSupervisor {
             })
             .await;
 
-        // Clear stored sinks so a subsequent root turn does not inherit
-        // stale ones. Cleared in all branches since this is the single
-        // exit point for `run_root_turn`.
-        *self.current_root_sinks.lock().await = None;
-        // Subagent tasks still winding down captured their token clone
-        // at spawn time, so clearing here never strands them.
-        *self.current_root_cancel.lock().await = None;
+        // Clear the stored context so a subsequent root turn does not
+        // inherit stale values. Cleared in all branches since this is
+        // the single exit point for `run_root_turn`. Subagent tasks
+        // still winding down captured their token clone at spawn time
+        // and carry their own effort on their records, so clearing
+        // here never strands them.
+        *self.current_root_turn.lock().await = None;
 
         match result {
             Ok(terminal) => {
@@ -673,7 +698,8 @@ impl SessionSupervisor {
             // remote mode, where the resolver returns default (None)
             // bindings.
             if !is_root_lane {
-                if let Some(ref sinks) = *self.current_root_sinks.lock().await {
+                let root_turn = self.current_root_turn.lock().await;
+                if let Some(sinks) = root_turn.as_ref().map(|ctx| &ctx.sinks) {
                     if resolved_runtime.bindings.loop_event_sink.is_none() {
                         resolved_runtime.bindings.loop_event_sink = sinks.loop_event_sink.clone();
                     }
@@ -1031,15 +1057,32 @@ impl SessionSupervisor {
                     // Capture the root turn's cancel token BEFORE the
                     // `tokio::spawn` below: reading it inside the spawned
                     // task would race `run_root_turn`'s exit (which clears
-                    // the field) against task scheduling and could hand
+                    // the context) against task scheduling and could hand
                     // the subagent lane a lost (None) token.
-                    let cancellation_token = self.current_root_cancel.lock().await.clone();
+                    let cancellation_token = self
+                        .current_root_turn
+                        .lock()
+                        .await
+                        .as_ref()
+                        .and_then(|ctx| ctx.cancel_token.clone());
+                    // The lane's effort was resolved from its direct parent
+                    // when its record was created in `spawn_subagent`;
+                    // read it from there (single source of truth) instead
+                    // of re-deriving it from a root-global field.
+                    let reasoning_effort = {
+                        let session = self.session.lock().await;
+                        session
+                            .agents
+                            .get(&agent_id.0)
+                            .and_then(|record| record.reasoning_effort)
+                    };
                     self.spawn_subagent_task(
                         agent_id,
                         parent_agent_id,
                         prompt,
                         max_turns,
                         cancellation_token,
+                        reasoning_effort,
                     );
                 }
                 HostAction::SuspendWaiter {
@@ -1091,6 +1134,7 @@ impl SessionSupervisor {
         prompt: String,
         max_turns: Option<u32>,
         cancellation_token: Option<CancellationToken>,
+        reasoning_effort: Option<ReasoningEffort>,
     ) {
         let supervisor = Arc::clone(self);
         let lane = tokio::spawn(async move {
@@ -1101,10 +1145,19 @@ impl SessionSupervisor {
                 );
                 return;
             }
-            let runtime_input = {
+            let (runtime_input, fallback_reasoning_effort) = {
                 let session = supervisor.snapshot().await;
-                runtime_input_from_session(&session, agent_id.clone(), max_turns)
+                let fallback = effective_reasoning_effort(None, session.runtime.llm.as_ref());
+                (
+                    runtime_input_from_session(&session, agent_id.clone(), max_turns),
+                    fallback,
+                )
             };
+            // Defensive only: the SpawnWorker action targets a record
+            // `spawn_subagent` just inserted with `Some`, so `None`
+            // cannot occur on the normal path; the fallback just keeps
+            // a record vanishing in that window from failing the lane.
+            let reasoning_effort = reasoning_effort.unwrap_or(fallback_reasoning_effort);
             let (lane_cancellation_token, watcher) =
                 compose_lane_token(&supervisor.close_token, cancellation_token);
             // Aborts the watcher on every exit path, panic unwinds included.
@@ -1125,7 +1178,7 @@ impl SessionSupervisor {
                     resolved_runtime: None,
                     user_message: prompt,
                     append_user_message: true,
-                    reasoning_effort: ReasoningEffort::Off,
+                    reasoning_effort,
                     loop_event_sink_override: None,
                     interaction_handle_override: Some(interaction_handle),
                     channel_file_sender_override: None,
@@ -1455,6 +1508,30 @@ fn effective_reasoning_effort(
     requested
         .or_else(|| runtime_llm.and_then(|llm| llm.reasoning_effort))
         .unwrap_or_default()
+}
+
+/// Effort a freshly spawned lane runs with, resolved from its DIRECT
+/// parent: the live root-turn context when the root agent spawns, the
+/// parent lane's stored record for deeper nesting. Falling back to the
+/// profile default only covers spawns with no resolvable parent
+/// context (outside any root turn, or a record persisted before
+/// effort tracking). Deriving from the direct parent — rather than a
+/// root-global field — keeps inheritance stable when a lane outlives
+/// its root turn and prevents cross-turn bleed when turns overlap.
+fn lane_reasoning_effort(
+    session: &SessionRecord,
+    parent_agent_id: &AgentId,
+    root_turn: Option<&RootTurnContext>,
+) -> ReasoningEffort {
+    let inherited = if *parent_agent_id == session.runtime.agent_id {
+        root_turn.map(|ctx| ctx.reasoning_effort)
+    } else {
+        session
+            .agents
+            .get(&parent_agent_id.0)
+            .and_then(|record| record.reasoning_effort)
+    };
+    inherited.unwrap_or_else(|| effective_reasoning_effort(None, session.runtime.llm.as_ref()))
 }
 
 /// Await the lane's cancel token, or pend forever when the lane has

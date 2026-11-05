@@ -110,7 +110,7 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         tools: Option<Vec<String>>,
 
-        /// Reasoning effort: off, high, or max
+        /// Reasoning effort: default, off, high, or max
         #[arg(long, value_parser = clap::value_parser!(ReasoningEffort))]
         reasoning_effort: Option<ReasoningEffort>,
 

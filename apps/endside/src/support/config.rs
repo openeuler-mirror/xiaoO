@@ -157,7 +157,7 @@ impl Default for LlmConfig {
             api_key_env: None,
             api_base: String::new(),
             max_tokens: default_llm_max_tokens(),
-            reasoning_effort: ReasoningEffort::Off,
+            reasoning_effort: ReasoningEffort::Default,
             kvcache_enabled: false,
             kvcache_debug_enabled: false,
         }

@@ -145,6 +145,9 @@ fn anthropic_reasoning_config(
 ) -> (usize, Option<serde_json::Value>, Option<&'static str>) {
     if is_claude_fable_5_model(model) || is_claude_sonnet_5_model(model) {
         return match effort {
+            // Default follows the provider default by omitting any thinking
+            // configuration.
+            ReasoningEffort::Default => (requested_max_tokens, None, None),
             ReasoningEffort::Off if is_claude_sonnet_5_model(model) => (
                 requested_max_tokens,
                 Some(serde_json::json!({ "type": "disabled" })),
@@ -198,7 +201,7 @@ fn anthropic_reasoning_budget(
     requested_max_tokens: usize,
 ) -> (usize, Option<usize>) {
     match effort {
-        ReasoningEffort::Off => (requested_max_tokens, None),
+        ReasoningEffort::Default | ReasoningEffort::Off => (requested_max_tokens, None),
         ReasoningEffort::High | ReasoningEffort::Max => {
             let max_tokens = requested_max_tokens.max(2048);
             let divisor = if effort == ReasoningEffort::High {

@@ -343,6 +343,7 @@ impl App {
 
 fn reasoning_effort_color(effort: ReasoningEffort) -> Color {
     match effort {
+        ReasoningEffort::Default => Color::Gray,
         ReasoningEffort::Off => Color::Gray,
         ReasoningEffort::High => Color::Yellow,
         ReasoningEffort::Max => Color::Red,
