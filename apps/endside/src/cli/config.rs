@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use xiaoo_api::chat::HookerRegistryConfig;
+use xiaoo_api::llm::RateLimitSection;
 use xiaoo_shared::gateway::MemoryAutomationConfig;
 use xiaoo_shared::mcp_support::{self, McpSection};
 
@@ -48,6 +49,7 @@ pub struct LlmSection {
     pub api_base: Option<String>,
     pub kvcache_enabled: Option<bool>,
     pub kvcache_debug_enabled: Option<bool>,
+    pub rate_limit: Option<RateLimitSection>,
 }
 
 #[derive(Debug, Deserialize, Default)]

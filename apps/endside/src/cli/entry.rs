@@ -256,6 +256,11 @@ where
                 .map(|path| FileConfig::load_from_path(path, debug))
                 .unwrap_or_default();
             let llm = file_cfg.llm.as_ref();
+            // Admission-gate settings are process-global and must be fixed
+            // before the first provider is created.
+            if let Some(rate_limit) = llm.and_then(|l| l.rate_limit) {
+                xiaoo_api::llm::apply_global_settings(rate_limit.into());
+            }
 
             let provider = provider
                 .or_else(|| llm.and_then(|l| l.provider.clone()))
