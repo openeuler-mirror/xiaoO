@@ -5,7 +5,7 @@ use crate::daemon_config::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::{fs, path::Path};
@@ -151,6 +151,16 @@ struct ResolvedLlmRuntime {
 pub struct ConfiguredRuntimeResolver {
     agent: ResolvedAgentConfig,
     llm: LlmConfig,
+    /// Env-var names this daemon may resolve an api key from: the global
+    /// `[llm].api_key_env` plus every enabled profile's `api_key_env`.
+    /// The merge (see `effective_llm_config`) derives `api_key_env` from
+    /// these sources only, so the membership check there is a fail-closed
+    /// tripwire: any regression that reintroduces a request/record source
+    /// must fail resolution instead of turning the daemon into an
+    /// arbitrary env-var oracle (issue #134). Provider-registry defaults
+    /// (`default_api_key_env`) stay allowed: they are static per-provider
+    /// names reached only when the daemon's own config picked the provider.
+    allowed_api_key_env: HashSet<String>,
     config_path: PathBuf,
     effective_context_window: usize,
     llm_provider: Arc<LlmProviderWrapper>,
@@ -204,12 +214,18 @@ impl ConfiguredRuntimeResolver {
                 .map(|profile| profile.provider.clone())
                 .unwrap_or_else(|| config.app.llm.provider.clone()),
             model: agent.model.clone(),
-            api_base: startup_profile
-                .and_then(|profile| profile.api_base.clone())
-                .or_else(|| config.app.llm.api_base.clone()),
-            api_key_env: startup_profile
-                .and_then(|profile| profile.api_key_env.clone())
-                .or_else(|| config.app.llm.api_key_env.clone()),
+            // Normalized through `optional_non_empty` to match the merge in
+            // `effective_llm_config`: padded config values would otherwise
+            // compare unequal in `effective_config_matches_startup` and send
+            // every session down the duplicate-provider override path.
+            api_base: optional_non_empty(
+                startup_profile.and_then(|profile| profile.api_base.as_ref()),
+            )
+            .or_else(|| optional_non_empty(config.app.llm.api_base.as_ref())),
+            api_key_env: optional_non_empty(
+                startup_profile.and_then(|profile| profile.api_key_env.as_ref()),
+            )
+            .or_else(|| optional_non_empty(config.app.llm.api_key_env.as_ref())),
             api_key: None,
             context_window: startup_profile
                 .and_then(|profile| profile.context_window)
@@ -254,9 +270,30 @@ impl ConfiguredRuntimeResolver {
 
         let lsp_registry = config.build_lsp_registry();
 
+        let allowed_api_key_env = config
+            .app
+            .llm
+            .api_key_env
+            .as_deref()
+            .into_iter()
+            .chain(
+                config
+                    .app
+                    .llm
+                    .profiles
+                    .values()
+                    .filter(|profile| profile.enabled)
+                    .filter_map(|profile| profile.api_key_env.as_deref()),
+            )
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(ToString::to_string)
+            .collect();
+
         Ok(Self {
             agent,
             llm: config.app.llm.clone(),
+            allowed_api_key_env,
             config_path: config.config_path().to_path_buf(),
             effective_context_window,
             llm_provider,
@@ -324,10 +361,13 @@ impl ConfiguredRuntimeResolver {
     }
 
     fn effective_config_matches_startup(&self, effective: &EffectiveLlmConfig) -> bool {
+        // `api_base` / `api_key_env` compare in normalized (trimmed) form:
+        // `effective_llm_config` trims its candidates, so comparing against
+        // the raw config values would mismatch whenever they carry padding.
         effective.provider == self.llm.provider
             && effective.model == self.agent.model
-            && effective.api_base == self.llm.api_base
-            && effective.api_key_env == self.llm.api_key_env
+            && effective.api_base == optional_non_empty(self.llm.api_base.as_ref())
+            && effective.api_key_env == optional_non_empty(self.llm.api_key_env.as_ref())
             && effective.context_window == self.llm.context_window
             && effective.api_key.is_none()
     }
@@ -408,6 +448,34 @@ impl ConfiguredRuntimeResolver {
                 .then(|| optional_non_empty(value))
                 .flatten()
         };
+        // `api_base` / `api_key_env` / `api_key` have a single source: the
+        // selected profile, else `[llm]`. The merge consults neither the
+        // request nor the existing session record for them. A request
+        // pinning them aims the daemon's credential reads and outbound
+        // traffic at an arbitrary env var / URL (issue #134), and a session
+        // record is untrusted for these fields: a record persisted by a
+        // daemon that honored request pinning — or hand-crafted — may carry
+        // client-pinned values, and the allowlist below cannot catch one
+        // that pins only `api_base` (the key then comes from the
+        // provider-registry default env and travels to the pinned URL).
+        // Record echoes of these fields are display-only; every resolve
+        // re-derives them from current configuration, which also lets
+        // endpoint/key rotations propagate to existing sessions.
+        // `optional_non_empty` trims the candidates so padded config values
+        // match the (trimmed) allowlist entries instead of tripping it.
+        let api_key_env = optional_non_empty(profile.and_then(|item| item.api_key_env.as_ref()))
+            .or_else(|| optional_non_empty(self.llm.api_key_env.as_ref()));
+        if let Some(env_name) = api_key_env.as_deref() {
+            if !self.allowed_api_key_env.contains(env_name) {
+                return Err(SessionRuntimeResolveError::ResolveFailed {
+                    message: format!(
+                        "api_key_env `{env_name}` is not named by daemon configuration \
+                         ([llm].api_key_env / [llm.profiles].*.api_key_env); refusing to \
+                         read arbitrary environment variables"
+                    ),
+                });
+            }
+        }
         Ok(EffectiveLlmConfig {
             profile_id,
             provider: optional_non_empty(override_llm.and_then(|llm| llm.provider.as_ref()))
@@ -418,15 +486,12 @@ impl ConfiguredRuntimeResolver {
                 .or_else(|| existing_value(existing_llm.and_then(|llm| llm.model.as_ref())))
                 .or_else(|| profile.map(|item| item.model.clone()))
                 .unwrap_or_else(|| self.agent.model.clone()),
-            api_base: optional_non_empty(override_llm.and_then(|llm| llm.api_base.as_ref()))
-                .or_else(|| existing_value(existing_llm.and_then(|llm| llm.api_base.as_ref())))
-                .or_else(|| profile.and_then(|item| item.api_base.clone()))
-                .or_else(|| self.llm.api_base.clone()),
-            api_key_env: optional_non_empty(override_llm.and_then(|llm| llm.api_key_env.as_ref()))
-                .or_else(|| existing_value(existing_llm.and_then(|llm| llm.api_key_env.as_ref())))
-                .or_else(|| profile.and_then(|item| item.api_key_env.clone()))
-                .or_else(|| self.llm.api_key_env.clone()),
-            api_key: optional_non_empty(override_llm.and_then(|llm| llm.api_key.as_ref())),
+            api_base: optional_non_empty(profile.and_then(|item| item.api_base.as_ref()))
+                .or_else(|| optional_non_empty(self.llm.api_base.as_ref())),
+            api_key_env,
+            // Inline keys never enter assembly: daemon configuration only
+            // names env vars, and neither requests nor records are sources.
+            api_key: None,
             context_window: profile
                 .and_then(|item| item.context_window)
                 .or(self.llm.context_window),

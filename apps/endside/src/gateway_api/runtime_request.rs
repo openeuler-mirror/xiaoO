@@ -656,8 +656,25 @@ pub(crate) fn hostname() -> Option<String> {
     xiaoo_shared::host_identity::local_hostname()
 }
 
-pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfig {
-    llm_runtime_config_from_parts(&state.agent_config, state.reasoning_effort)
+/// LLM config relayed to a remote daemon on open/turn wire requests.
+///
+/// Carries only the fields a client may pin (`provider` / `model` /
+/// `reasoning_effort`): `api_base` / `api_key_env` / `api_key` are
+/// daemon-side configuration, and the daemon rejects them on the wire —
+/// a client pinning them could aim the daemon's env-var reads at an
+/// arbitrary name and the resulting bearer token at an arbitrary URL
+/// (issue #134). The daemon resolves those fields from its own config
+/// for the relayed provider/model.
+pub(crate) fn remote_llm_config_from_state(state: &AppState) -> LlmRuntimeConfig {
+    LlmRuntimeConfig {
+        profile_id: None,
+        provider: Some(state.agent_config.llm.provider.clone()),
+        model: Some(state.agent_config.llm.model.clone()),
+        api_base: None,
+        api_key_env: None,
+        api_key: None,
+        reasoning_effort: Some(state.reasoning_effort),
+    }
 }
 
 pub(crate) fn llm_runtime_config_from_parts(
