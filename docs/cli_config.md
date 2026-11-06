@@ -185,9 +185,10 @@ glob = true
 grep = true
 ```
 
-> See the known-gap note in [config_file_guide.md](./config_file_guide.md#subagent---predefined-subagent-roles-new):
-> `[subagent.<role>.tools]` is currently **not enforced** for subagent roles — it
-> parses but is never applied by the session supervisor.
+> `[subagent.<role>.tools]` acts as a visibility mask on the subagent lane's tool
+> registry (`false` removes, `true` re-inserts, unlisted tools stay visible). See
+> [Configuration File Guide](./config_file_guide.md#subagent---predefined-subagent-roles-new)
+> for details.
 
 ### Use Cases
 

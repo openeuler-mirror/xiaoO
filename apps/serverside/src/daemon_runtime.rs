@@ -585,6 +585,7 @@ impl ConfiguredRuntimeResolver {
         &self,
         profile: RuntimeCapabilityProfile,
         agent_role: Option<&AgentRoleConfig>,
+        subagent_role_tools: Option<(&str, &BTreeMap<String, bool>)>,
         workspace_root: PathBuf,
         disable_plugin_tools: bool,
         resolved_agent_id: &AgentId,
@@ -606,8 +607,12 @@ impl ConfiguredRuntimeResolver {
                 }
             })?
         };
-        let allowed_tool_names =
-            resolve_profile_allowed_tool_names(&all_tool_names, profile, agent_role);
+        let allowed_tool_names = resolve_profile_allowed_tool_names(
+            &all_tool_names,
+            profile,
+            agent_role,
+            subagent_role_tools,
+        );
         // Insert the resolved agent_id (root or subagent override) so
         // `filter_for(resolved_agent_id)` in `AppRuntimeFactory::build`
         // finds the entry.
@@ -836,6 +841,12 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
         }
         let agent_role =
             resolve_profile_agent_role(&self.agent_roles, request, profile, is_subagent)?;
+        let subagent_role_tools = xiaoo_shared::gateway::resolve_subagent_role_tools(
+            is_subagent,
+            request.subagent_role_id.as_deref(),
+            &self.subagent_roles,
+            |role| &role.tools,
+        );
         let system_prompt = if profile == RuntimeCapabilityProfile::McpChatbot {
             MCP_CHATBOT_SYSTEM_PROMPT
         } else {
@@ -923,6 +934,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .build_tool_registry(
                 profile,
                 agent_role,
+                subagent_role_tools,
                 effective_workspace_root.clone(),
                 is_e2b,
                 &resolved_agent_id,
@@ -1046,27 +1058,31 @@ fn resolve_profile_agent_role<'a>(
 fn resolve_allowed_tool_names(
     all_tool_names: &[ToolName],
     agent_role: Option<&AgentRoleConfig>,
+    subagent_role_tools: Option<(&str, &BTreeMap<String, bool>)>,
 ) -> Vec<ToolName> {
-    let Some(agent_role) = agent_role else {
-        return all_tool_names.to_vec();
-    };
-    if agent_role.tools.is_empty() {
+    let agent_tools = agent_role.map(|role| &role.tools);
+    let agent_mask_empty = agent_tools.is_none_or(|tools| tools.is_empty());
+    let subagent_mask_empty = subagent_role_tools.is_none_or(|(_, tools)| tools.is_empty());
+    if agent_mask_empty && subagent_mask_empty {
         return all_tool_names.to_vec();
     }
 
     let available_names: BTreeSet<String> =
         all_tool_names.iter().map(|name| name.0.clone()).collect();
     let mut visible_names: BTreeSet<String> = available_names.clone();
-    for (configured_name, enabled) in &agent_role.tools {
-        if !available_names.contains(configured_name) {
-            continue;
-        }
-        if *enabled {
-            visible_names.insert(configured_name.clone());
-        } else {
-            visible_names.remove(configured_name);
-        }
+    if let Some(agent_tools) = agent_tools {
+        xiaoo_shared::gateway::apply_role_tools_mask(
+            &mut visible_names,
+            &available_names,
+            agent_tools,
+            "agent role",
+        );
     }
+    xiaoo_shared::gateway::apply_subagent_role_tools(
+        &mut visible_names,
+        &available_names,
+        subagent_role_tools,
+    );
 
     all_tool_names
         .iter()
@@ -1079,6 +1095,7 @@ fn resolve_profile_allowed_tool_names(
     all_tool_names: &[ToolName],
     profile: RuntimeCapabilityProfile,
     agent_role: Option<&AgentRoleConfig>,
+    subagent_role_tools: Option<(&str, &BTreeMap<String, bool>)>,
 ) -> Vec<ToolName> {
     match profile {
         RuntimeCapabilityProfile::McpChatbot => all_tool_names
@@ -1086,13 +1103,18 @@ fn resolve_profile_allowed_tool_names(
             .filter(|name| MCP_CHATBOT_TOOLS.contains(&name.0.as_str()))
             .cloned()
             .collect(),
+        // The profile-level exclusions run after the role masks on purpose:
+        // MCP agent lanes have no user-interaction channel, so a subagent
+        // role may not re-enable the excluded tools.
         RuntimeCapabilityProfile::McpAgent => {
-            resolve_allowed_tool_names(all_tool_names, agent_role)
+            resolve_allowed_tool_names(all_tool_names, agent_role, subagent_role_tools)
                 .into_iter()
                 .filter(|name| !matches!(name.0.as_str(), "ask_user_question" | "send_file"))
                 .collect()
         }
-        RuntimeCapabilityProfile::Default => resolve_allowed_tool_names(all_tool_names, agent_role),
+        RuntimeCapabilityProfile::Default => {
+            resolve_allowed_tool_names(all_tool_names, agent_role, subagent_role_tools)
+        }
     }
 }
 

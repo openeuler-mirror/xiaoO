@@ -1,14 +1,18 @@
 //! Tool assembly facade.
 //!
-//! Single implementation behind three public entries
-//! ([`discover_tools`] / [`discover_tool_names`] / [`build_tool_registry`])
-//! with coarse-grained inputs. Fine-grained types (`ToolSource` /
-//! `ToolRuntimeServices` / `ToolRegistryBuilderImpl` / `ToolRegistryConfig` /
-//! `ToolVisibilityConfig` / `SubagentRoleConfig`) stay `pub(crate)` and are
-//! never exposed to applications: endside consumes `discover_tool_names`,
-//! serverside consumes `build_tool_registry`.
+//! Single implementation behind the public entries below — discovery
+//! ([`discover_tools`] / [`discover_tool_names`]), registry building
+//! ([`build_tool_registry`]) and the role-tools mask helpers
+//! ([`apply_role_tools_mask`] / [`resolve_subagent_role_tools`] /
+//! [`apply_subagent_role_tools`]) — with coarse-grained inputs.
+//! Fine-grained types (`ToolSource` / `ToolRuntimeServices` /
+//! `ToolRegistryBuilderImpl` / `ToolRegistryConfig` / `ToolVisibilityConfig` /
+//! `SubagentRoleConfig`) stay `pub(crate)` and are never exposed to
+//! applications: endside consumes `discover_tool_names` and
+//! `apply_role_tools_mask`, serverside consumes `build_tool_registry` and
+//! the subagent-role mask helpers.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -174,6 +178,88 @@ pub enum ToolAssemblyError {
     McpInit(String),
     #[error("failed to build tool registry: {0}")]
     Build(String),
+}
+
+/// Apply a role `tools` map as a visibility mask over `visible_names`:
+/// `false` removes the name, `true` re-inserts it, unlisted names stay as
+/// they are — the same enable-by-name semantics as
+/// [`SubagentRoleSpec::tools`] and `[agent.<role>.tools]`.
+///
+/// `available_names` is the discovered tool set: the registry builder
+/// rejects unknown allowed names outright, so insertions are bounded by it
+/// and entries outside it are dropped with a warning instead of silently
+/// ignored (a typo would otherwise be indistinguishable from a mask that
+/// does nothing).
+pub fn apply_role_tools_mask(
+    visible_names: &mut BTreeSet<String>,
+    available_names: &BTreeSet<String>,
+    role_tools: &BTreeMap<String, bool>,
+    role_label: &str,
+) {
+    for (configured_name, enabled) in role_tools {
+        if !available_names.contains(configured_name) {
+            tracing::warn!(
+                tool = %configured_name,
+                role = %role_label,
+                "role tools entry names a tool outside the discovered set; ignoring it"
+            );
+            continue;
+        }
+        if *enabled {
+            visible_names.insert(configured_name.clone());
+        } else {
+            visible_names.remove(configured_name);
+        }
+    }
+}
+
+/// Resolve the subagent lane's `[subagent.<role>.tools]` mask. The role id
+/// travels with the lane's agent record (`SessionAgentRecord::subagent_role_id`),
+/// so the mask is resolved on the registry-building path (the one place
+/// that already knows the discovered tool set), not at spawn time. `None`
+/// for root lanes (even with the field set) and role-less subagents — the
+/// latter keep their base allowlist. Blank ids get the same trim-and-drop
+/// normalization `resolve_agent_role` applies to `runtime_profile_id`, so
+/// stray whitespace cannot pose as a role name.
+///
+/// An id absent from `roles` warns and yields `None`: a role removed from
+/// config while its session was persisted would otherwise be
+/// indistinguishable from "role has no tools map". `tools_of` adapts the
+/// caller's config entry type to its `tools` map.
+pub fn resolve_subagent_role_tools<'a, R>(
+    is_subagent: bool,
+    role_id: Option<&'a str>,
+    roles: &'a BTreeMap<String, R>,
+    tools_of: impl Fn(&R) -> &BTreeMap<String, bool>,
+) -> Option<(&'a str, &'a BTreeMap<String, bool>)> {
+    if !is_subagent {
+        return None;
+    }
+    let role_id = role_id
+        .map(str::trim)
+        .filter(|role_id| !role_id.is_empty())?;
+    let Some(tools) = roles.get(role_id).map(tools_of) else {
+        tracing::warn!(
+            subagent_role_id = %role_id,
+            "subagent role is not in the configured set; its tools mask is skipped"
+        );
+        return None;
+    };
+    Some((role_id, tools))
+}
+
+/// Apply a mask from [`resolve_subagent_role_tools`] over `visible_names`.
+/// The label is built from the resolved role id so warnings name the
+/// config section the entry came from.
+pub fn apply_subagent_role_tools(
+    visible_names: &mut BTreeSet<String>,
+    available_names: &BTreeSet<String>,
+    mask: Option<(&str, &BTreeMap<String, bool>)>,
+) {
+    if let Some((role_id, role_tools)) = mask {
+        let role_label = format!("subagent role '{role_id}'");
+        apply_role_tools_mask(visible_names, available_names, role_tools, &role_label);
+    }
 }
 
 /// Translate assembly input into the low-level `ToolRuntimeServices`
