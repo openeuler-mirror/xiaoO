@@ -1,5 +1,5 @@
 use crate::gateway::{
-    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane,
+    AppTurnRequest, AppTurnResult, LlmRuntimeConfig, ResolvedSessionRuntime, SessionControlPlane,
     SessionDetachRequest, SessionHeartbeatRequest, SessionInput, SessionLifecycleStatus,
     SessionOpenRequest, SessionRecord, SessionRuntimeBuildInput, SessionRuntimeResolveError,
     SessionRuntimeResolver, SessionService, SessionServiceError, SessionStateOutcome, SessionStore,
@@ -66,6 +66,26 @@ fn resolve_runtime_exec_shell(requested: Option<String>, backend_default: Option
     requested
         .or_else(|| backend_default.map(str::to_string))
         .unwrap_or_else(|| RUNTIME_EXEC_FALLBACK_SHELL.to_string())
+}
+
+/// Reject wire requests that pin LLM credentials or endpoints.
+///
+/// Every ingress into this service (HTTP open/turn, and any future surface
+/// that funnels through the same entries) stops here: `llm.api_base` /
+/// `llm.api_key_env` / `llm.api_key` on a request decide where the daemon
+/// sends traffic and which environment variable it reads, so accepting them
+/// lets a caller exfiltrate arbitrary daemon credentials (issue #134).
+/// Daemon-internal turns (channel / cron / MCP / supervisor) construct
+/// requests with `llm: None`, so only external callers are affected.
+/// `InvalidRequest` maps to HTTP 400.
+fn reject_wire_pinned_llm_credentials(
+    llm: Option<&LlmRuntimeConfig>,
+) -> Result<(), SessionServiceError> {
+    if let Some(llm) = llm {
+        llm.reject_client_pinned_credentials()
+            .map_err(|message| SessionServiceError::InvalidRequest { message })?;
+    }
+    Ok(())
 }
 
 /// Render a session record's workspace root as the optional string carried
@@ -1243,6 +1263,7 @@ impl CoreBackedSessionService {
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
         tool_event_sink: Option<Arc<dyn agent_contracts::ToolEventSink>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
+        reject_wire_pinned_llm_credentials(request.llm.as_ref())?;
         // Stamp request handling BEFORE any await (resolution can take
         // seconds — backend leasing, MCP init): the session actor compares
         // this against a cancel that arrived while no turn was active, so
@@ -1822,6 +1843,7 @@ impl SessionControlPlane for CoreBackedSessionService {
         &self,
         request: SessionOpenRequest,
     ) -> Result<SessionRecord, SessionServiceError> {
+        reject_wire_pinned_llm_credentials(request.llm.as_ref())?;
         // Acquire the attach lease BEFORE touching the session store / handle
         // — atomic under the lease table's mutex, so concurrent `open_session`
         // calls for the same session_id serialise here.

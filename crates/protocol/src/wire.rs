@@ -99,8 +99,13 @@ impl GatewayEntryContext {
 
 /// Runtime-scoped LLM configuration that a client may pin on a request.
 ///
-/// All fields optional and default-emptied; absent fields fall back to the
-/// daemon's resolved provider/model/api-key.
+/// Client-pinnable surface: `profile_id` / `provider` / `model` /
+/// `reasoning_effort` — a request uses these to select among the
+/// daemon-configured options. `api_base` / `api_key_env` / `api_key` are
+/// daemon-side configuration: they exist on this type only because session
+/// records and in-process runtime descriptors reuse it, and wire requests
+/// carrying them are rejected (see
+/// [`LlmRuntimeConfig::reject_client_pinned_credentials`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 pub struct LlmRuntimeConfig {
     /// Native LLM profile id selected for this runtime.
@@ -112,18 +117,58 @@ pub struct LlmRuntimeConfig {
     /// Model id, overriding the daemon default.
     #[serde(default)]
     pub model: Option<String>,
-    /// API base URL, overriding the daemon default.
+    /// API base URL. Daemon-side value echoed in session records; wire
+    /// requests carrying it are rejected.
     #[serde(default)]
     pub api_base: Option<String>,
     /// Environment variable name holding the api key (resolved daemon-side).
+    /// Daemon-side value echoed in session records; wire requests carrying
+    /// it are rejected.
     #[serde(default)]
     pub api_key_env: Option<String>,
-    /// Inline api key (rarely used; prefer `api_key_env`).
+    /// Inline api key. Daemon-side assembly always leaves this unset (keys
+    /// come from `api_key_env` or provider defaults); wire requests
+    /// carrying it are rejected.
     #[serde(default)]
     pub api_key: Option<String>,
     /// Profile default or runtime-level reasoning override.
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl LlmRuntimeConfig {
+    /// Reject credential/endpoint pinning on a wire-supplied config.
+    ///
+    /// `api_base` decides where the daemon sends its outbound requests and
+    /// `api_key_env` / `api_key` decide which credential travels there, so a
+    /// client that sets them turns the daemon into an oracle that reads any
+    /// environment variable and ships its value to any URL (issue #134).
+    /// These fields must come from daemon configuration; clients select
+    /// among configured options via `profile_id` / `provider` / `model`.
+    /// Blank values count as unset, matching the daemon's merge semantics.
+    pub fn reject_client_pinned_credentials(&self) -> Result<(), String> {
+        let pinned: Vec<&str> = [
+            ("llm.api_base", self.api_base.as_deref()),
+            ("llm.api_key_env", self.api_key_env.as_deref()),
+            ("llm.api_key", self.api_key.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(field, value)| {
+            value
+                .is_some_and(|value| !value.trim().is_empty())
+                .then_some(field)
+        })
+        .collect();
+        if pinned.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "request llm override rejected: {} must come from daemon configuration \
+             ([llm] / [llm.profiles]); a client may only pin llm.profile_id / \
+             llm.provider / llm.model / llm.reasoning_effort",
+            pinned.join(", ")
+        ))
+    }
 }
 
 /// A user/channel mention carried on a turn request.
