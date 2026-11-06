@@ -107,11 +107,11 @@ Resolution is a mask over the discovered tool set
 4. Only the *visible* tools are registered for the agent; filtering happens at registry build time
    (`crates/tool/src/framework/registry/registry_impl.rs`).
 
-**Name mismatches are silently skipped.** If a configured key is not in the discovered set, that
-entry is ignored with no warning and no error (`daemon_runtime.rs`;
-`runtime_request.rs`). A typo such as `read = false` therefore disables nothing at all,
-because no tool is named `read` — the real name is `file_read`. Use the real tool names listed
-below, and verify with `xiaoo-daemon config tools`.
+**Name mismatches are skipped with a warning.** If a configured key is not in the discovered set, that
+entry is ignored and a `tracing::warn!` names the tool and the role
+(`apps/shared/src/gateway/tool_assembly.rs`). A typo such as `read = false` therefore disables
+nothing at all, because no tool is named `read` — the real name is `file_read`. Use the real tool
+names listed below, and verify with `xiaoo-daemon config tools`.
 
 Because it is only a visibility mask, removing `bash` / `file_write` does not stop a visible tool
 from having those effects through another path; treat the mask as prompt-surface hygiene and pair it
@@ -122,15 +122,17 @@ Real built-in tool names (from `crates/tool/src/impl/builtin/*/spec.rs`):
 `grep`, `join_subagent`, `lsp`, `print_hello_world`, `send_file`, `skill`, `spawn_subagent`,
 `todo_write`, `webfetch`, `web_search`.
 
-> **Known gap**: `[subagent.<role>.tools]` is parsed and carried into the session as a
-> `SubagentRoleRecord` (`apps/serverside/src/daemon_runtime.rs`;
-> `apps/endside/src/gateway_api/runtime_request.rs`), but the delegation path only reads the
-> role's `prompt`, `max_turns` and `description` — the role's `tools` map is never applied to the
-> child's tool list (`apps/shared/src/gateway/session_supervisor.rs`). A custom-role
-> subagent therefore receives the full toolset, unlike the *default* exploration subagent,
-> which is narrowed by a separate hardcoded allowlist to `file_read`, `glob` and `grep`
-> (`apps/shared/src/gateway/hosted_runtime_resolver.rs`). Do not rely on
-> `[subagent.<role>.tools]` to restrict a subagent.
+> `[subagent.<role>.tools]` uses the same visibility-mask semantics as
+> `[agent.<name>.tools]`: applied when the subagent lane's tool registry is built
+> (`apps/serverside/src/daemon_runtime.rs`;
+> `apps/shared/src/gateway/hosted_runtime_resolver.rs`), `false` removes a tool,
+> `true` re-inserts it (bounded by the discovered set), unlisted tools stay
+> visible. A role subagent therefore starts from the same base set it would get
+> without the mask and edits it, while the *default* exploration subagent stays
+> narrowed by the separate hardcoded allowlist to `file_read`, `glob` and `grep`
+> (`apps/shared/src/gateway/hosted_runtime_resolver.rs`). Profile-level
+> exclusions (MCP agent lanes) are applied after the mask and cannot be
+> re-enabled by it.
 >
 > The `[subagent]` section is otherwise out of scope for this document; see the `[subagent]` section
 > of [config_file_guide.md](./config_file_guide.md).
@@ -210,8 +212,8 @@ After creating an Agent role, verify the following:
 
 - [ ] `config.toml` contains an `[agent.<name>]` declaration (**required**)
 - [ ] `description` and `prompt` are set if you need a role-specific prompt (both are optional)
-- [ ] Every key in `[agent.<name>.tools]` is a real built-in tool name; unknown names are ignored
-      silently, so a typo silently hides nothing (`xiaoo-daemon config tools` lists the real names)
+- [ ] Every key in `[agent.<name>.tools]` is a real built-in tool name; unknown names are skipped
+      with a runtime warning and hide nothing (`xiaoo-daemon config tools` lists the real names)
 - [ ] You understand that `.tools` is a visibility mask, not a permission boundary
 - [ ] The Agent loads successfully (use Tab to switch agent in TUI)
 - [ ] You did **not** declare `[agent.plan]` (it is builtin and cannot be overridden)

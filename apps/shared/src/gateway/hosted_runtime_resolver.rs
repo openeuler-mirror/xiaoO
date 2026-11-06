@@ -14,7 +14,7 @@ use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper};
 use lsp::LspServiceRegistry;
 use serde_json::Value;
 use skill::{FileSkillRegistry, SkillsConfig};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::sync::{Arc, RwLock};
 use subagent::SubagentControl;
@@ -136,51 +136,48 @@ impl HostedSessionRuntimeResolver {
         &self,
         agent_id: &AgentId,
         apply_readonly_profile: bool,
+        subagent_role_tools: Option<(&str, &BTreeMap<String, bool>)>,
         services: ToolRuntimeServices,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
-        let Some(visible_tool_names) = self.config.visible_tool_names.as_ref() else {
-            let tool_sources = load_tool_sources_with_services(services.clone());
-            // Default exploration subagents get the read-only search/read allowlist;
-            // the main agent and custom-role subagents keep the full toolset.
-            let all_tool_names = tool_sources
-                .iter()
-                .flat_map(|source| source.discover())
-                .map(|tool| tool.spec.name().clone())
-                .filter(|name| !apply_readonly_profile || is_subagent_allowed_tool(&name.0))
-                .collect();
-            let mut per_agent_allowed_tools = HashMap::new();
-            per_agent_allowed_tools.insert(agent_id.clone(), all_tool_names);
-            let registry = ToolRegistryBuilderImpl::new()
-                .with_sources(tool_sources)
-                .with_config(ToolRegistryConfig {
-                    visibility: ToolVisibilityConfig {
-                        per_agent_allowed_tools,
-                    },
-                })
-                .build()
-                .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
-                    message: format!("failed to build tool registry: {error}"),
-                })?;
+        let tool_sources = load_tool_sources_with_services(services.clone());
+        let available_names: BTreeSet<String> = tool_sources
+            .iter()
+            .flat_map(|source| source.discover())
+            .map(|tool| tool.spec.name().0.clone())
+            .collect();
 
-            return Ok(Some(Arc::from(registry)));
-        };
-
-        if visible_tool_names.is_empty() {
+        // Base set: the config-level visible list when present (the main
+        // agent's mask), otherwise everything discovered. Default
+        // exploration subagents get the read-only search/read allowlist;
+        // the main agent and custom-role subagents keep the full toolset.
+        let mut visible_names: BTreeSet<String> = self
+            .config
+            .visible_tool_names
+            .as_ref()
+            .map(|configured| configured.iter().cloned().collect())
+            .unwrap_or_else(|| available_names.clone());
+        if apply_readonly_profile {
+            visible_names.retain(|name| is_subagent_allowed_tool(name));
+        }
+        // A custom-role subagent's `[subagent.<role>.tools]` mask edits the
+        // base set: `false` removes, `true` re-inserts bounded by the
+        // discovered set (the registry builder rejects unknown names).
+        super::tool_assembly::apply_subagent_role_tools(
+            &mut visible_names,
+            &available_names,
+            subagent_role_tools,
+        );
+        if visible_names.is_empty() {
             return Ok(None);
         }
 
-        let allowed: Vec<ToolName> = visible_tool_names
-            .iter()
-            .filter(|name| !apply_readonly_profile || is_subagent_allowed_tool(name.as_str()))
-            .cloned()
-            .map(ToolName)
-            .collect();
+        let allowed: Vec<ToolName> = visible_names.into_iter().map(ToolName).collect();
 
         let mut per_agent_allowed_tools = HashMap::new();
         per_agent_allowed_tools.insert(agent_id.clone(), allowed);
 
         let registry = ToolRegistryBuilderImpl::new()
-            .with_sources(load_tool_sources_with_services(services))
+            .with_sources(tool_sources)
             .with_config(ToolRegistryConfig {
                 visibility: ToolVisibilityConfig {
                     per_agent_allowed_tools,
@@ -279,6 +276,12 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
 
         let is_subagent = agent_id != self.config.descriptor.agent_id;
         let is_default_subagent = is_subagent && request.subagent_role_id.is_none();
+        let subagent_role_tools = super::tool_assembly::resolve_subagent_role_tools(
+            is_subagent,
+            request.subagent_role_id.as_deref(),
+            &self.config.subagent_roles,
+            |role| &role.tools,
+        );
 
         if is_default_subagent {
             // The child gets the slim exploration prompt, not the parent's full
@@ -323,7 +326,12 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             descriptor,
             entry_kind: request.entry.kind.clone(),
             llm_provider,
-            tool_registry: self.build_tool_registry(&agent_id, is_default_subagent, services)?,
+            tool_registry: self.build_tool_registry(
+                &agent_id,
+                is_default_subagent,
+                subagent_role_tools,
+                services,
+            )?,
             // The default exploration child doesn't get the skills catalog: more
             // per-turn prompt surface, and the `skill` tool is outside its allowlist
             // anyway. Custom-role subagents keep skills, like the main agent.

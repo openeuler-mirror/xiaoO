@@ -82,7 +82,7 @@ fn resolve_allowed_tool_names_requires_exact_tool_names() {
         ]),
     };
 
-    let allowed = resolve_allowed_tool_names(&all_tool_names, Some(&agent_role));
+    let allowed = resolve_allowed_tool_names(&all_tool_names, Some(&agent_role), None);
     let allowed: Vec<_> = allowed.into_iter().map(|tool| tool.0).collect();
 
     assert!(allowed.contains(&"file_edit".to_string()));
@@ -110,11 +110,12 @@ fn mcp_profiles_apply_strict_tool_boundaries() {
     .collect::<Vec<_>>();
 
     let chatbot =
-        resolve_profile_allowed_tool_names(&all, RuntimeCapabilityProfile::McpChatbot, None);
+        resolve_profile_allowed_tool_names(&all, RuntimeCapabilityProfile::McpChatbot, None, None);
     let chatbot = chatbot.into_iter().map(|name| name.0).collect::<Vec<_>>();
     assert_eq!(chatbot, MCP_CHATBOT_TOOLS.map(str::to_string));
 
-    let agent = resolve_profile_allowed_tool_names(&all, RuntimeCapabilityProfile::McpAgent, None);
+    let agent =
+        resolve_profile_allowed_tool_names(&all, RuntimeCapabilityProfile::McpAgent, None, None);
     let agent = agent.into_iter().map(|name| name.0).collect::<Vec<_>>();
     assert!(agent.contains(&"file_write".to_string()));
     assert!(agent.contains(&"spawn_subagent".to_string()));
@@ -132,6 +133,7 @@ fn mcp_profiles_apply_strict_tool_boundaries() {
         &all,
         RuntimeCapabilityProfile::McpAgent,
         Some(&restricted_role),
+        None,
     )
     .into_iter()
     .map(|name| name.0)

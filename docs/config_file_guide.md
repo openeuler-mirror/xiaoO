@@ -367,15 +367,16 @@ file_read = true
 > `webfetch`, `spawn_subagent`, `join_subagent`, `ask_user_question`,
 > `count_text_length`, `print_hello_world`, `send_file`. `file_read` is the real
 > name (`crates/tool/src/impl/builtin/file_read/spec.rs`); `read`/`write`/`edit`
-> are **not** tool names and are silently skipped (see the known gap below).
+> are **not** tool names and are skipped with a runtime warning (see below).
 
-> ⚠️ **Known gap — subagent role `tools` is not enforced.** For agent roles
-> (`[agent.<name>.tools]`) the map acts as a visibility mask. For **subagent**
-> roles it is parsed and carried into `SubagentRoleRecord` but never applied:
-> the session supervisor reads only `prompt`, `max_turns`, and `description`
-> from the role (`apps/shared/src/gateway/session_supervisor.rs`). Only
-> the built-in exploration subagent is narrowed, via a hardcoded allowlist.
-> Do not rely on `[subagent.<role>.tools]` to restrict a subagent's tools.
+> `[subagent.<role_id>.tools]` acts as a visibility mask with the same semantics
+> as `[agent.<name>.tools]`: `false` removes the tool from the subagent lane's
+> registry, `true` re-inserts it (bounded by the discovered set), unlisted tools
+> stay visible. The mask is applied when the lane's tool registry is built
+> (`apps/serverside/src/daemon_runtime.rs`;
+> `apps/shared/src/gateway/hosted_runtime_resolver.rs`), so it scopes only the
+> role's subagents — the main agent and the default exploration subagent (which
+> keeps its hardcoded read-only allowlist) are unaffected.
 
 ### Configuration Example
 
@@ -416,7 +417,8 @@ max_turns = 3
 # tools = { "bash" = true, "file_read" = true, "file_write" = true }
 ```
 
-> **Note**: If `[subagent.<role_id>.tools]` is not configured, the subagent uses the global default tool permissions. See the known-gap note above: the map is currently not enforced for subagent roles even when configured.
+> **Note**: If `[subagent.<role_id>.tools]` is not configured, the subagent uses the base tool
+> permissions (the main agent's visible set on the hosted path, otherwise the full discovered set).
 
 ### Working Mechanism
 

@@ -33,7 +33,10 @@ pub mod session_supervisor;
 pub mod session_worker;
 pub mod subagent_interaction;
 pub mod tool_assembly;
-pub use tool_assembly::{BoundControlStore, McpToolCache, ToolAssemblyError};
+pub use tool_assembly::{
+    apply_role_tools_mask, apply_subagent_role_tools, resolve_subagent_role_tools,
+    BoundControlStore, McpToolCache, ToolAssemblyError,
+};
 pub mod turns;
 pub mod workspace_prompt;
 

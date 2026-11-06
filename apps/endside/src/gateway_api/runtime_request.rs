@@ -18,7 +18,9 @@ use xiaoo_api::chat::{
     system_reserve, validate_max_tokens_against_window, FeatureFlags, ReasoningEffort,
     TokenBudgetConfig,
 };
-use xiaoo_shared::gateway::tool_assembly::{discover_tool_names, ToolAssemblyInput};
+use xiaoo_shared::gateway::tool_assembly::{
+    apply_role_tools_mask, discover_tool_names, ToolAssemblyInput,
+};
 
 use super::runtime::GatewayRuntime;
 use super::window_disk_cache::WindowDiskCache;
@@ -955,7 +957,8 @@ async fn resolve_visible_tool_names(
     active_agent_role: Option<&str>,
     workspace: &std::path::Path,
 ) -> Option<Vec<String>> {
-    let role = active_agent_role.and_then(|role_id| agent_config.agent_role(role_id))?;
+    let role_id = active_agent_role?;
+    let role = agent_config.agent_role(role_id)?;
     if role.tools.is_empty() {
         return None;
     }
@@ -971,17 +974,13 @@ async fn resolve_visible_tool_names(
         .map(|name| name.0)
         .collect();
     let mut visible_tool_names = all_tool_names.clone();
-
-    for (configured_name, enabled) in &role.tools {
-        if !all_tool_names.contains(configured_name) {
-            continue;
-        }
-        if *enabled {
-            visible_tool_names.insert(configured_name.clone());
-        } else {
-            visible_tool_names.remove(configured_name);
-        }
-    }
+    let role_label = format!("agent role '{role_id}'");
+    apply_role_tools_mask(
+        &mut visible_tool_names,
+        &all_tool_names,
+        &role.tools,
+        &role_label,
+    );
 
     Some(visible_tool_names.into_iter().collect())
 }
