@@ -6,7 +6,7 @@ mod stream_utf8;
 mod zhipu;
 
 pub(crate) use anthropic::AnthropicProvider;
-pub(crate) use gemini::GeminiProvider;
+pub(crate) use gemini::{GeminiProvider, GEMINI_API_KEY_HEADER};
 pub(crate) use ollama::OllamaProvider;
 pub use openai_family::{
     OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig, ReasoningDialect,

@@ -562,7 +562,8 @@ fn is_invisible_or_directional(ch: char) -> bool {
 /// Keep only the host part after `scheme://` (with port and IPv6 brackets):
 /// path, query, fragment and userinfo are all stripped.
 ///
-/// The query goes because provider keys may live there (gemini's `?key=`);
+/// The query goes because user-configured base URLs may carry credentials
+/// there (`...?api-key=...`);
 /// the host stays because "which endpoint failed" is the key fact when
 /// debugging TLS / gateway issues — flattening everything to `<url>` would
 /// make self-signed-gateway problems undebuggable. Userinfo (`user:pw@`) is
