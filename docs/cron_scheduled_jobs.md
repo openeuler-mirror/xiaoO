@@ -74,14 +74,16 @@ cron 功能已在 `GatewayEntryKind::ScheduledJob` 枚举变体中预留并**已
 │                              │                                   │
 │                              ▼                                   │
 │  ┌──────────────────────────────────────────────────────────┐    │
-│  │  CronScheduler::new(jobs, max_concurrent, session_svc)    │    │
+│  │  CronScheduler::new(jobs, max_concurrent,                 │    │
+│  │                      session_svc, control_plane)           │    │
 │  │                                                             │    │
 │  │  为每个 enabled job spawn_job_timer()                       │    │
 │  │    ├── tokio::select! { sleep until next / cancel }         │    │
 │  │    ├── acquire concurrency semaphore permit                 │    │
 │  │    └── execute_job_with_retry()                             │    │
 │  │          └── execute_job_once()                             │    │
-│  │                └── SessionService::run_turn(AppTurnRequest)  │    │
+│  │                ├── SessionService::run_turn(AppTurnRequest)  │    │
+│  │                └── close_run_session()（回收本轮 session）   │    │
 │  │                                                             │    │
 │  │  catalog() / trigger_now(name) / stop()                     │    │
 │  └──────────────────────────────────────────────────────────┘    │
@@ -103,7 +105,8 @@ cron 功能已在 `GatewayEntryKind::ScheduledJob` 枚举变体中预留并**已
 | `GatewayEntryKind::ScheduledJob` | `apps/serverside/src/cron/scheduler.rs` | 实际填充该 kind |
 | `AppTurnRequest` | `apps/serverside/src/cron/scheduler.rs` | scheduler 构造时填充 |
 | `SessionService` trait | `apps/serverside/src/cron/scheduler.rs` | scheduler 持有 `Arc<dyn SessionService>` |
-| `SessionService::run_turn()` | `apps/serverside/src/cron/scheduler.rs` | **单次调用**，不 open/close session |
+| `SessionService::run_turn()` | `apps/serverside/src/cron/scheduler.rs` | **单次调用**，无 open_session 步骤 |
+| `SessionControlPlane::force_close_session_with_lease()` | `apps/serverside/src/cron/scheduler.rs` | run 结束后立即回收本轮 session（见 §6.5） |
 | `core::run_agent_loop()` | `crates/core/src/agent_loop.rs` | **已有**，无变更 |
 
 ### 2.3 `GatewayEntryKind::ScheduledJob` 的使用
@@ -127,10 +130,13 @@ let request = AppTurnRequest {
 };
 ```
 
-执行**不**调用 `open_session()` / `close_session()`；
+执行**不**调用 `open_session()`；
 session id 由 `format!("cron-{}-{}", name, ts)` 直接生成
 （`apps/serverside/src/cron/scheduler.rs`），
-一次 `run_turn` 即完成整个任务。
+一次 `run_turn` 即完成整个任务。run 进入终态（成功 / 失败 / 超时）后，
+scheduler 立即经 control plane 对本轮 session 发起 force close，
+回收 store 记录、内存 handle 与 backend 租约——一次性会话不保温，
+不等 2 小时孤儿 reaper（详见 §6.5）。
 
 ---
 
@@ -631,6 +637,7 @@ pub struct CronScheduler {
 struct CronJob {
     config: CronJobConfig,
     session_service: Arc<dyn SessionService>,
+    session_control_plane: Arc<dyn SessionControlPlane>,
     cancel_token: CancellationToken,
     concurrency_limiter: Arc<Semaphore>,
     next_run: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
@@ -662,6 +669,7 @@ impl CronScheduler {
         jobs: Vec<CronJobConfig>,
         max_concurrent: usize,
         session_service: Arc<dyn SessionService>,
+        session_control_plane: Arc<dyn SessionControlPlane>,
     ) -> Self {
         let cancel_token = CancellationToken::new();
         let limit = if max_concurrent > 0 { max_concurrent } else { usize::MAX };
@@ -865,7 +873,7 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
     let session_id = format!("cron-{}-{}", job.config.name, ts);
     let conversation_id = format!("cron-{}-conv", job.config.name);
 
-    // 单次 run_turn：不存在 open_session / close_session 步骤
+    // 单次 run_turn：不存在 open_session 步骤
     let request = AppTurnRequest {
         session_id: session_id.clone(),
         entry: GatewayEntryContext {
@@ -894,21 +902,29 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
 
     let start = std::time::Instant::now();
 
-    let result = tokio::time::timeout(
+    let turn_result = tokio::time::timeout(
         Duration::from_secs(job.config.timeout_secs),
         job.session_service.run_turn(request),
     )
-    .await
-    .map_err(|_| CronExecutionError::Timeout {
-        job_name: job.config.name.clone(),
-        timeout_secs: job.config.timeout_secs,
-    })?
-    .map_err(|e| CronExecutionError::Session {
-        job_name: job.config.name.clone(),
-        error: e.to_string(),
-    })?;
+    .await;
 
+    // duration_ms 只度量 turn 本身：在（可能缓慢的）回收之前定格计时，
+    // 慢 close（上限 60 s）不得污染执行时长指标。
     let duration_ms = start.elapsed().as_millis() as u64;
+
+    // 一次性会话：run 进入任一终态后立即回收，不等孤儿 reaper
+    // （超时场景下 actor 仍在执行 turn，正是这里的 force close 取消它）
+    close_run_session(job, &session_id).await;
+
+    let result = turn_result
+        .map_err(|_| CronExecutionError::Timeout {
+            job_name: job.config.name.clone(),
+            timeout_secs: job.config.timeout_secs,
+        })?
+        .map_err(|e| CronExecutionError::Session {
+            job_name: job.config.name.clone(),
+            error: e.to_string(),
+        })?;
 
     Ok(JobRunResult {
         session_id,
@@ -919,7 +935,31 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
 }
 ```
 
-`JobRunResult` 与 `execute_job_once`（内含 `run_turn` 调用）定义于 `apps/serverside/src/cron/scheduler.rs`。
+`JobRunResult` 与 `execute_job_once`（内含 `run_turn` 调用与 `close_run_session`
+回收）定义于 `apps/serverside/src/cron/scheduler.rs`。
+
+### 6.5 会话回收
+
+cron 会话是一次性的：session_id 每轮重新生成，跨轮连续性只靠
+`conversation_id`（memory automation 召回），没有任何后续 turn 会再引用
+本轮 session。因此 `execute_job_once` 在 `run_turn` 进入终态后立即调用
+`close_run_session`，经
+`SessionControlPlane::force_close_session_with_lease(session_id, daemon_cron_principal)`
+回收 store 记录、内存 handle 与 backend 租约：
+
+- **成功 / 失败**：直接回收，backend 立即释放；
+- **超时**：`run_turn` future 已被丢弃但 actor 仍在执行 turn，
+  force close 的 `ForceClose` 命令负责取消在途 turn 并完成回收——
+  这是对超时任务的期望清理语义；
+- **有界等待（60 s）**：无视取消的 turn 不能卡死 job 循环；
+  close 失败或超时只记日志，daemon 的孤儿 reaper（2 h 阈值）仍是兜底。
+  scheduler 停止（`stop()`）时等待被立即放弃，避免慢 close 拖长优雅
+  关停——close 路径幂等，未收尾的部分由下次启动的孤儿 reaper 扫掉。
+
+可观测性不受影响：`CronLastResult` 已保留 `session_id` / `reply` /
+`total_tokens`；`duration_ms` 在回收前定格，只度量 turn 本身。
+但会话记录已删除，事后 `export_session` 该 id 会返回
+session 不存在。
 
 ---
 
@@ -944,6 +984,7 @@ let cron_scheduler = match config.resolve_cron_jobs() {
                 jobs,
                 global.max_concurrent_jobs,
                 session_service.clone(),
+                session_control_plane.clone(),
             )))
         } else {
             tracing::info!(total, "no enabled cron jobs");

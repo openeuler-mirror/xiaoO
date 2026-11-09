@@ -81,6 +81,15 @@ impl SessionControlPlane for SandboxCatalogControlPlane {
     }
 }
 
+/// Satisfies `CronScheduler`'s control-plane dependency. The triggered run
+/// does call `close_run_session`, but the trait defaults make it harmless:
+/// `force_close_session` returns `UnsupportedCapability`, which the
+/// scheduler only warn-logs, so the route assertions are unaffected.
+struct NoopControlPlane;
+
+#[async_trait]
+impl SessionControlPlane for NoopControlPlane {}
+
 #[tokio::test(flavor = "current_thread")]
 async fn sandbox_catalog_is_authenticated_and_redacted() {
     let router = create_router_with_control_plane_and_auth(
@@ -563,6 +572,7 @@ async fn cron_runtime_routes_trigger_and_report_results() {
         }],
         1,
         service,
+        Arc::new(NoopControlPlane),
     ));
     let mut state = GatewayAppState::new(Arc::new(FakeSessionService::new("unused")));
     state.set_cron_scheduler(Some(scheduler.clone()));
