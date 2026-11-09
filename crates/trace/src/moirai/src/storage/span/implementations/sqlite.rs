@@ -15,8 +15,10 @@ const SPAN_PREFIX_SUGGESTION_LIMIT: usize = 5;
 const LLM_CALL_SPAN_TYPE: &str = "LLM_CALL";
 
 /// `PRAGMA user_version` marker for one-time migrations; v1 = `trace_tasks`
-/// backfill. Bump and chain new steps in `run_migrations` for future ones.
+/// backfill, v2 = `trace_sessions` backfill. Bump and chain new steps in
+/// `run_migrations` for future ones.
 const TRACE_TASKS_MIGRATION_VERSION: i64 = 1;
+const TRACE_SESSIONS_MIGRATION_VERSION: i64 = 2;
 
 /// `task_description` projection for trace-list queries, backed by the
 /// write-time-materialized `trace_tasks` table.
@@ -26,6 +28,17 @@ const TRACE_TASK_DESCRIPTION_SQL: &str =
 /// Cap for materialized task descriptions; mirrors llm-client's
 /// `INPUT_PREVIEW_MAX_CHARS` (keep in sync manually).
 const TASK_DESCRIPTION_MAX_CHARS: usize = 200;
+
+/// `busy_timeout` for the schema-init window of `SqliteStorage::new`:
+/// `CREATE TRIGGER IF NOT EXISTS` waits on the write lock even when the
+/// trigger already exists, and one-time backfills interleave many
+/// per-trace write transactions into a long overall pass (a single giant
+/// trace's transaction can itself take seconds), so on large databases the
+/// steady-state 5s timeout makes a concurrent opener (the TUI and the
+/// daemon, or the `moirai` inspection CLI) fail with "database is locked".
+/// Openers wait up to this long instead; the steady value is restored
+/// right after init.
+const SCHEMA_INIT_BUSY_TIMEOUT_MS: u64 = 60_000;
 
 #[derive(Clone)]
 pub struct SqliteStorage {
@@ -42,11 +55,49 @@ struct TraceSegment {
     end_message: Option<String>,
 }
 
+/// Direction of a suspend/resume chain walk from a segment: towards
+/// earlier segments (`Previous`) or later ones (`Next`).
+#[derive(Clone, Copy)]
+enum SegmentDirection {
+    Previous,
+    Next,
+}
+
+impl SegmentDirection {
+    /// Boundary comparison and row order, mirror images along the time
+    /// axis.
+    fn boundary_sql(self) -> &'static str {
+        match self {
+            Self::Previous => "ts.start_time < ?3",
+            Self::Next => "ts.start_time > ?3",
+        }
+    }
+
+    fn order_sql(self) -> &'static str {
+        match self {
+            Self::Previous => "ORDER BY ts.start_time DESC",
+            Self::Next => "ORDER BY ts.start_time ASC",
+        }
+    }
+}
+
 impl SqliteStorage {
     pub fn new(path: &str) -> Result<Self> {
         let mut conn = Connection::open(path)?;
         Self::apply_pragmas(&conn)?;
-        Self::init_schema(&mut conn)?;
+        // Schema init and one-time migrations can outlast the steady-state
+        // `busy_timeout` on large databases (see
+        // `SCHEMA_INIT_BUSY_TIMEOUT_MS`), so wait them out patiently, then
+        // restore the steady fail-fast value.
+        let steady_timeout_ms: i64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+        conn.busy_timeout(std::time::Duration::from_millis(
+            SCHEMA_INIT_BUSY_TIMEOUT_MS,
+        ))?;
+        let result = Self::init_schema(&mut conn);
+        // A failed restore only leaves a longer-than-usual wait behind,
+        // which is harmless; don't let it mask the init result.
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(steady_timeout_ms as u64));
+        result?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -98,6 +149,14 @@ impl SqliteStorage {
                 task_description TEXT NOT NULL,
                 start_time INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS trace_sessions (
+                trace_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                start_time INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_trace_sessions_session
+                ON trace_sessions(session_id, agent_id, start_time);
             "#,
         )?;
         request_store::init(conn)?;
@@ -121,6 +180,10 @@ impl SqliteStorage {
         if version < TRACE_TASKS_MIGRATION_VERSION {
             Self::backfill_trace_tasks(conn)?;
             conn.pragma_update(None, "user_version", TRACE_TASKS_MIGRATION_VERSION)?;
+        }
+        if version < TRACE_SESSIONS_MIGRATION_VERSION {
+            Self::backfill_trace_sessions(conn)?;
+            conn.pragma_update(None, "user_version", TRACE_SESSIONS_MIGRATION_VERSION)?;
         }
         Ok(())
     }
@@ -205,6 +268,74 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// One-time migration for databases that predate `trace_sessions`:
+    /// backfill one session-identity row per trace from its earliest span
+    /// carrying both `session_id` and `agent_id` extras (they are always
+    /// emitted together by LLM/TOOL span writers) — the same
+    /// earliest-start-time-wins rule as the write path's upsert, with
+    /// `(created_at, span_id)` breaking exact start-time ties so the pick
+    /// is deterministic. Like the `trace_tasks` backfill, each trace
+    /// commits in its own short transaction: interrupted runs resume
+    /// incrementally (already-backfilled traces are filtered out),
+    /// concurrent runs converge through the earliest-wins upsert, and
+    /// steady-state writers never wait behind a full-database scan.
+    /// `json_valid` guards the `json_type` calls so a single malformed
+    /// extras row is skipped instead of failing the open.
+    fn backfill_trace_sessions(conn: &mut Connection) -> Result<()> {
+        let started_at = std::time::Instant::now();
+        let trace_ids: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT trace_id FROM spans
+                 WHERE json_valid(extras)
+                   AND json_type(extras, '$.session_id') = 'text'
+                   AND json_type(extras, '$.agent_id') = 'text'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM trace_sessions ts WHERE ts.trace_id = spans.trace_id
+                   )",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if trace_ids.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(
+            trace_count = trace_ids.len(),
+            "backfilling trace_sessions for existing traces"
+        );
+        let mut backfilled_traces = 0usize;
+        for trace_id in trace_ids {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let identity: Option<(String, String, i64)> = tx
+                .query_row(
+                    "SELECT json_extract(extras, '$.session_id'),
+                            json_extract(extras, '$.agent_id'),
+                            start_time
+                     FROM spans
+                     WHERE trace_id = ?1
+                       AND json_valid(extras)
+                       AND json_type(extras, '$.session_id') = 'text'
+                       AND json_type(extras, '$.agent_id') = 'text'
+                     ORDER BY start_time ASC, created_at ASC, span_id ASC
+                     LIMIT 1",
+                    rusqlite::params![trace_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            if let Some((session_id, agent_id, start_time)) = identity {
+                Self::upsert_trace_session(&tx, &trace_id, &session_id, &agent_id, start_time)?;
+                backfilled_traces += 1;
+            }
+            tx.commit()?;
+        }
+        tracing::info!(
+            backfilled_traces,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "trace_sessions backfill complete"
+        );
+        Ok(())
+    }
+
     /// Upsert a task description, keeping the earliest-starting contributor.
     fn upsert_trace_task(
         conn: &Connection,
@@ -244,6 +375,52 @@ impl SqliteStorage {
             return Ok(());
         };
         Self::upsert_trace_task(conn, trace_id, &preview, start_time)
+    }
+
+    /// Upsert a trace's session identity, keeping the earliest-starting
+    /// contributor (exact start-time ties keep the incumbent). Shared by
+    /// the write path and the v2 backfill so both apply the same rule.
+    fn upsert_trace_session(
+        conn: &Connection,
+        trace_id: &str,
+        session_id: &str,
+        agent_id: &str,
+        start_time: i64,
+    ) -> Result<()> {
+        conn.prepare_cached(
+            "INSERT INTO trace_sessions (trace_id, session_id, agent_id, start_time)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(trace_id) DO UPDATE SET
+                 session_id = excluded.session_id,
+                 agent_id = excluded.agent_id,
+                 start_time = excluded.start_time
+             WHERE excluded.start_time < trace_sessions.start_time",
+        )?
+        .execute(rusqlite::params![
+            trace_id, session_id, agent_id, start_time
+        ])?;
+        Ok(())
+    }
+
+    /// On the span write path, record the trace's session identity — the
+    /// `session_id` + `agent_id` extras, always emitted together by LLM/TOOL
+    /// span writers — into `trace_sessions`, so suspend/resume chain lookups
+    /// seek `idx_trace_sessions_session` instead of `json_extract`-scanning
+    /// every span in the database. Like `trace_tasks`, the earliest-starting
+    /// contributor wins.
+    fn materialize_trace_session(
+        conn: &Connection,
+        trace_id: &str,
+        extras: &serde_json::Value,
+        start_time: i64,
+    ) -> Result<()> {
+        let (Some(session_id), Some(agent_id)) = (
+            extras.get("session_id").and_then(serde_json::Value::as_str),
+            extras.get("agent_id").and_then(serde_json::Value::as_str),
+        ) else {
+            return Ok(());
+        };
+        Self::upsert_trace_session(conn, trace_id, session_id, agent_id, start_time)
     }
 
     /// First `text` block of a serialized message, falling back to the
@@ -340,47 +517,71 @@ impl SqliteStorage {
 
     fn trace_segment_from_row(row: &Row) -> Result<TraceSegment> {
         Ok(TraceSegment {
-            trace_id: row.get(0)?,
-            start_time: row.get(1)?,
-            end_time: row.get(2)?,
-            session_id: row.get(3)?,
-            agent_id: row.get(4)?,
-            end_message: row.get(5)?,
+            trace_id: row.get("trace_id")?,
+            start_time: row.get("start_time")?,
+            end_time: row.get("end_time")?,
+            session_id: row.get("session_id")?,
+            agent_id: row.get("agent_id")?,
+            end_message: row.get("end_message")?,
         })
     }
 
+    /// `end_time` and `end_message` projections shared by every segment
+    /// query: the END span's end_time/message when the trace finalized,
+    /// else the latest span time. `trace_ref` names the trace —
+    /// `s.trace_id` in `load_trace_segment`'s spans aggregate,
+    /// `ts.trace_id` when driving from `trace_sessions`; the
+    /// `end_spans`/`agg` subquery aliases avoid colliding with either
+    /// driver.
+    fn trace_segment_end_columns(trace_ref: &str) -> String {
+        format!(
+            r#"
+                COALESCE(
+                    (SELECT end_spans.end_time
+                     FROM spans end_spans
+                     WHERE end_spans.trace_id = {trace_ref} AND end_spans.span_type = 'END'
+                     LIMIT 1),
+                    (SELECT MAX(COALESCE(agg.end_time, agg.start_time))
+                     FROM spans agg WHERE agg.trace_id = {trace_ref})
+                ) AS end_time,
+                (SELECT json_extract(end_spans.extras, '$.message')
+                 FROM spans end_spans
+                 WHERE end_spans.trace_id = {trace_ref} AND end_spans.span_type = 'END'
+                 LIMIT 1) AS end_message"#
+        )
+    }
+
+    /// Load a trace's segment header. Session identity and the chain-walk
+    /// start time come from `trace_sessions` (kept in sync by the write path
+    /// and the v2 backfill) so every segment orders by the same
+    /// materialized start time; spans are only consulted for the end
+    /// marker, which is reachable through `idx_trace_id`.
+    ///
+    /// The materialized start time is the earliest identity-carrying
+    /// span's time, so for traces whose root lacks identity extras it is
+    /// later than the trace-wide `MIN(start_time)`. Chain adjacency
+    /// deliberately compares materialized times against each other — one
+    /// indexed column, one consistent baseline. Only same-session
+    /// concurrent segments or clock skew can interleave root/identity
+    /// times across segments and flip the order versus `MIN(start_time)`.
     fn load_trace_segment(conn: &Connection, trace_id: &str) -> Result<Option<TraceSegment>> {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             r#"
             SELECT
                 s.trace_id,
-                MIN(s.start_time) AS start_time,
                 COALESCE(
-                    (SELECT end_time
-                     FROM spans end_spans
-                     WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
-                     LIMIT 1),
-                    MAX(COALESCE(s.end_time, s.start_time))
-                ) AS end_time,
-                (SELECT json_extract(meta.extras, '$.session_id')
-                 FROM spans meta
-                 WHERE meta.trace_id = s.trace_id
-                   AND json_extract(meta.extras, '$.session_id') IS NOT NULL
-                 LIMIT 1) AS session_id,
-                (SELECT json_extract(meta.extras, '$.agent_id')
-                 FROM spans meta
-                 WHERE meta.trace_id = s.trace_id
-                   AND json_extract(meta.extras, '$.agent_id') IS NOT NULL
-                 LIMIT 1) AS agent_id,
-                (SELECT json_extract(meta.extras, '$.message')
-                 FROM spans meta
-                 WHERE meta.trace_id = s.trace_id AND meta.span_type = 'END'
-                 LIMIT 1) AS end_message
+                    (SELECT ts.start_time FROM trace_sessions ts WHERE ts.trace_id = s.trace_id),
+                    MIN(s.start_time)
+                ) AS start_time,
+                (SELECT ts.session_id FROM trace_sessions ts WHERE ts.trace_id = s.trace_id) AS session_id,
+                (SELECT ts.agent_id FROM trace_sessions ts WHERE ts.trace_id = s.trace_id) AS agent_id,
+                {end_time_and_message}
             FROM spans s
             WHERE s.trace_id = ?1
             GROUP BY s.trace_id
             "#,
-        )?;
+            end_time_and_message = Self::trace_segment_end_columns("s.trace_id"),
+        ))?;
 
         let mut rows = stmt.query(rusqlite::params![trace_id])?;
         match rows.next()? {
@@ -389,102 +590,109 @@ impl SqliteStorage {
         }
     }
 
-    fn find_previous_trace_segment(
+    /// Find the segment of the session adjacent to `boundary_time` in
+    /// `direction`: the latest one that started strictly before it, or the
+    /// earliest one strictly after it. Seeks `idx_trace_sessions_session`
+    /// directly; the per-trace end marker subqueries only run for the
+    /// single returned row.
+    fn find_trace_segment(
         conn: &Connection,
+        direction: SegmentDirection,
         session_id: &str,
         agent_id: &str,
-        before_start_time: i64,
+        boundary_time: i64,
     ) -> Result<Option<TraceSegment>> {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             r#"
-            SELECT trace_id, start_time, end_time, session_id, agent_id, end_message
-            FROM (
-                SELECT
-                    s.trace_id AS trace_id,
-                    MIN(s.start_time) AS start_time,
-                    COALESCE(
-                        (SELECT end_spans.end_time
-                         FROM spans end_spans
-                         WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
-                         LIMIT 1),
-                        MAX(COALESCE(s.end_time, s.start_time))
-                    ) AS end_time,
-                    ?1 AS session_id,
-                    ?2 AS agent_id,
-                    (SELECT json_extract(end_spans.extras, '$.message')
-                     FROM spans end_spans
-                     WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
-                     LIMIT 1) AS end_message
-                FROM spans s
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM spans meta
-                    WHERE meta.trace_id = s.trace_id
-                      AND json_extract(meta.extras, '$.session_id') = ?1
-                      AND json_extract(meta.extras, '$.agent_id') = ?2
-                )
-                GROUP BY s.trace_id
-            )
-            WHERE start_time < ?3
-            ORDER BY start_time DESC
+            SELECT
+                ts.trace_id,
+                ts.start_time,
+                {end_time_and_message},
+                ?1 AS session_id,
+                ?2 AS agent_id
+            FROM trace_sessions ts
+            WHERE ts.session_id = ?1 AND ts.agent_id = ?2 AND {boundary}
+            {order}
             LIMIT 1
             "#,
-        )?;
+            end_time_and_message = Self::trace_segment_end_columns("ts.trace_id"),
+            boundary = direction.boundary_sql(),
+            order = direction.order_sql(),
+        ))?;
 
-        let mut rows = stmt.query(rusqlite::params![session_id, agent_id, before_start_time])?;
+        let mut rows = stmt.query(rusqlite::params![session_id, agent_id, boundary_time])?;
         match rows.next()? {
             Some(row) => Ok(Some(Self::trace_segment_from_row(row)?)),
             None => Ok(None),
         }
     }
 
-    fn find_next_trace_segment(
+    /// Walk the suspend/resume chain of `current`'s session: earlier
+    /// segments whose final end message is "suspended" (chronologically
+    /// ordered), then `current` itself, then later segments for as long as
+    /// the walk's latest end message stays "suspended". `session_id` and
+    /// `agent_id` name `current`'s session.
+    fn walk_suspend_resume_chain(
         conn: &Connection,
+        current: &TraceSegment,
         session_id: &str,
         agent_id: &str,
-        after_end_time: i64,
-    ) -> Result<Option<TraceSegment>> {
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT trace_id, start_time, end_time, session_id, agent_id, end_message
-            FROM (
-                SELECT
-                    s.trace_id AS trace_id,
-                    MIN(s.start_time) AS start_time,
-                    COALESCE(
-                        (SELECT end_spans.end_time
-                         FROM spans end_spans
-                         WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
-                         LIMIT 1),
-                        MAX(COALESCE(s.end_time, s.start_time))
-                    ) AS end_time,
-                    ?1 AS session_id,
-                    ?2 AS agent_id,
-                    (SELECT json_extract(end_spans.extras, '$.message')
-                     FROM spans end_spans
-                     WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
-                     LIMIT 1) AS end_message
-                FROM spans s
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM spans meta
-                    WHERE meta.trace_id = s.trace_id
-                      AND json_extract(meta.extras, '$.session_id') = ?1
-                      AND json_extract(meta.extras, '$.agent_id') = ?2
-                )
-                GROUP BY s.trace_id
-            )
-            WHERE start_time > ?3
-            ORDER BY start_time ASC
-            LIMIT 1
-            "#,
-        )?;
-
-        let mut rows = stmt.query(rusqlite::params![session_id, agent_id, after_end_time])?;
-        match rows.next()? {
-            Some(row) => Ok(Some(Self::trace_segment_from_row(row)?)),
-            None => Ok(None),
+    ) -> Result<Vec<String>> {
+        let mut previous_ids = Vec::new();
+        let mut backward_cursor = current.clone();
+        while let Some(previous) = Self::find_trace_segment(
+            conn,
+            SegmentDirection::Previous,
+            session_id,
+            agent_id,
+            backward_cursor.start_time,
+        )? {
+            if previous.end_message.as_deref() != Some("suspended") {
+                break;
+            }
+            previous_ids.push(previous.trace_id.clone());
+            backward_cursor = previous;
         }
+        previous_ids.reverse();
+
+        let mut chain = previous_ids;
+        chain.push(current.trace_id.clone());
+
+        // Seeded with every segment the walk has already emitted, not
+        // just the forward ones: a boundary depressed below the current
+        // segment's start time can also re-select a backward-walked
+        // segment, so only the full history makes the guard complete.
+        // The backward walk needs no such set — its boundary is the
+        // cursor's own start time, so each step strictly decreases it.
+        let mut visited: std::collections::HashSet<String> = chain.iter().cloned().collect();
+
+        let mut forward_cursor = current.clone();
+        while forward_cursor.end_message.as_deref() == Some("suspended") {
+            let boundary = forward_cursor.end_time.unwrap_or(forward_cursor.start_time);
+            let Some(next) = Self::find_trace_segment(
+                conn,
+                SegmentDirection::Next,
+                session_id,
+                agent_id,
+                boundary,
+            )?
+            else {
+                break;
+            };
+            // When a segment's end_time precedes its start_time (clock
+            // skew or dirty data), the Next seek's `start_time >
+            // boundary` can re-select a segment the walk has already
+            // visited — the cursor itself, or a loop of several such
+            // segments — and advancing would never change the loop
+            // state. Stop instead of spinning forever.
+            if !visited.insert(next.trace_id.clone()) {
+                break;
+            }
+            chain.push(next.trace_id.clone());
+            forward_cursor = next;
+        }
+
+        Ok(chain)
     }
 
     fn load_trace_spans(conn: &Connection, trace_id: &str) -> Result<Vec<Span>> {
@@ -543,6 +751,7 @@ impl SpanStorage for SqliteStorage {
                 &extras,
                 span.start_time,
             )?;
+            Self::materialize_trace_session(&tx, &span.trace_id, &extras, span.start_time)?;
             tx.commit()?;
             Ok(())
         })
@@ -646,6 +855,14 @@ impl SpanStorage for SqliteStorage {
                 &span_trace_id,
                 &span_type,
                 &extras,
+                span_start_time,
+            )?;
+            // Merged extras, not just the update payload: `session_id` can
+            // first appear either at span creation or in a later update.
+            Self::materialize_trace_session(
+                &tx,
+                &span_trace_id,
+                &current_extras,
                 span_start_time,
             )?;
             tx.commit()?;
@@ -972,47 +1189,13 @@ impl SqliteStorage {
 
             let current = Self::load_trace_segment(&conn, &trace_id)?
                 .ok_or_else(|| MoiraiError::NotFound(format!("Trace not found: {}", trace_id)))?;
-            let Some(session_id) = current.session_id.clone() else {
+            let (Some(session_id), Some(agent_id)) =
+                (current.session_id.as_deref(), current.agent_id.as_deref())
+            else {
                 return Ok(vec![current.trace_id]);
             };
-            let Some(agent_id) = current.agent_id.clone() else {
-                return Ok(vec![current.trace_id]);
-            };
 
-            let mut previous_ids = Vec::new();
-            let mut backward_cursor = current.clone();
-            while let Some(previous) = Self::find_previous_trace_segment(
-                &conn,
-                &session_id,
-                &agent_id,
-                backward_cursor.start_time,
-            )? {
-                if previous.end_message.as_deref() != Some("suspended") {
-                    break;
-                }
-                previous_ids.push(previous.trace_id.clone());
-                backward_cursor = previous;
-            }
-            previous_ids.reverse();
-
-            let mut chain = previous_ids;
-            chain.push(current.trace_id.clone());
-
-            let mut forward_cursor = current;
-            while forward_cursor.end_message.as_deref() == Some("suspended") {
-                let boundary = forward_cursor.end_time.unwrap_or(forward_cursor.start_time);
-                let Some(next) =
-                    Self::find_next_trace_segment(&conn, &session_id, &agent_id, boundary)?
-                else {
-                    break;
-                };
-                if chain.last() != Some(&next.trace_id) {
-                    chain.push(next.trace_id.clone());
-                }
-                forward_cursor = next;
-            }
-
-            Ok(chain)
+            Self::walk_suspend_resume_chain(&conn, &current, session_id, agent_id)
         })
         .await
         .map_err(|e| MoiraiError::Storage(e.to_string()))?
@@ -1028,52 +1211,15 @@ impl SqliteStorage {
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
             let conn = conn.unchecked_transaction()?;
 
-            let chain = {
-                let current = Self::load_trace_segment(&conn, &trace_id)?.ok_or_else(|| {
-                    MoiraiError::NotFound(format!("Trace not found: {}", trace_id))
-                })?;
-                let Some(session_id) = current.session_id.clone() else {
-                    return Self::load_trace_spans(&conn, &trace_id);
-                };
-                let Some(agent_id) = current.agent_id.clone() else {
-                    return Self::load_trace_spans(&conn, &trace_id);
-                };
-
-                let mut previous_ids = Vec::new();
-                let mut backward_cursor = current.clone();
-                while let Some(previous) = Self::find_previous_trace_segment(
-                    &conn,
-                    &session_id,
-                    &agent_id,
-                    backward_cursor.start_time,
-                )? {
-                    if previous.end_message.as_deref() != Some("suspended") {
-                        break;
-                    }
-                    previous_ids.push(previous.trace_id.clone());
-                    backward_cursor = previous;
-                }
-                previous_ids.reverse();
-
-                let mut chain = previous_ids;
-                chain.push(current.trace_id.clone());
-
-                let mut forward_cursor = current;
-                while forward_cursor.end_message.as_deref() == Some("suspended") {
-                    let boundary = forward_cursor.end_time.unwrap_or(forward_cursor.start_time);
-                    let Some(next) =
-                        Self::find_next_trace_segment(&conn, &session_id, &agent_id, boundary)?
-                    else {
-                        break;
-                    };
-                    if chain.last() != Some(&next.trace_id) {
-                        chain.push(next.trace_id.clone());
-                    }
-                    forward_cursor = next;
-                }
-
-                chain
+            let current = Self::load_trace_segment(&conn, &trace_id)?
+                .ok_or_else(|| MoiraiError::NotFound(format!("Trace not found: {}", trace_id)))?;
+            let (Some(session_id), Some(agent_id)) =
+                (current.session_id.as_deref(), current.agent_id.as_deref())
+            else {
+                return Self::load_trace_spans(&conn, &trace_id);
             };
+
+            let chain = Self::walk_suspend_resume_chain(&conn, &current, session_id, agent_id)?;
 
             let mut spans = Vec::new();
             for segment_trace_id in chain {
@@ -1111,6 +1257,12 @@ impl SqliteStorage {
                 )",
                 [],
             )?;
+            tx.execute(
+                "DELETE FROM trace_sessions WHERE NOT EXISTS (
+                    SELECT 1 FROM spans s WHERE s.trace_id = trace_sessions.trace_id
+                )",
+                [],
+            )?;
             request_store::collect_unused(&tx)?;
             tx.commit()?;
             Ok(deleted)
@@ -1136,6 +1288,10 @@ impl SqliteStorage {
 
             tx.execute(
                 "DELETE FROM trace_tasks WHERE trace_id = ?1",
+                rusqlite::params![trace_id],
+            )?;
+            tx.execute(
+                "DELETE FROM trace_sessions WHERE trace_id = ?1",
                 rusqlite::params![trace_id],
             )?;
             request_store::collect_unused(&tx)?;
