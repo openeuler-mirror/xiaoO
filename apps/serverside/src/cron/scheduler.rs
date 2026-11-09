@@ -12,7 +12,8 @@ use xiaoo_shared::daemon_protocol::response::{CronJobRuntimeResponse, CronRunOut
 
 use xiaoo_shared::cron::{CronExecutionError, CronJobConfig};
 use xiaoo_shared::gateway::{
-    daemon_cron_principal, AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionService,
+    daemon_cron_principal, AppTurnRequest, GatewayEntryContext, GatewayEntryKind,
+    SessionControlPlane, SessionService, SessionServiceError,
 };
 
 // ── Public API ──────────────────────────────────────────────────
@@ -30,6 +31,7 @@ impl CronScheduler {
         jobs: Vec<CronJobConfig>,
         max_concurrent: usize,
         session_service: Arc<dyn SessionService>,
+        session_control_plane: Arc<dyn SessionControlPlane>,
     ) -> Self {
         let cancel_token = CancellationToken::new();
         let limit = if max_concurrent > 0 {
@@ -52,6 +54,7 @@ impl CronScheduler {
             let job = Arc::new(CronJob {
                 config,
                 session_service: session_service.clone(),
+                session_control_plane: session_control_plane.clone(),
                 cancel_token: cancel_token.clone(),
                 concurrency_limiter: concurrency_limiter.clone(),
                 next_run: Mutex::new(None),
@@ -140,6 +143,9 @@ pub enum TriggerError {
 struct CronJob {
     config: CronJobConfig,
     session_service: Arc<dyn SessionService>,
+    /// Reclaims a finished run's one-shot session via force-close; the
+    /// control plane is the only seam that exposes session close.
+    session_control_plane: Arc<dyn SessionControlPlane>,
     cancel_token: CancellationToken,
     concurrency_limiter: Arc<Semaphore>,
     next_run: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
@@ -449,21 +455,34 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
 
     let start = std::time::Instant::now();
 
-    let result = tokio::time::timeout(
+    let turn_result = tokio::time::timeout(
         Duration::from_secs(job.config.timeout_secs),
         job.session_service.run_turn(request),
     )
-    .await
-    .map_err(|_| CronExecutionError::Timeout {
-        job_name: job.config.name.clone(),
-        timeout_secs: job.config.timeout_secs,
-    })?
-    .map_err(|e| CronExecutionError::Session {
-        job_name: job.config.name.clone(),
-        error: e.to_string(),
-    })?;
+    .await;
 
+    // Freeze the turn's wall clock before reclamation: `duration_ms` is the
+    // job's execution metric, and a slow close (bounded at 60 s) must not
+    // inflate it.
     let duration_ms = start.elapsed().as_millis() as u64;
+
+    // One-shot session: no follow-up turn will ever reference it, so
+    // reclaim the record, in-memory handle, and backend lease right here
+    // instead of holding them warm for the 2 h orphan-reaper window.
+    // Runs for every terminal state — on Timeout the actor is still
+    // executing the turn, and the control-plane close is what cancels it
+    // and frees the backend.
+    close_run_session(job, &session_id).await;
+
+    let result = turn_result
+        .map_err(|_| CronExecutionError::Timeout {
+            job_name: job.config.name.clone(),
+            timeout_secs: job.config.timeout_secs,
+        })?
+        .map_err(|e| CronExecutionError::Session {
+            job_name: job.config.name.clone(),
+            error: e.to_string(),
+        })?;
 
     Ok(JobRunResult {
         session_id,
@@ -471,4 +490,60 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
         total_tokens: result.total_tokens,
         duration_ms,
     })
+}
+
+/// Reclaim a finished cron run's session: store record, in-memory handle,
+/// and backend lease (`force_close_session_inner` steps 1-6). Best-effort —
+/// the wait is bounded so a turn that ignores its cancellation token cannot
+/// wedge the job loop, and on failure the daemon's orphan reaper remains
+/// the backstop. `SessionNotFound` is the expected answer for attempts
+/// that died before the session record was saved (e.g. runtime resolution
+/// failure), so it does not warrant a warning.
+///
+/// Scheduler shutdown abandons the wait so `stop()` is not delayed by a
+/// slow close. Abandoning is safe because the close path is idempotent and
+/// the reaper sweeps on the next boot whatever the abandoned close left
+/// behind (store record, handle, or lease).
+async fn close_run_session(job: &CronJob, session_id: &str) {
+    // Room for cancel propagation plus a backend release that may involve
+    // remote calls (e.g. e2b sandbox teardown).
+    const CLOSE_WAIT: Duration = Duration::from_secs(60);
+
+    let principal = daemon_cron_principal();
+    // `biased` with the close arm first: the close future is polled before
+    // the cancel arm, so reclamation has a chance to start (or even
+    // finish) even when the token is already cancelled — only the wait is
+    // abandoned. The close may still be in its store-lookup phase at that
+    // point, so nothing stronger than "best-effort start" is guaranteed.
+    tokio::select! {
+        biased;
+        outcome = tokio::time::timeout(
+            CLOSE_WAIT,
+            job.session_control_plane
+                .force_close_session_with_lease(session_id, Some(&principal)),
+        ) => match outcome {
+            Ok(Ok(_)) => tracing::debug!(
+                job = %job.config.name,
+                session_id,
+                "cron run session reclaimed"
+            ),
+            Ok(Err(SessionServiceError::SessionNotFound { .. })) => {}
+            Ok(Err(error)) => tracing::warn!(
+                job = %job.config.name,
+                session_id,
+                error = %error,
+                "cron run session close failed; orphan reaper will backstop"
+            ),
+            Err(_) => tracing::warn!(
+                job = %job.config.name,
+                session_id,
+                "cron run session close timed out; orphan reaper will backstop"
+            ),
+        },
+        _ = job.cancel_token.cancelled() => tracing::info!(
+            job = %job.config.name,
+            session_id,
+            "scheduler stopping; abandoning session close wait, orphan reaper will backstop"
+        ),
+    }
 }

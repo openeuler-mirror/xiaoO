@@ -678,6 +678,7 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
                         jobs,
                         global.max_concurrent_jobs,
                         session_service.clone(),
+                        session_control_plane.clone(),
                     )))
                 } else {
                     tracing::info!(total, "no enabled cron jobs");
