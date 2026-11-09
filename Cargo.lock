@@ -4823,6 +4823,7 @@ dependencies = [
  "async-trait",
  "compact",
  "futures-util",
+ "indexmap",
  "llm-client",
  "parking_lot",
  "reqwest",

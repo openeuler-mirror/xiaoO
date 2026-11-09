@@ -55,6 +55,7 @@ pub struct TurnState {
     pub total_time_ms: u64,
     pub tpot_ms: f64,
     pub force_return_complete: bool,
+    checkpoint_restored: bool,
 }
 
 impl TurnState {
@@ -71,6 +72,7 @@ impl TurnState {
             total_time_ms: 0,
             tpot_ms: 0.0,
             force_return_complete: false,
+            checkpoint_restored: false,
         }
     }
 }
@@ -84,6 +86,18 @@ pub struct LoopContext<'a> {
     /// populate `ChatMessage::estimated_tokens` before appending. Without
     /// this, every pre-check / compress call re-estimates unchanged messages.
     pub estimator: &'a TokenEstimator,
+}
+
+impl LoopContext<'_> {
+    async fn flush_checkpoint(&mut self) {
+        if let Some(driver) = self.input.checkpoint_driver.as_ref() {
+            if driver.flush(self.state, &mut self.turn.turn_number).await {
+                self.turn.checkpoint_restored = true;
+                self.turn.assistant_message = None;
+                self.turn.build_messages_output = None;
+            }
+        }
+    }
 }
 
 pub async fn run_agent_loop(
@@ -129,11 +143,21 @@ pub async fn run_agent_loop(
                         let agent_id = agent_id_or_anonymous(input.agent_id.as_ref());
                         sink.on_assistant_message(agent_id, &deny_text);
                     }
+                    let mut reply = deny_text;
+                    let mut turn_count = 0;
+                    let mut token_usage = agent_types::outcome::TokenUsage::default();
+                    if let Some(driver) = input.checkpoint_driver.as_ref() {
+                        if driver.flush(state, &mut 1).await {
+                            reply = restored_reply(state).unwrap_or_default();
+                            turn_count = state.turn_count;
+                            token_usage = state.token_usage.clone();
+                        }
+                    }
                     return Ok(LoopRunResult::Complete(AgentOutcome::Complete {
-                        reply: deny_text,
+                        reply,
                         messages: state.messages.read().clone(),
-                        turn_count: 0,
-                        token_usage: agent_types::outcome::TokenUsage::default(),
+                        turn_count,
+                        token_usage,
                         estimated_input_tokens: 0,
                     }));
                 }
@@ -167,6 +191,15 @@ pub async fn run_agent_loop(
     };
 
     loop {
+        if let Some(driver) = ctx.input.checkpoint_driver.as_ref() {
+            driver
+                .process_pending(
+                    ctx.state,
+                    &mut ctx.turn.turn_number,
+                    ctx.input.append_user_message,
+                )
+                .await;
+        }
         ctx.turn = TurnState::new(ctx.turn.turn_number);
         begin_turn_span(&mut ctx).await;
 
@@ -189,6 +222,7 @@ pub async fn run_agent_loop(
                 "compression_error",
             )
             .await;
+            ctx.flush_checkpoint().await;
             return Err(error);
         }
         if let Err(error) = build_messages(&mut ctx).await {
@@ -205,6 +239,7 @@ pub async fn run_agent_loop(
                 "prompt_build_error",
             )
             .await;
+            ctx.flush_checkpoint().await;
             return Err(error);
         }
         if let Err(error) = pre_check_token_budget(&mut ctx, &estimator).await {
@@ -221,6 +256,7 @@ pub async fn run_agent_loop(
                 "pre_check_error",
             )
             .await;
+            ctx.flush_checkpoint().await;
             return Err(error);
         }
         if let Err(error) = llm_call_with_recovery(&mut ctx).await {
@@ -237,6 +273,7 @@ pub async fn run_agent_loop(
                 "llm_call_error",
             )
             .await;
+            ctx.flush_checkpoint().await;
             return Err(error);
         }
         update_turn_span_after_llm(&mut ctx).await;
@@ -256,10 +293,13 @@ pub async fn run_agent_loop(
                     "tool_exec_error",
                 )
                 .await;
+                ctx.flush_checkpoint().await;
                 return Err(error);
             }
         };
         if !suspended_calls.is_empty() {
+            // Resume appends the outstanding results before the next boundary.
+            // Do not save or restore history independently of suspended_calls.
             end_turn_span(
                 &mut ctx,
                 TraceOutcome::Ok,
@@ -295,6 +335,7 @@ pub async fn run_agent_loop(
             }
             Some(LoopDecision::ReturnMaxTurns) => {
                 ctx.state.turn_count += 1;
+                ctx.flush_checkpoint().await;
                 let outcome = build_outcome_max_turns(&ctx);
                 end_turn_span(
                     &mut ctx,
@@ -314,6 +355,7 @@ pub async fn run_agent_loop(
             }
             Some(LoopDecision::ReturnBudgetExhausted) => {
                 ctx.state.turn_count += 1;
+                ctx.flush_checkpoint().await;
                 let outcome = build_outcome_budget(&ctx);
                 end_turn_span(
                     &mut ctx,
@@ -332,6 +374,7 @@ pub async fn run_agent_loop(
                 return Ok(LoopRunResult::Complete(outcome));
             }
             Some(LoopDecision::ReturnCancelled) => {
+                ctx.flush_checkpoint().await;
                 let outcome = build_outcome_cancelled(&ctx);
                 end_turn_span(
                     &mut ctx,
@@ -364,10 +407,12 @@ pub async fn run_agent_loop(
                     "missing_decision",
                 )
                 .await;
+                ctx.flush_checkpoint().await;
                 return Err(error);
             }
         }
     }
+    ctx.flush_checkpoint().await;
     end_turn_span(
         &mut ctx,
         TraceOutcome::Ok,
@@ -375,12 +420,7 @@ pub async fn run_agent_loop(
     )
     .await;
 
-    let reply = ctx
-        .turn
-        .assistant_message
-        .as_ref()
-        .and_then(|m| m.text.clone())
-        .unwrap_or_default();
+    let reply = outcome_reply(&ctx).unwrap_or_default();
 
     emit_loop_end(&ctx, "complete");
 
@@ -2060,13 +2100,31 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn build_outcome_max_turns(ctx: &LoopContext<'_>) -> AgentOutcome {
-    AgentOutcome::MaxTurnsReached {
-        partial_reply: ctx
-            .turn
+// Only the restored tail can represent the returned answer. Searching backwards
+// could incorrectly return an answer to an earlier user turn.
+fn restored_reply(state: &LoopState) -> Option<String> {
+    state
+        .messages
+        .read()
+        .last()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .and_then(|message| message.text_content().map(str::to_owned))
+}
+
+fn outcome_reply(ctx: &LoopContext<'_>) -> Option<String> {
+    if ctx.turn.checkpoint_restored {
+        restored_reply(ctx.state)
+    } else {
+        ctx.turn
             .assistant_message
             .as_ref()
-            .and_then(|m| m.text.clone()),
+            .and_then(|message| message.text.clone())
+    }
+}
+
+fn build_outcome_max_turns(ctx: &LoopContext<'_>) -> AgentOutcome {
+    AgentOutcome::MaxTurnsReached {
+        partial_reply: outcome_reply(ctx),
         messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
@@ -2076,11 +2134,7 @@ fn build_outcome_max_turns(ctx: &LoopContext<'_>) -> AgentOutcome {
 
 fn build_outcome_budget(ctx: &LoopContext<'_>) -> AgentOutcome {
     AgentOutcome::BudgetExhausted {
-        partial_reply: ctx
-            .turn
-            .assistant_message
-            .as_ref()
-            .and_then(|m| m.text.clone()),
+        partial_reply: outcome_reply(ctx),
         messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
@@ -2090,11 +2144,7 @@ fn build_outcome_budget(ctx: &LoopContext<'_>) -> AgentOutcome {
 
 fn build_outcome_cancelled(ctx: &LoopContext<'_>) -> AgentOutcome {
     AgentOutcome::Cancelled {
-        partial_reply: ctx
-            .turn
-            .assistant_message
-            .as_ref()
-            .and_then(|m| m.text.clone()),
+        partial_reply: outcome_reply(ctx),
         messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),

@@ -332,6 +332,11 @@ impl GatewayRuntime {
     /// - For local backend: no-op (just updates state, no sandbox to delete)
     /// - For E2B/Conch backend: calls delete API if no other sessions share it
     pub async fn release_session_backend(&self, session_id: &str) -> Result<(), String> {
+        #[cfg(unix)]
+        self.session_gateway
+            .checkpoints
+            .close(Some(session_id))
+            .await;
         self.session_gateway
             .backend_manager
             .release_session(session_id)
@@ -339,7 +344,22 @@ impl GatewayRuntime {
             .map_err(|e| e.to_string())
     }
 
-    /// Returns whether remote mode is active
+    #[cfg(unix)]
+    pub async fn prepare_checkpoint_endpoint(
+        &self,
+        session_id: &str,
+        config: &xiaoo_api::runtime::checkpoint::CheckpointConfig,
+    ) -> Result<(), String> {
+        let target = self.remote.is_none().then_some(session_id);
+        self.session_gateway
+            .checkpoints
+            .prepare(target, config)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Returns whether remote mode is active.
     pub fn is_remote_mode(&self) -> bool {
         self.remote.is_some() && self.remote_session_open
     }

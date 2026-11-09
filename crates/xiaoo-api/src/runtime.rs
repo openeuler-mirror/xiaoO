@@ -24,6 +24,8 @@ use tool::{EmptyToolRegistry, ToolSpecSnapshot};
 
 use xiaoo_core::{AgentLoopInput, AgentRuntime, LoopRunResult, LoopState};
 
+pub use xiaoo_core::checkpoint;
+
 // ---- Signature-reachable re-exports (vocabulary appearing in builder/run signatures) ----
 #[doc(inline)]
 pub use agent_contracts::{PromptBuilder, ToolSpecView};

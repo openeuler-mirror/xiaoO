@@ -67,6 +67,8 @@ impl xiaoo_shared::lsp_support::ExtraServerConfigView for ExtraServerConfig {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub checkpoint: xiaoo_api::runtime::checkpoint::CheckpointConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
     pub trace: Option<Value>,

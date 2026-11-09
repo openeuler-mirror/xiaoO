@@ -248,3 +248,97 @@ fn tui_config_default_does_not_redact_secrets() {
     assert!(!TuiConfig::default().redact_secrets_display);
     assert!(!Config::default().tui.redact_secrets_display);
 }
+
+#[test]
+fn checkpoint_socket_config_round_trips() {
+    let config: Config = toml::from_str(
+        r#"
+[checkpoint]
+enabled = true
+transport = "unix_socket"
+save_mode = "current"
+[checkpoint.unix_socket]
+endpoint = "/tmp/xiaoo-checkpoint.sock"
+"#,
+    )
+    .unwrap();
+    assert!(config.checkpoint.enabled);
+    assert_eq!(
+        config.checkpoint.save_mode,
+        xiaoo_api::runtime::checkpoint::SaveMode::Current
+    );
+    assert_eq!(
+        Config::default().checkpoint.save_mode,
+        xiaoo_api::runtime::checkpoint::SaveMode::Next
+    );
+    assert_eq!(
+        config.checkpoint.unix_socket.as_ref().unwrap().endpoint,
+        std::path::PathBuf::from("/tmp/xiaoo-checkpoint.sock")
+    );
+    let serialized = toml::to_string(&config).unwrap();
+    let restored: Config = toml::from_str(&serialized).unwrap();
+    assert_eq!(restored.checkpoint, config.checkpoint);
+    assert!(!Config::default().checkpoint.enabled);
+    assert!(serialized.contains("transport = \"unix_socket\""));
+    assert!(serialized.contains("save_mode = \"current\""));
+    for old_mode in ["next_boundary", "current_boundary"] {
+        assert!(
+            toml::from_str::<Config>(&format!("[checkpoint]\nsave_mode = '{old_mode}'")).is_err()
+        );
+    }
+    assert!(toml::from_str::<Config>("[checkpoint]\ntransport = 'invalid'").is_err());
+}
+
+#[test]
+fn checkpoint_storage_tables_are_optional_and_round_trip() {
+    use xiaoo_api::runtime::checkpoint::{StorageConfig, StorageKind};
+    for source in [
+        "",
+        "[checkpoint.storage]",
+        "[checkpoint.storage.memory]",
+        "[checkpoint.storage.memory_cached_sqlite]",
+    ] {
+        let config: Config = toml::from_str(source).unwrap();
+        assert_eq!(config.checkpoint.storage.kind, StorageKind::Memory);
+        assert!(config
+            .checkpoint
+            .storage
+            .memory
+            .as_ref()
+            .is_none_or(|memory| memory.capacity.is_none()));
+        assert!(config
+            .checkpoint
+            .storage
+            .memory_cached_sqlite
+            .as_ref()
+            .is_none_or(|sqlite| sqlite.path.is_none()
+                && sqlite.compress.is_none()
+                && sqlite.memory_cache_size.is_none()));
+    }
+    let config: Config = toml::from_str(
+        r#"
+[checkpoint.storage]
+kind = "memory_cached_sqlite"
+[checkpoint.storage.memory_cached_sqlite]
+path = "xxx"
+compress = "xxx"
+memory_cache_size = 5
+[checkpoint.storage.memory]
+capacity = 50
+"#,
+    )
+    .unwrap();
+    let storage = &config.checkpoint.storage;
+    assert_eq!(storage.kind, StorageKind::MemoryCachedSqlite);
+    assert_eq!(storage.memory.as_ref().unwrap().capacity, Some(50));
+    let sqlite = storage.memory_cached_sqlite.as_ref().unwrap();
+    assert_eq!(sqlite.path.as_deref(), Some(std::path::Path::new("xxx")));
+    assert_eq!(sqlite.compress.as_deref(), Some("xxx"));
+    assert_eq!(sqlite.memory_cache_size, Some(5));
+    let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(restored.checkpoint.storage, *storage);
+    assert_eq!(
+        Config::default().checkpoint.storage,
+        StorageConfig::default()
+    );
+}

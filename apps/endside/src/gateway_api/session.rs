@@ -25,6 +25,11 @@ pub(super) type MemoryAutomationSlot =
 
 #[derive(Debug)]
 pub enum SessionTurnUpdate {
+    CheckpointRestored {
+        session_id: String,
+        messages: Vec<xiaoo_api::chat::ChatMessage>,
+        plan: TodoSnapshotUpdate,
+    },
     TurnStart {
         agent_id: AgentId,
         turn: u32,
@@ -112,6 +117,8 @@ pub enum SessionTurnUpdate {
 
 #[derive(Clone)]
 pub struct SessionGateway {
+    #[cfg(unix)]
+    pub(super) checkpoints: Arc<xiaoo_api::runtime::checkpoint::UnixCheckpointSession>,
     pub(super) session_store: Arc<InMemorySessionStore>,
     /// Persistent control plane used solely for session lifecycle hooks.
     /// Initialized lazily on the first session open.
@@ -149,6 +156,8 @@ impl Default for SessionGateway {
         }
 
         Self {
+            #[cfg(unix)]
+            checkpoints: Arc::new(Default::default()),
             session_store,
             lifecycle_control_plane: Arc::new(tokio::sync::Mutex::new(None)),
             active_session_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),

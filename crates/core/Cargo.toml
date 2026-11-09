@@ -11,17 +11,18 @@ agent-llm = { path = "../agent-llm" }
 tool = { path = "../tool" }
 agent-contracts = { path = "../agent-contracts" }
 llm-client = { path = "../llm-client" }
-tokio = { workspace = true, features = ["rt", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "time", "macros", "sync", "net", "io-util"] }
 tokio-util.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 uuid.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 thiserror.workspace = true
 arc-swap.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
+indexmap = "2"
 reqwest.workspace = true
 
 [dev-dependencies]

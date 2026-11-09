@@ -14,8 +14,8 @@ pub use invocation_context::{
     approve_current_sandbox_permission, current_sandbox_permission_scope, current_tool_name,
     register_once_sandbox_grant, scope_tool_invocation,
 };
-pub use r#impl::open_todo_lines;
 pub use r#impl::reqwest_util;
+pub use r#impl::{checkpoint_todos, open_todo_lines, restore_checkpoint_todos, CheckpointTodoItem};
 pub use r#impl::{
     declarative_tool_catalog, load_tool_sources, load_tool_sources_with_services,
     render_declarative_tool, test_declarative_tool, DeclarativeToolCatalog,
