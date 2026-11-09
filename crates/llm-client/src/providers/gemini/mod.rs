@@ -18,6 +18,11 @@ use convert::{
 };
 use types::GeminiResponseBody;
 
+/// One spelling shared by every sender and by the redactor's auth-header
+/// list: gateways echo request headers back in error responses, and a
+/// literal that drifts between the two stops being redacted.
+pub(crate) const GEMINI_API_KEY_HEADER: &str = "x-goog-api-key";
+
 pub(crate) struct GeminiProvider {
     client: reqwest::Client,
     api_key: String,
@@ -52,18 +57,20 @@ impl GeminiProvider {
 impl LlmProvider for GeminiProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let model_name = normalize_model_name(&self.capabilities.model_name);
-        let url = format!(
-            "{}/v1beta/{}:generateContent?key={}",
-            self.base_url, model_name, self.api_key
-        );
+        let url = format!("{}/v1beta/{}:generateContent", self.base_url, model_name);
         let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
         let result = async {
             let body = build_gemini_request_body(request, &self.capabilities.model_name);
             let body_str = serde_json::to_string(&body).unwrap_or_default();
 
+            // The key travels in the x-goog-api-key header, never the URL
+            // query: request lines surface in TLS-terminating proxies, server
+            // access logs, and reqwest error Display, none of which the
+            // redactor can reach.
             let request = self
                 .client
                 .post(&url)
+                .header(GEMINI_API_KEY_HEADER, &self.api_key)
                 .header("Content-Type", "application/json")
                 .json(&body)
                 .build()
@@ -167,8 +174,8 @@ impl LlmProvider for GeminiProvider {
         let started = std::time::Instant::now();
         let model_name = normalize_model_name(&self.capabilities.model_name);
         let url = format!(
-            "{}/v1beta/{}:streamGenerateContent?alt=sse&key={}",
-            self.base_url, model_name, self.api_key
+            "{}/v1beta/{}:streamGenerateContent?alt=sse",
+            self.base_url, model_name
         );
         let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
         let result = async {
@@ -178,6 +185,7 @@ impl LlmProvider for GeminiProvider {
             let request = self
                 .client
                 .post(&url)
+                .header(GEMINI_API_KEY_HEADER, &self.api_key)
                 .header("Content-Type", "application/json")
                 .json(&body)
                 .build()

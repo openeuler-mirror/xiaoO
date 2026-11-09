@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use super::LlmError;
+use crate::providers::GEMINI_API_KEY_HEADER;
 
 /// A request's credential values are distinct from its URL display policy.
 #[derive(Default)]
@@ -115,7 +116,12 @@ impl ErrorRedactor {
     fn is_auth_header(name: &str) -> bool {
         matches!(
             name,
-            "x-api-key" | "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+            "x-api-key"
+                | GEMINI_API_KEY_HEADER
+                | "authorization"
+                | "proxy-authorization"
+                | "cookie"
+                | "set-cookie"
         )
     }
 

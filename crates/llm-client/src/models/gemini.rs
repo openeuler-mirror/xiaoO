@@ -1,5 +1,6 @@
 use crate::error::{map_reqwest_error_raw as map_reqwest_error, LlmError};
 use crate::models::{ModelCatalog, ModelSummary};
+use crate::providers::GEMINI_API_KEY_HEADER;
 use async_trait::async_trait;
 use std::time::Duration;
 
@@ -22,16 +23,13 @@ impl GeminiModelCatalog {
 #[async_trait]
 impl ModelCatalog for GeminiModelCatalog {
     async fn list_models(&self) -> Result<Vec<ModelSummary>, LlmError> {
-        let url = format!(
-            "{}/v1beta/models?key={}",
-            self.api_base.trim_end_matches('/'),
-            self.api_key
-        );
+        let url = format!("{}/v1beta/models", self.api_base.trim_end_matches('/'));
         let mut redactor = crate::error::ErrorRedactor::new(&url, &self.api_key);
         let result = async {
             let request = self
                 .client
                 .get(&url)
+                .header(GEMINI_API_KEY_HEADER, &self.api_key)
                 .header("Content-Type", "application/json")
                 .build()
                 .map_err(map_reqwest_error)?;
