@@ -729,6 +729,7 @@ fn finish_stream_done_clears_per_call_state_but_preserves_file_totals() {
         PendingStreamDone {
             prompt_tokens: 0,
             completion_tokens: 0,
+            reasoning_tokens: 0,
             total_tokens: 0,
             estimated_input_tokens: 0,
             messages: Vec::new(),
@@ -779,6 +780,7 @@ fn first_token_latency_is_recorded_once_and_completion_uses_reported_prompt_toke
         PendingStreamDone {
             prompt_tokens: 10,
             completion_tokens: 5,
+            reasoning_tokens: 0,
             total_tokens: 42,
             estimated_input_tokens: 18,
             messages: Vec::new(),
@@ -813,6 +815,7 @@ fn completion_accumulates_usage_totals_across_turns_without_changing_ctx_semanti
         PendingStreamDone {
             prompt_tokens: 10,
             completion_tokens: 5,
+            reasoning_tokens: 0,
             total_tokens: 15,
             estimated_input_tokens: 18,
             messages: Vec::new(),
@@ -835,6 +838,7 @@ fn completion_accumulates_usage_totals_across_turns_without_changing_ctx_semanti
         PendingStreamDone {
             prompt_tokens: 25,
             completion_tokens: 7,
+            reasoning_tokens: 0,
             total_tokens: 32,
             estimated_input_tokens: 31,
             messages: Vec::new(),
@@ -869,6 +873,7 @@ fn completion_falls_back_to_estimated_input_tokens_when_prompt_usage_is_missing(
         PendingStreamDone {
             prompt_tokens: 0,
             completion_tokens: 6,
+            reasoning_tokens: 0,
             total_tokens: 30,
             estimated_input_tokens: 24,
             messages: Vec::new(),
@@ -962,6 +967,7 @@ fn cancel_streaming_drains_terminal_done_and_ignores_ghost_updates() {
     tx.send(SessionTurnUpdate::Done {
         prompt_tokens: 3,
         completion_tokens: 5,
+        reasoning_tokens: 0,
         total_tokens: 8,
         cached_tokens: 0,
         estimated_input_tokens: 0,
@@ -1058,6 +1064,7 @@ fn cancel_during_reveal_drain_still_applies_pending_done() {
     runtime.pending_stream_done = Some(PendingStreamDone {
         prompt_tokens: 3,
         completion_tokens: 5,
+        reasoning_tokens: 0,
         total_tokens: 8,
         estimated_input_tokens: 0,
         messages: messages.clone(),
@@ -1109,6 +1116,7 @@ async fn settle_in_flight_turn_pumps_drain_until_done() {
         let _ = tx.send(SessionTurnUpdate::Done {
             prompt_tokens: 3,
             completion_tokens: 5,
+            reasoning_tokens: 0,
             total_tokens: 8,
             cached_tokens: 0,
             estimated_input_tokens: 0,
@@ -1253,6 +1261,7 @@ async fn checkpoint_restore_refreshes_chat_and_discards_old_reveal_buffer() {
             tx.send(SessionTurnUpdate::Done {
                 prompt_tokens: 0,
                 completion_tokens: 0,
+                reasoning_tokens: 0,
                 total_tokens: 0,
                 cached_tokens: 0,
                 estimated_input_tokens: 0,

@@ -105,15 +105,33 @@ struct McpUsage {
     /// Input tokens reported for this turn.
     #[schemars(schema_with = "nonnegative_integer_schema")]
     prompt_tokens: u64,
-    /// Output tokens reported for this turn.
+    /// Visible output tokens: provider completion tokens minus reasoning
+    /// tokens (zero reasoning reported means all completion is visible).
     #[schemars(schema_with = "nonnegative_integer_schema")]
     completion_tokens: u64,
-    /// Sum of reported input and output tokens.
+    /// Reasoning/thinking tokens for this turn (zero when unreported).
+    #[schemars(schema_with = "nonnegative_integer_schema")]
+    reasoning_tokens: u64,
+    /// Sum of reported input and output tokens (includes reasoning).
     #[schemars(schema_with = "nonnegative_integer_schema")]
     total_tokens: u64,
     /// Locally estimated input tokens when provider usage is incomplete.
     #[schemars(schema_with = "nonnegative_integer_schema")]
     estimated_input_tokens: u64,
+}
+
+impl McpUsage {
+    /// Build from turn result fields, applying opencode accounting:
+    /// visible output only; reasoning tokens are reported separately.
+    fn from_turn_result(result: &AppTurnResult) -> Self {
+        Self {
+            prompt_tokens: result.prompt_tokens,
+            completion_tokens: result.visible_completion_tokens(),
+            reasoning_tokens: result.reasoning_tokens,
+            total_tokens: result.total_tokens,
+            estimated_input_tokens: result.estimated_input_tokens,
+        }
+    }
 }
 
 fn nonnegative_integer_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -393,12 +411,7 @@ impl AgentOperationRegistry {
     }
 
     fn complete_success(&self, operation_id: &str, result: AppTurnResult) {
-        let usage = McpUsage {
-            prompt_tokens: result.prompt_tokens,
-            completion_tokens: result.completion_tokens,
-            total_tokens: result.total_tokens,
-            estimated_input_tokens: result.estimated_input_tokens,
-        };
+        let usage = McpUsage::from_turn_result(&result);
         self.complete(
             operation_id,
             result.visible_reply,
@@ -1002,17 +1015,13 @@ async fn start_mcp_agent_operation(
 }
 
 fn turn_output(session_id: String, created: bool, result: AppTurnResult) -> McpTurnOutput {
+    let usage = McpUsage::from_turn_result(&result);
     McpTurnOutput {
         session_id,
         created,
         reply: result.visible_reply,
         outcome: result.outcome.as_tag().to_string(),
-        usage: McpUsage {
-            prompt_tokens: result.prompt_tokens,
-            completion_tokens: result.completion_tokens,
-            total_tokens: result.total_tokens,
-            estimated_input_tokens: result.estimated_input_tokens,
-        },
+        usage,
     }
 }
 

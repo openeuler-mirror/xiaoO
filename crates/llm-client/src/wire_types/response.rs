@@ -46,6 +46,8 @@ pub(crate) struct WireUsage {
     pub total_tokens: u32,
     #[serde(default)]
     pub prompt_tokens_details: Option<WirePromptTokensDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<WireCompletionTokensDetails>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,6 +56,13 @@ pub(crate) struct WirePromptTokensDetails {
     pub cached_tokens: u32,
     #[serde(default)]
     pub cache_write_tokens: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct WireCompletionTokensDetails {
+    /// Reasoning tokens; a subset of `completion_tokens` per OpenAI semantics.
+    #[serde(default)]
+    pub reasoning_tokens: u32,
 }
 
 #[cfg(test)]

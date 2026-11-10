@@ -1,4 +1,4 @@
-use crate::wire_types::WireToolChoice;
+use crate::wire_types::{WireCompletionTokensDetails, WireToolChoice, WireUsage};
 use agent_types::{LlmRequest, ReasoningEffort, Tool};
 
 use super::types::*;
@@ -287,6 +287,34 @@ pub(crate) fn extract_gemini_tool_call_deltas(
         None
     } else {
         Some(deltas)
+    }
+}
+
+/// Normalizes Gemini usage counts into the OpenAI-compatible wire shape
+/// assumed by the rest of the pipeline.
+///
+/// Gemini reports visible output (`candidatesTokenCount`) and thinking
+/// (`thoughtsTokenCount`) as disjoint counts, with
+/// `totalTokenCount ≈ prompt + candidates + thoughts`. The internal
+/// contract instead requires `completion_tokens` to INCLUDE reasoning
+/// tokens (OpenAI semantics), so thoughts are folded into completion and
+/// carried separately in the details; otherwise downstream
+/// `visible = completion - reasoning` accounting would subtract thinking
+/// tokens that were never part of the candidate count.
+pub(crate) fn gemini_usage_to_wire(u: &GeminiUsageMetadata) -> WireUsage {
+    let candidates = u.candidates_token_count.unwrap_or(0);
+    let thoughts = u.thoughts_token_count.unwrap_or(0);
+    let prompt = u.prompt_token_count.unwrap_or(0);
+    WireUsage {
+        prompt_tokens: prompt,
+        completion_tokens: candidates.saturating_add(thoughts),
+        total_tokens: u
+            .total_token_count
+            .unwrap_or_else(|| prompt.saturating_add(candidates).saturating_add(thoughts)),
+        prompt_tokens_details: None,
+        completion_tokens_details: Some(WireCompletionTokensDetails {
+            reasoning_tokens: thoughts,
+        }),
     }
 }
 

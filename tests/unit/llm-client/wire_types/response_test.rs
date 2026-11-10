@@ -51,6 +51,7 @@ fn wire_response_serializes_warnings_only_when_present() {
             completion_tokens: 5,
             total_tokens: 15,
             prompt_tokens_details: None,
+            completion_tokens_details: None,
         },
         warnings: Some(vec![Warning::new(
             "response_format",
@@ -77,6 +78,7 @@ fn wire_response_serializes_warnings_only_when_present() {
             completion_tokens: 5,
             total_tokens: 15,
             prompt_tokens_details: None,
+            completion_tokens_details: None,
         },
         warnings: None,
         kv_transfer_params: None,

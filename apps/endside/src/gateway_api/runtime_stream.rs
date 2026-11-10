@@ -234,6 +234,7 @@ impl GatewayRuntime {
                 SessionTurnUpdate::Done {
                     prompt_tokens,
                     completion_tokens,
+                    reasoning_tokens,
                     total_tokens,
                     cached_tokens: _,
                     estimated_input_tokens,
@@ -242,6 +243,7 @@ impl GatewayRuntime {
                     self.pending_stream_done = Some(PendingStreamDone {
                         prompt_tokens,
                         completion_tokens,
+                        reasoning_tokens,
                         total_tokens,
                         estimated_input_tokens,
                         messages,
@@ -353,7 +355,7 @@ impl GatewayRuntime {
                 message.set_content("[Cancelled]");
             }
         }
-        state.status_panel.update_metrics(0, 0, 0, 0, false);
+        state.status_panel.update_metrics(0, 0, 0, 0, 0, false);
     }
 
     fn stream_message_mut<'a>(
@@ -485,7 +487,7 @@ impl GatewayRuntime {
         self.stream_message_index = None;
         self.interaction_reply_tx = None;
         self.first_token_latency_recorded = false;
-        state.status_panel.update_metrics(0, 0, 0, 0, false);
+        state.status_panel.update_metrics(0, 0, 0, 0, 0, false);
     }
 
     fn insert_aux_message(&mut self, state: &mut AppState, message: Message) {
@@ -958,6 +960,7 @@ impl GatewayRuntime {
             state.status_panel.update_metrics(
                 done.prompt_tokens,
                 done.completion_tokens,
+                done.reasoning_tokens,
                 state.status_panel.last_latency_ms,
                 input_context_tokens,
                 input_context_tokens_estimated,

@@ -48,7 +48,7 @@ const GLOBAL_NOISE_KEYS = new Set(['name', 'trace_id', 'parent_span_id']);
 const DEDICATED_DETAIL_KEYS = {
     'THINK': ['input_preview', 'effective_request', 'output_preview', 'final_response'],
     'TOOL': ['tool_name', 'input', 'effective_input', 'output', 'final_output', 'stdout', 'stderr', 'success', 'result_kind'],
-    'TURN': ['turn_number', 'agent_id', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'has_tool_calls', 'stop_reason', 'outcome'],
+    'TURN': ['turn_number', 'agent_id', 'prompt_tokens', 'completion_tokens', 'reasoning_tokens', 'total_tokens', 'has_tool_calls', 'stop_reason', 'outcome'],
     'COMPRESSION': ['turn_number', 'agent_id', 'message_count', 'estimated_tokens', 'available_tokens', 'usage_ratio', 'severity', 'needs_compression', 'skipped', 'messages_before', 'messages_after', 'removed_count', 'has_summary', 'estimated_tokens_after', 'error', 'outcome'],
     'PROMPT_BUILD': ['turn_number', 'agent_id', 'message_count', 'visible_tool_count', 'skill_count', 'has_system_prompt', 'estimated_input_tokens', 'request_message_count', 'error', 'outcome'],
     'HOOK': ['hook_kind', 'hooker_id', 'hook_point', 'tool_name', 'call_id', 'result', 'error', 'outcome'],
@@ -299,6 +299,7 @@ function renderLlmResponseHtml(val) {
     if (stopReason) stats.push(`<span class="px-2 py-0.5 rounded text-xs font-semibold ${stopCls}">${escapeHtml(stopReason)}</span>`);
     if (usage.prompt_tokens != null) stats.push(`<span class="text-xs text-gray-500">↑ ${usage.prompt_tokens} prompt</span>`);
     if (usage.completion_tokens != null) stats.push(`<span class="text-xs text-gray-500">↓ ${usage.completion_tokens} completion</span>`);
+    if (usage.reasoning_tokens != null && usage.reasoning_tokens > 0) stats.push(`<span class="text-xs text-gray-500">${usage.reasoning_tokens} reasoning</span>`);
     if (usage.total_tokens != null) stats.push(`<span class="text-xs text-gray-600 font-semibold">= ${usage.total_tokens} total</span>`);
     if (stats.length) parts.push(`<div class="flex flex-wrap items-center gap-2 mb-2">${stats.join('')}</div>`);
 
@@ -792,6 +793,7 @@ async function showSpanDetailsInline(spanId) {
                 { label: 'Stop Reason', value: e.stop_reason },
                 { label: '↑ Prompt Tokens', value: e.prompt_tokens },
                 { label: '↓ Completion Tokens', value: e.completion_tokens },
+                { label: 'Reasoning Tokens', value: e.reasoning_tokens },
                 { label: '= Total Tokens', value: e.total_tokens },
                 { label: 'Has Tool Calls', value: e.has_tool_calls != null ? String(e.has_tool_calls) : undefined },
             ])}</div>`;

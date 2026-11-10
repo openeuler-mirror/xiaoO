@@ -1684,6 +1684,7 @@ fn terminal_from_outcome(
             messages,
             prompt_tokens: loop_state.last_token_usage.prompt_tokens as u64,
             completion_tokens: loop_state.last_token_usage.completion_tokens as u64,
+            reasoning_tokens: loop_state.last_token_usage.reasoning_tokens as u64,
             total_tokens: loop_state.last_token_usage.total_tokens as u64,
             cached_tokens: loop_state.last_token_usage.cached_tokens as u64,
             estimated_input_tokens: estimated_input_tokens as u64,

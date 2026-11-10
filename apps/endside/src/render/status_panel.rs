@@ -30,7 +30,10 @@ pub struct StatusPanel {
     pub backend_display: String,
     pub total_tokens: u64,
     pub prompt_tokens: u64,
+    /// Visible output tokens (provider completion minus reasoning).
     pub completion_tokens: u64,
+    /// Reasoning/thinking tokens accumulated alongside visible output.
+    pub reasoning_tokens: u64,
     pub last_latency_ms: u64,
     pub is_connected: bool,
     pub input_context_tokens: u64,
@@ -48,6 +51,7 @@ impl Default for StatusPanel {
             total_tokens: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            reasoning_tokens: 0,
             last_latency_ms: 0,
             is_connected: false,
             input_context_tokens: 0,
@@ -81,10 +85,14 @@ impl StatusPanel {
         self.backend_display = backend.into();
     }
 
+    /// Accumulate per-turn usage. `completion_tokens` is the VISIBLE output
+    /// (provider completion minus reasoning); `reasoning_tokens` is tracked
+    /// separately so `total_tokens` still sums to the provider total.
     pub fn update_metrics(
         &mut self,
         prompt_tokens: u64,
         completion_tokens: u64,
+        reasoning_tokens: u64,
         latency_ms: u64,
         input_context_tokens: u64,
         input_context_tokens_estimated: bool,
@@ -93,9 +101,12 @@ impl StatusPanel {
         self.input_context_tokens_estimated = input_context_tokens_estimated;
         self.prompt_tokens = self.prompt_tokens.saturating_add(prompt_tokens);
         self.completion_tokens = self.completion_tokens.saturating_add(completion_tokens);
-        self.total_tokens = self
-            .total_tokens
-            .saturating_add(prompt_tokens.saturating_add(completion_tokens));
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(reasoning_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(
+            prompt_tokens
+                .saturating_add(completion_tokens)
+                .saturating_add(reasoning_tokens),
+        );
         self.last_latency_ms = latency_ms;
     }
 

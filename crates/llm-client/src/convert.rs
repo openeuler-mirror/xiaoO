@@ -251,6 +251,7 @@ pub(crate) fn wire_response_to_llm_response(wire: &WireResponse) -> LlmResponse 
                 cache_write_tokens: 0,
                 prompt_tokens: 0,
                 completion_tokens: 0,
+                reasoning_tokens: 0,
                 total_tokens: 0,
                 cached_tokens: 0,
             },
@@ -305,6 +306,7 @@ pub(crate) fn wire_choice_to_assistant_message(choice: &WireChoice) -> Assistant
             cache_write_tokens: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            reasoning_tokens: 0,
             total_tokens: 0,
             cached_tokens: 0,
         },
@@ -313,6 +315,15 @@ pub(crate) fn wire_choice_to_assistant_message(choice: &WireChoice) -> Assistant
 }
 
 pub(crate) fn wire_usage_to_usage(wire: &WireUsage) -> Usage {
+    // Per OpenAI semantics `completion_tokens` includes reasoning tokens;
+    // `reasoning_tokens` is carried separately (clamped defensively against
+    // providers reporting a breakdown larger than the total).
+    let reasoning_tokens = wire
+        .completion_tokens_details
+        .as_ref()
+        .map(|d| d.reasoning_tokens as usize)
+        .unwrap_or(0)
+        .min(wire.completion_tokens as usize);
     Usage {
         cache_write_tokens: wire
             .prompt_tokens_details
@@ -321,6 +332,7 @@ pub(crate) fn wire_usage_to_usage(wire: &WireUsage) -> Usage {
             .unwrap_or(0),
         prompt_tokens: wire.prompt_tokens as usize,
         completion_tokens: wire.completion_tokens as usize,
+        reasoning_tokens,
         total_tokens: wire.total_tokens as usize,
         cached_tokens: wire
             .prompt_tokens_details

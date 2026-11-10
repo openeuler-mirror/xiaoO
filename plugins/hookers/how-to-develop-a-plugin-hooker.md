@@ -889,7 +889,7 @@ The `*.Llm.*` family wraps a single LLM request/response round-trip: `pre` (befo
     "message": {
       "text": "…",
       "tool_calls": [ { "call_id": "…", "tool_name": "bash", "input": { ... } } ],
-      "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cached_tokens": 0 },
+      "usage": { "prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0, "total_tokens": 0, "cached_tokens": 0 },
       "stop_reason": "end_turn"
     }
   }

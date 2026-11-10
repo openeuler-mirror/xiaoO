@@ -12,6 +12,7 @@ fn parsed_chunk_holds_content_finish_reason_and_usage() {
         completion_tokens: 5,
         total_tokens: 15,
         prompt_tokens_details: None,
+        completion_tokens_details: None,
     };
     let chunk = ParsedChunk {
         content: Some("Hello".to_string()),

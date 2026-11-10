@@ -711,16 +711,18 @@ fn json_response(
     model: &str,
     duration_ms: u64,
 ) -> Value {
-    let counts = |input, output, total, read, write| {
+    let counts = |input, output, reasoning, total, read, write| {
         serde_json::json!({
-            "input_tokens": input, "output_tokens": output, "total_tokens": total,
+            "input_tokens": input, "output_tokens": output, "reasoning_tokens": reasoning,
+            "total_tokens": total,
             "cache_read_tokens": read, "cache_write_tokens": write,
         })
     };
     let usage = &result.total_token_usage;
     let total = counts(
         usage.prompt_tokens as u64,
-        usage.completion_tokens as u64,
+        usage.visible_completion_tokens() as u64,
+        usage.reasoning_tokens as u64,
         usage.total_tokens as u64,
         usage.cached_tokens as u64,
         usage.cache_write_tokens as u64,
@@ -728,7 +730,8 @@ fn json_response(
     let last = &result.last_token_usage;
     let last = counts(
         last.prompt_tokens as u64,
-        last.completion_tokens as u64,
+        last.visible_completion_tokens() as u64,
+        last.reasoning_tokens as u64,
         last.total_tokens as u64,
         last.cached_tokens as u64,
         last.cache_write_tokens as u64,
@@ -740,7 +743,8 @@ fn json_response(
             "session_id": session_id,
             "usage": {
                 "input_tokens": usage.prompt_tokens,
-                "output_tokens": usage.completion_tokens,
+                "output_tokens": usage.visible_completion_tokens(),
+                "reasoning_tokens": usage.reasoning_tokens,
                 "total_tokens": usage.total_tokens,
                 "cache_read_tokens": usage.cached_tokens,
                 "cache_write_tokens": usage.cache_write_tokens,

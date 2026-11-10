@@ -100,6 +100,7 @@ mod wrapper_tests {
                     cache_write_tokens: 0,
                     prompt_tokens: 10,
                     completion_tokens: 5,
+                    reasoning_tokens: 0,
                     total_tokens: 15,
                     cached_tokens: 0,
                 },

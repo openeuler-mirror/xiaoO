@@ -63,6 +63,7 @@ fn make_response() -> LlmResponse {
                 cache_write_tokens: 0,
                 prompt_tokens: 1,
                 completion_tokens: 1,
+                reasoning_tokens: 0,
                 total_tokens: 2,
                 cached_tokens: 0,
             },

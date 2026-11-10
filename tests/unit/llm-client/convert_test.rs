@@ -130,6 +130,7 @@ fn wire_response_to_llm_response_maps_message_and_stop_reason() {
             completion_tokens: 5,
             total_tokens: 15,
             prompt_tokens_details: None,
+            completion_tokens_details: None,
         },
         warnings: None,
         kv_transfer_params: None,

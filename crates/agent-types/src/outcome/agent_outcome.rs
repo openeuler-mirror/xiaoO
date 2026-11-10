@@ -14,6 +14,10 @@ pub struct TokenUsage {
     /// Prompt tokens written to the provider cache (zero when unreported).
     #[serde(default)]
     pub cache_write_tokens: usize,
+    /// Reasoning/thinking tokens; a subset of `completion_tokens`
+    /// (zero when the provider does not report a breakdown).
+    #[serde(default)]
+    pub reasoning_tokens: usize,
 }
 
 impl TokenUsage {
@@ -28,6 +32,13 @@ impl TokenUsage {
         self.cache_write_tokens = self
             .cache_write_tokens
             .saturating_add(usage.cache_write_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
+    }
+
+    /// Visible output tokens under opencode accounting: provider
+    /// `completion_tokens` minus `reasoning_tokens`.
+    pub fn visible_completion_tokens(&self) -> usize {
+        self.completion_tokens.saturating_sub(self.reasoning_tokens)
     }
 }
 

@@ -143,7 +143,13 @@ pub enum RuntimeSseEvent {
         turn_count: u32,
         total_tokens: usize,
         prompt_tokens: u64,
+        /// Visible output tokens: provider `completion_tokens` minus
+        /// `reasoning_tokens` (opencode `tokens_output` semantics).
         completion_tokens: u64,
+        /// Reasoning/thinking tokens (zero when unreported by the provider).
+        #[serde(default)]
+        #[serde(skip_serializing_if = "is_zero")]
+        reasoning_tokens: u64,
         #[serde(default)]
         #[serde(skip_serializing_if = "is_zero")]
         cached_tokens: u64,

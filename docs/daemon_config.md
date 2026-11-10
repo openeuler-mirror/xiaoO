@@ -1028,7 +1028,7 @@ All events are tagged with `type` and emit a matching SSE `event:` name. `agent_
 | `subagent_spawn` | `agent_id`, `parent_agent_id`, `title`, `description`, `task_goal` | Subagent swimlane metadata parsed from `spawn_subagent` arguments |
 | `loop_end` | `agent_id`, `turn_count`, `total_tokens`, `stop_reason` | Per-agent loop finished |
 | `interaction_requested` | `request` | Emitted when the daemon needs a user confirmation/input/choice |
-| `done` | `reply`, `raw_reply`, `conversation_id`, `runtime_id`, `turn_count`, `total_tokens`, `prompt_tokens`, `completion_tokens`, `estimated_input_tokens`, `messages`, `stop_reason` | Emitted when the agent loop finishes |
+| `done` | `reply`, `raw_reply`, `conversation_id`, `runtime_id`, `turn_count`, `total_tokens`, `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `estimated_input_tokens`, `messages`, `stop_reason` | Emitted when the agent loop finishes |
 | `error` | `error` | Emitted on failure |
 | `cancelled` | `runtime_id` | Emitted as cancellation acknowledgement |
 
@@ -1043,6 +1043,12 @@ the `args_preview` addition on `tool_result` are defined in the same
 > The `done` and `cancelled` events serialize the runtime handle as `runtime_id`
 > in the JSON body even though the internal field is `session_id`; this is the
 > public vocabulary used by `RuntimeRecord`.
+
+> The `done` event's `completion_tokens` counts VISIBLE output only (opencode
+> `tokens_output` semantics): reasoning/thinking tokens are reported separately
+> in `reasoning_tokens` and included in `total_tokens`. Providers that report no
+> reasoning breakdown (Anthropic, Ollama) fold thinking into `completion_tokens`
+> with `reasoning_tokens` zero.
 
 **Common Error Responses:**
 

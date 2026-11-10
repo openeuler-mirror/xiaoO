@@ -54,7 +54,14 @@ pub struct AppTurnResult {
     /// Latest request; legacy flat fields below retain their context-window semantics.
     pub last_token_usage: agent_types::outcome::TokenUsage,
     pub prompt_tokens: u64,
+    /// Provider completion tokens for the latest request — INCLUDES
+    /// reasoning tokens (OpenAI `completion_tokens` semantics). External
+    /// surfaces that follow opencode accounting subtract `reasoning_tokens`
+    /// to report visible output.
     pub completion_tokens: u64,
+    /// Reasoning/thinking tokens for the latest request; a subset of
+    /// `completion_tokens` (zero when the provider reports no breakdown).
+    pub reasoning_tokens: u64,
     pub total_tokens: u64,
     pub cached_tokens: u64,
     /// Prompt tokens written to the provider cache (zero when unreported).
@@ -68,4 +75,12 @@ pub struct AppTurnResult {
     /// it can switch session focus / sync titles. CLI and channel callers
     /// currently ignore this field.
     pub hook_actions: Vec<agent_types::hook::HookAction>,
+}
+
+impl AppTurnResult {
+    /// Visible output tokens for the latest request under opencode
+    /// accounting: provider `completion_tokens` minus `reasoning_tokens`.
+    pub fn visible_completion_tokens(&self) -> u64 {
+        self.completion_tokens.saturating_sub(self.reasoning_tokens)
+    }
 }
