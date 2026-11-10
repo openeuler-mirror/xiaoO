@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AgentMoss 版本（单一定义，多处使用）
 # 0.10.3 起 health 带 instance 字段，配合本脚本注入 AGENT_MOSS_INSTANCE=xiaoo
 # 实现多实例探测过滤（避免漂移到其他agent的agentmoss）。
-AM_VERSION="0.17.20"
+AM_VERSION="0.17.21"
 
 # 探测端口窗口与 instance 归属过滤的共享定义（含 AM_INSTANCE）。
 # 本脚本全部探测与 build.sh 的 console URL 探测共用 find_instance_port，
@@ -184,31 +184,61 @@ fi
 PIP_ENV=()
 if [ ${#PIP_FWD[@]} -gt 0 ]; then PIP_ENV=(env "${PIP_FWD[@]}"); fi
 
+# pip 安装（先按配置的源；失败自动回退官方 PyPI 重试）。
+# 镜像站对新版本有同步延迟（2026-11 实测：0.17.21 发布后华为源仍缺该版本），
+# 回退能避免「新版本装不到 → 升级失败」。
+pip_install_safe() {
+    if $SUDO "${PIP_ENV[@]}" "$VENV_DIR/bin/pip" install --disable-pip-version-check "$@" 2>&1; then
+        return 0
+    fi
+    echo "⚠️  当前 pip 源安装失败，自动回退官方 PyPI 重试..."
+    if $SUDO env PIP_INDEX_URL=https://pypi.org/simple/ \
+        "$VENV_DIR/bin/pip" install --disable-pip-version-check "$@" 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
 # 步骤 1：创建 venv + 安装 agent-moss 包
 echo ""
 echo "步骤 1/5：创建 venv 并安装 agent-moss..."
 
 VENV_VALID=false
+# 记录「本次安装是否发生了实质变更」——没有变更就不重启服务（避免每次构建都闪断）。
+MOSS_NEEDS_RESTART=false
 if [ -d "$VENV_DIR" ] && [ -x "$VENV_DIR/bin/python3" ]; then
     echo "检测到已存在的 venv，正在验证其有效性..."
-    INSTALLED_VER=$("$VENV_DIR/bin/python3" -c "from agent_moss import __version__; print(__version__)" 2>/dev/null || echo "")
+    # 读**发行元数据**而不是 `from agent_moss import __version__`：
+    # 2026-11 事故：0.17.20 的 wheel 元数据是 0.17.20 但包内 __version__.py 仍是
+    # 0.17.19，两个源不一致导致「判定要升级 → pip 说已满足」无限循环。
+    # importlib.metadata 是 pip 安装结果的事实源，-I 同时隔离 PYTHONPATH/用户站点。
+    INSTALLED_VER=$("$VENV_DIR/bin/python3" -I -c "from importlib.metadata import version; print(version('agent-moss'))" 2>/dev/null || echo "")
     if [ -n "$INSTALLED_VER" ]; then
         if [ "$INSTALLED_VER" = "$AM_VERSION" ]; then
             echo "venv 有效，agent-moss ${INSTALLED_VER} 已安装，跳过重新创建"
             VENV_VALID=true
         else
-            echo "venv 中 agent-moss 版本为 ${INSTALLED_VER}，升级到 ${AM_VERSION}..."
-            if $SUDO "${PIP_ENV[@]}" "$VENV_DIR/bin/pip" install --upgrade agent-moss=="${AM_VERSION}" 2>&1; then
-                VENV_VALID=true
+            if pip_install_safe --upgrade --quiet agent-moss=="${AM_VERSION}"; then
+                # pip 成功后按元数据复核：确认真的换上了
+                INSTALLED_VER=$("$VENV_DIR/bin/python3" -I -c "from importlib.metadata import version; print(version('agent-moss'))" 2>/dev/null || echo "")
+                if [ "$INSTALLED_VER" = "$AM_VERSION" ]; then
+                    echo "✅ agent-moss 已升级到 ${AM_VERSION}"
+                    MOSS_NEEDS_RESTART=true
+                else
+                    echo "⚠️ 升级后版本仍为 ${INSTALLED_VER}（继续使用现版本）"
+                fi
             else
-                echo "⚠️ 升级失败，将重建 venv"
+                # 不删 venv：源暂时不可达时保留可用环境，比"删掉再装失败"安全
+                echo "⚠️ 升级失败，继续使用已安装的 ${INSTALLED_VER}；请检查网络/镜像源后重试"
             fi
+            VENV_VALID=true
         fi
     else
         echo "venv 中 agent-moss 模块导入失败，尝试重新安装..."
-        if $SUDO "${PIP_ENV[@]}" "$VENV_DIR/bin/pip" install --force-reinstall agent-moss=="${AM_VERSION}" 2>&1; then
+        if pip_install_safe --force-reinstall agent-moss=="${AM_VERSION}"; then
             echo "✅ 重新安装成功"
             VENV_VALID=true
+            MOSS_NEEDS_RESTART=true
         else
             echo "⚠️ 重新安装失败，将重建 venv"
         fi
@@ -224,7 +254,7 @@ if [ "$VENV_VALID" = false ]; then
     $SUDO mkdir -p "$(dirname "$VENV_DIR")"
     $SUDO python3 -m venv "$VENV_DIR"
     echo "安装 agent-moss==${AM_VERSION}（首次安装会下载依赖，可能需要几分钟）..."
-    $SUDO "${PIP_ENV[@]}" "$VENV_DIR/bin/pip" install agent-moss=="${AM_VERSION}" 2>&1 || {
+    pip_install_safe agent-moss=="${AM_VERSION}" || {
         echo "❌ pip install 失败"
         echo "   慢网/内网环境请先设镜像再重跑："
         echo "   export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/"
@@ -294,6 +324,8 @@ echo "步骤 3/5：安装 systemd service..."
 # nohup 模式：下方 export 让进程继承。两种模式都覆盖。
 if [ "$USE_SYSTEMD" = true ]; then
     sudo mkdir -p /etc/agent_moss
+    # 记录 env 指纹：内容变了才需要重启服务（避免每次安装都闪断）
+    _ENV_SUM_BEFORE=$(sudo sha256sum /etc/agent_moss/agent_moss.env 2>/dev/null | cut -d' ' -f1 || true)
     # 日志白名单：AgentMoss 0.17.0 起校验 llm_log_path，root 服务默认只允许
     # /root + /tmp。systemd 模式下服务是 root、bridge 是当前用户，日志必然落在
     # 当前用户家目录 → 必须显式授权。
@@ -320,6 +352,10 @@ if [ "$USE_SYSTEMD" = true ]; then
         echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee /etc/agent_moss/agent_moss.env > /dev/null
         echo "AGENT_MOSS_AUTH_TOKEN_FILE=${AM_AUTH_TOKEN_FILE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
         echo "AGENT_MOSS_LOG_ROOTS=${_AM_LOG_ROOT}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+    fi
+    _ENV_SUM_AFTER=$(sudo sha256sum /etc/agent_moss/agent_moss.env 2>/dev/null | cut -d' ' -f1 || true)
+    if [ "$_ENV_SUM_BEFORE" != "$_ENV_SUM_AFTER" ]; then
+        MOSS_NEEDS_RESTART=true
     fi
 fi
 export AGENT_MOSS_INSTANCE="${AM_INSTANCE}"
@@ -374,11 +410,15 @@ echo ""
 echo "步骤 4/5：启动 AgentMoss 服务..."
 if [ "$USE_SYSTEMD" = true ] && command -v systemctl &>/dev/null; then
     if sudo systemctl is-active agent-moss &>/dev/null; then
-        echo "✅ AgentMoss 服务已在运行，重启以加载新版本..."
-        sudo systemctl restart agent-moss 2>&1 || {
-            echo "⚠️  重启失败，尝试重新启动..."
-            sudo systemctl start agent-moss 2>&1 || true
-        }
+        if [ "$MOSS_NEEDS_RESTART" = true ]; then
+            echo "检测到版本/配置变更，重启 AgentMoss 加载新版本..."
+            sudo systemctl restart agent-moss 2>&1 || {
+                echo "⚠️  重启失败，尝试重新启动..."
+                sudo systemctl start agent-moss 2>&1 || true
+            }
+        else
+            echo "✅ AgentMoss 服务运行中，版本与配置未变，跳过重启"
+        fi
     else
         echo "正在通过 systemctl 启动..."
         if sudo systemctl start agent-moss 2>&1; then
