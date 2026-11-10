@@ -30,6 +30,10 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]
     [ -n "$_AM_RUN_HOME" ] || _AM_RUN_HOME="$HOME"
 fi
 AM_AUTH_TOKEN_FILE="${_AM_RUN_HOME}/.config/agentmoss/xiaoo_token"
+# AgentMoss 0.17.22 起 root 启动不再猜测「真实用户」，数据目录固定为当前用户的
+# ~/.config/agentmoss（root 下即 /root）。这里显式指定数据目录，保证 sudo/systemd
+# 安装时 config/runtime/token 仍落在安装用户目录，与升级前行为一致。
+AM_DATA_DIR="${_AM_RUN_HOME}/.config/agentmoss"
 mkdir -p "$(dirname "${AM_AUTH_TOKEN_FILE}")" 2>/dev/null || true
 if [ ! -s "${AM_AUTH_TOKEN_FILE}" ]; then
     ( umask 077
@@ -339,6 +343,8 @@ if [ "$USE_SYSTEMD" = true ]; then
         echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
         sudo sed -i '/^AGENT_MOSS_AUTH_TOKEN_FILE=/d' /etc/agent_moss/agent_moss.env
         echo "AGENT_MOSS_AUTH_TOKEN_FILE=${AM_AUTH_TOKEN_FILE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+        sudo sed -i '/^AGENT_MOSS_DATA_DIR=/d' /etc/agent_moss/agent_moss.env
+        echo "AGENT_MOSS_DATA_DIR=${AM_DATA_DIR}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
         _AM_OLD_ROOTS=$(sudo sed -n 's/^AGENT_MOSS_LOG_ROOTS=//p' /etc/agent_moss/agent_moss.env 2>/dev/null || true)
         case ",${_AM_OLD_ROOTS}," in
             *",${_AM_LOG_ROOT},"*) ;;  # 已授权，跳过
@@ -351,6 +357,7 @@ if [ "$USE_SYSTEMD" = true ]; then
     else
         echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee /etc/agent_moss/agent_moss.env > /dev/null
         echo "AGENT_MOSS_AUTH_TOKEN_FILE=${AM_AUTH_TOKEN_FILE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+        echo "AGENT_MOSS_DATA_DIR=${AM_DATA_DIR}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
         echo "AGENT_MOSS_LOG_ROOTS=${_AM_LOG_ROOT}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
     fi
     _ENV_SUM_AFTER=$(sudo sha256sum /etc/agent_moss/agent_moss.env 2>/dev/null | cut -d' ' -f1 || true)
@@ -360,6 +367,7 @@ if [ "$USE_SYSTEMD" = true ]; then
 fi
 export AGENT_MOSS_INSTANCE="${AM_INSTANCE}"
 export AGENT_MOSS_AUTH_TOKEN_FILE="${AM_AUTH_TOKEN_FILE}"
+export AGENT_MOSS_DATA_DIR="${AM_DATA_DIR}"
 if [ "$USE_SYSTEMD" = true ] && command -v systemctl &>/dev/null; then
     echo "正在安装 systemd service（${AM_BIN}）..."
     # 必须用 if 包裹：本脚本 set -e，裸执行失败会直接终止，走不到
