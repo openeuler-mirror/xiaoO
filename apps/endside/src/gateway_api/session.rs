@@ -104,7 +104,10 @@ pub enum SessionTurnUpdate {
     MemoryStatus(MemoryStatus),
     Done {
         prompt_tokens: u64,
+        /// Visible output tokens (provider completion minus reasoning).
         completion_tokens: u64,
+        /// Reasoning/thinking tokens (zero when unreported).
+        reasoning_tokens: u64,
         total_tokens: u64,
         #[allow(dead_code)]
         cached_tokens: u64,

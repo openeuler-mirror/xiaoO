@@ -570,6 +570,7 @@ impl AnthropicProvider {
                                 as u32,
                         },
                     ),
+                    completion_tokens_details: None,
                 });
                 Ok(Some(ParsedChunk {
                     content: None,
@@ -641,6 +642,7 @@ impl AnthropicProvider {
                     completion_tokens: t,
                     total_tokens: t,
                     prompt_tokens_details: None,
+                    completion_tokens_details: None,
                 });
                 Ok(Some(ParsedChunk {
                     content: None,
@@ -666,6 +668,9 @@ fn anthropic_usage(value: &serde_json::Value) -> Usage {
     Usage {
         prompt_tokens,
         completion_tokens,
+        // Anthropic's `output_tokens` includes thinking tokens but the API
+        // reports no breakdown, so reasoning stays zero here.
+        reasoning_tokens: 0,
         total_tokens: prompt_tokens + completion_tokens,
         cached_tokens,
         cache_write_tokens,
@@ -678,6 +683,7 @@ fn merge_usage(existing: Option<Usage>, incoming: Usage) -> Usage {
     merged.completion_tokens = merged.completion_tokens.max(incoming.completion_tokens);
     merged.cached_tokens = merged.cached_tokens.max(incoming.cached_tokens);
     merged.cache_write_tokens = merged.cache_write_tokens.max(incoming.cache_write_tokens);
+    merged.reasoning_tokens = merged.reasoning_tokens.max(incoming.reasoning_tokens);
     merged.total_tokens = merged.prompt_tokens + merged.completion_tokens;
     merged
 }

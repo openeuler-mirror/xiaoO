@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use crate::gateway::{
-    AppBootstrap, AppDependencies, AppTurnRequest, AppTurnResult, HostedSessionRuntimeConfig,
+    AppBootstrap, AppDependencies, AppTurnRequest, HostedSessionRuntimeConfig,
     HostedSessionRuntimeResolver, McpMemoryAutomation, MemoryAutomationHealth, ReaperPolicy,
     SessionControlPlane, SessionOpenRequest, SessionRecord, SessionRuntimeBindings, SessionStore,
 };
@@ -260,23 +260,17 @@ impl SessionGateway {
                 ));
             }
             match result {
-                Ok(AppTurnResult {
-                    messages,
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens,
-                    estimated_input_tokens,
-                    hook_actions,
-                    ..
-                }) => {
-                    let total_tokens = if total_tokens == 0 {
+                Ok(result) => {
+                    // Computed before `hook_actions`/`messages` are moved below.
+                    let visible_completion_tokens = result.visible_completion_tokens();
+                    let total_tokens = if result.total_tokens == 0 {
                         loop_summary
                             .lock()
                             .ok()
                             .and_then(|summary| summary.as_ref().map(|value| value.total_tokens))
                             .unwrap_or(0) as u64
                     } else {
-                        total_tokens
+                        result.total_tokens
                     };
                     // Send HookActions BEFORE Done so the TUI's receive
                     // loop (which exits on `Done` by setting
@@ -293,19 +287,23 @@ impl SessionGateway {
                     // in local mode, so create_session/switch_session are
                     // no-ops (logged via tracing::warn!). This matches
                     // the documented contract that create/switch actions
-                    // only take effect in remote (daemon) mode, where
-                    // the HTTP router runs `DaemonHookActionSink` between
+                    // only take effect in remote (daemon) mode, where the
+                    // HTTP router runs `DaemonHookActionSink` between
                     // `run_turn` and the SSE `Done` event.
-                    if !hook_actions.is_empty() {
-                        let _ = updates_tx.send(SessionTurnUpdate::HookActions(hook_actions));
+                    if !result.hook_actions.is_empty() {
+                        let _ =
+                            updates_tx.send(SessionTurnUpdate::HookActions(result.hook_actions));
                     }
                     let _ = updates_tx.send(SessionTurnUpdate::Done {
-                        prompt_tokens,
-                        completion_tokens,
+                        prompt_tokens: result.prompt_tokens,
+                        // opencode accounting: visible output only;
+                        // reasoning tokens are reported separately.
+                        completion_tokens: visible_completion_tokens,
+                        reasoning_tokens: result.reasoning_tokens,
                         total_tokens,
                         cached_tokens: 0,
-                        estimated_input_tokens,
-                        messages,
+                        estimated_input_tokens: result.estimated_input_tokens,
+                        messages: result.messages,
                     });
                 }
                 Err(error) => {

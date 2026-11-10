@@ -134,4 +134,13 @@ pub(crate) struct GeminiUsageMetadata {
     pub prompt_token_count: Option<u32>,
     #[serde(default, rename = "candidatesTokenCount")]
     pub candidates_token_count: Option<u32>,
+    /// Thinking tokens; reported by Gemini as a count DISJOINT from
+    /// `candidatesTokenCount` (visible output only), i.e.
+    /// `totalTokenCount ≈ prompt + candidates + thoughts`.
+    #[serde(default, rename = "thoughtsTokenCount")]
+    pub thoughts_token_count: Option<u32>,
+    /// Vendor total; prefer it over recomputing the sum so billing stays
+    /// consistent with the provider's own accounting.
+    #[serde(default, rename = "totalTokenCount")]
+    pub total_token_count: Option<u32>,
 }

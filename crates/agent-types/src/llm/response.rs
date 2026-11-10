@@ -17,6 +17,10 @@ pub struct Usage {
     /// Prompt tokens written to the provider cache (zero when unreported).
     #[serde(default)]
     pub cache_write_tokens: usize,
+    /// Reasoning/thinking tokens; a subset of `completion_tokens`
+    /// (zero when the provider does not report a breakdown).
+    #[serde(default)]
+    pub reasoning_tokens: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

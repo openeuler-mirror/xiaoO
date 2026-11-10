@@ -23,6 +23,7 @@ fn mock_turn_result() -> AppTurnResult {
         messages: Vec::new(),
         prompt_tokens: 3,
         completion_tokens: 2,
+        reasoning_tokens: 1,
         total_tokens: 5,
         cached_tokens: 0,
         estimated_input_tokens: 3,

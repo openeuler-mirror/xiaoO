@@ -515,17 +515,24 @@ async fn update_turn_span_after_llm(ctx: &mut LoopContext<'_>) {
     let Some(span) = ctx.turn.turn_span.as_ref() else {
         return;
     };
-    let (prompt_tokens, completion_tokens, total_tokens, cached_tokens, has_tool_calls) =
-        match ctx.turn.assistant_message.as_ref() {
-            Some(msg) => (
-                msg.usage.prompt_tokens,
-                msg.usage.completion_tokens,
-                msg.usage.total_tokens,
-                msg.usage.cached_tokens,
-                msg.has_tool_calls(),
-            ),
-            None => (0, 0, 0, 0, false),
-        };
+    let (
+        prompt_tokens,
+        completion_tokens,
+        reasoning_tokens,
+        total_tokens,
+        cached_tokens,
+        has_tool_calls,
+    ) = match ctx.turn.assistant_message.as_ref() {
+        Some(msg) => (
+            msg.usage.prompt_tokens,
+            msg.usage.completion_tokens,
+            msg.usage.reasoning_tokens,
+            msg.usage.total_tokens,
+            msg.usage.cached_tokens,
+            msg.has_tool_calls(),
+        ),
+        None => (0, 0, 0, 0, 0, false),
+    };
     runtime_view
         .trace_recorder()
         .update_span(
@@ -533,6 +540,7 @@ async fn update_turn_span_after_llm(ctx: &mut LoopContext<'_>) {
             json!({
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
+                "reasoning_tokens": reasoning_tokens,
                 "total_tokens": total_tokens,
                 "cached_tokens": cached_tokens,
                 "has_tool_calls": has_tool_calls,
@@ -1526,6 +1534,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     ctx.state.last_token_usage = agent_types::outcome::TokenUsage {
         prompt_tokens: response.message.usage.prompt_tokens,
         completion_tokens,
+        reasoning_tokens: response.message.usage.reasoning_tokens,
         total_tokens: response.message.usage.total_tokens,
         cached_tokens: response.message.usage.cached_tokens,
         cache_write_tokens: response.message.usage.cache_write_tokens,

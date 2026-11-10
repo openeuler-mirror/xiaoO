@@ -122,6 +122,7 @@ pub(super) fn response_trace_fields(response: &LlmResponse) -> Value {
         "stop_reason": format!("{:?}", response.message.stop_reason),
         "prompt_tokens": response.message.usage.prompt_tokens,
         "completion_tokens": response.message.usage.completion_tokens,
+        "reasoning_tokens": response.message.usage.reasoning_tokens,
         "total_tokens": response.message.usage.total_tokens,
         "cached_tokens": response.message.usage.cached_tokens,
         "response_has_text": response.message.text.is_some(),

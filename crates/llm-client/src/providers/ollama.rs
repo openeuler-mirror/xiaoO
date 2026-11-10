@@ -270,6 +270,9 @@ fn usage_from_ollama_json(json: &serde_json::Value) -> Usage {
         cache_write_tokens: 0,
         prompt_tokens,
         completion_tokens,
+        // Ollama's `eval_count` includes thinking tokens but reports no
+        // breakdown, so reasoning stays zero here.
+        reasoning_tokens: 0,
         total_tokens: prompt_tokens + completion_tokens,
         cached_tokens: 0,
     }
@@ -305,6 +308,7 @@ fn parse_ollama_stream_line(line: &str) -> Result<Option<ParsedChunk>, LlmError>
                 completion_tokens: usage.completion_tokens as u32,
                 total_tokens: usage.total_tokens as u32,
                 prompt_tokens_details: None,
+                completion_tokens_details: None,
             })
         }
     };

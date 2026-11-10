@@ -3,10 +3,10 @@ use async_trait::async_trait;
 use crate::convert::{parse_tool_arguments, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
 use crate::error::{map_api_status_error, map_reqwest_error_raw as map_reqwest_error, LlmError};
 use crate::providers::stream_utf8::StreamUtf8Decoder;
-use crate::wire_types::{ParsedChunk, WireUsage};
+use crate::wire_types::ParsedChunk;
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{
-    AssistantMessage, LlmRequest, LlmResponse, StopReason, StreamChunk, ToolUseBlock, Usage,
+    AssistantMessage, LlmRequest, LlmResponse, StopReason, StreamChunk, ToolUseBlock,
 };
 
 mod convert;
@@ -14,7 +14,7 @@ mod types;
 
 use convert::{
     build_gemini_request_body, extract_gemini_text, extract_gemini_tool_call_deltas,
-    extract_gemini_tool_calls, normalize_model_name,
+    extract_gemini_tool_calls, gemini_usage_to_wire, normalize_model_name,
 };
 use types::GeminiResponseBody;
 
@@ -120,16 +120,11 @@ impl LlmProvider for GeminiProvider {
                 _ => StopReason::EndTurn,
             };
 
-            let (prompt_tokens, completion_tokens) = gemini_response
+            let usage = gemini_response
                 .usage_metadata
                 .as_ref()
-                .map(|u| {
-                    (
-                        u.prompt_token_count.unwrap_or(0) as usize,
-                        u.candidates_token_count.unwrap_or(0) as usize,
-                    )
-                })
-                .unwrap_or((0, 0));
+                .map(|u| wire_usage_to_usage(&gemini_usage_to_wire(u)))
+                .unwrap_or_default();
 
             let tool_use_blocks: Vec<ToolUseBlock> = tool_calls
                 .unwrap_or_default()
@@ -150,13 +145,7 @@ impl LlmProvider for GeminiProvider {
                     },
                     reasoning_content: None,
                     tool_calls: tool_use_blocks,
-                    usage: Usage {
-                        cache_write_tokens: 0,
-                        prompt_tokens,
-                        completion_tokens,
-                        total_tokens: prompt_tokens + completion_tokens,
-                        cached_tokens: 0,
-                    },
+                    usage,
                     stop_reason,
                 },
                 kv_cache_chunk_hashes: vec![],
@@ -311,13 +300,10 @@ impl LlmProvider for GeminiProvider {
                         };
                     }
 
-                    let usage = gemini_resp.usage_metadata.as_ref().map(|u| WireUsage {
-                        prompt_tokens: u.prompt_token_count.unwrap_or(0),
-                        completion_tokens: u.candidates_token_count.unwrap_or(0),
-                        total_tokens: u.prompt_token_count.unwrap_or(0)
-                            + u.candidates_token_count.unwrap_or(0),
-                        prompt_tokens_details: None,
-                    });
+                    let usage = gemini_resp
+                        .usage_metadata
+                        .as_ref()
+                        .map(gemini_usage_to_wire);
                     if let Some(ref u) = usage {
                         final_usage = Some(wire_usage_to_usage(u));
                     }

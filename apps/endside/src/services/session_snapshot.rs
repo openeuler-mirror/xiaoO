@@ -211,6 +211,8 @@ pub struct SavedStatusMetrics {
     pub total_tokens: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
     pub input_context_tokens: u64,
     pub input_context_tokens_estimated: bool,
     pub last_latency_ms: u64,
@@ -334,6 +336,7 @@ fn build_snapshot(
         total_tokens: state.status_panel.total_tokens,
         prompt_tokens: state.status_panel.prompt_tokens,
         completion_tokens: state.status_panel.completion_tokens,
+        reasoning_tokens: state.status_panel.reasoning_tokens,
         input_context_tokens: state.status_panel.input_context_tokens,
         input_context_tokens_estimated: state.status_panel.input_context_tokens_estimated,
         last_latency_ms: state.status_panel.last_latency_ms,
@@ -808,6 +811,7 @@ pub fn apply_snapshot(
         state.status_panel.total_tokens = metrics.total_tokens;
         state.status_panel.prompt_tokens = metrics.prompt_tokens;
         state.status_panel.completion_tokens = metrics.completion_tokens;
+        state.status_panel.reasoning_tokens = metrics.reasoning_tokens;
         state.status_panel.input_context_tokens = metrics.input_context_tokens;
         state.status_panel.input_context_tokens_estimated = metrics.input_context_tokens_estimated;
         state.status_panel.last_latency_ms = metrics.last_latency_ms;

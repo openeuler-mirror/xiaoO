@@ -1303,6 +1303,8 @@ async fn stream_session_input(
             Ok(result) => {
                 let summary = sink.take_loop_summary();
                 let filtered_messages = filter_messages_for_display(&result.messages);
+                // Computed before `raw_reply`/`hook_actions` are moved below.
+                let visible_completion_tokens = result.visible_completion_tokens();
                 // Execute plugin-requested actions daemon-side (e.g.
                 // open_session for create/switch). The router owns the
                 // DaemonHookActionSink because it has access to the session
@@ -1324,7 +1326,10 @@ async fn stream_session_input(
                     turn_count: summary.as_ref().map_or(0, |s| s.turn_count),
                     total_tokens: result.total_tokens as usize,
                     prompt_tokens: result.prompt_tokens,
-                    completion_tokens: result.completion_tokens,
+                    // opencode accounting: visible output only; reasoning
+                    // tokens are reported separately.
+                    completion_tokens: visible_completion_tokens,
+                    reasoning_tokens: result.reasoning_tokens,
                     cached_tokens: result.cached_tokens,
                     estimated_input_tokens: result.estimated_input_tokens,
                     messages: filtered_messages,

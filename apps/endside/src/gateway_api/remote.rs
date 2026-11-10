@@ -154,6 +154,8 @@ enum RemoteSseEvent {
         prompt_tokens: u64,
         completion_tokens: u64,
         #[serde(default)]
+        reasoning_tokens: u64,
+        #[serde(default)]
         cached_tokens: u64,
         estimated_input_tokens: u64,
         messages: Vec<xiaoo_api::chat::ChatMessage>,
@@ -1035,6 +1037,7 @@ async fn handle_remote_event(
             total_tokens,
             prompt_tokens,
             completion_tokens,
+            reasoning_tokens,
             cached_tokens,
             estimated_input_tokens,
             messages,
@@ -1051,6 +1054,7 @@ async fn handle_remote_event(
             let _ = updates_tx.send(SessionTurnUpdate::Done {
                 prompt_tokens,
                 completion_tokens,
+                reasoning_tokens,
                 total_tokens: total_tokens as u64,
                 cached_tokens,
                 estimated_input_tokens,

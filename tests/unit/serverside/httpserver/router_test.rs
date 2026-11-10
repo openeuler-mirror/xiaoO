@@ -525,6 +525,7 @@ impl FakeSessionService {
             messages: Vec::new(),
             prompt_tokens: 0,
             completion_tokens: 0,
+            reasoning_tokens: 0,
             cached_tokens: 0,
             total_tokens: 0,
             estimated_input_tokens: 0,

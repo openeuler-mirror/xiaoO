@@ -28,7 +28,10 @@ const TURN_SETTLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from
 
 pub(super) struct PendingStreamDone {
     pub(super) prompt_tokens: u64,
+    /// Visible output tokens (provider completion minus reasoning).
     pub(super) completion_tokens: u64,
+    /// Reasoning/thinking tokens (zero when unreported).
+    pub(super) reasoning_tokens: u64,
     pub(super) total_tokens: u64,
     pub(super) estimated_input_tokens: u64,
     pub(super) messages: Vec<xiaoo_api::chat::ChatMessage>,
