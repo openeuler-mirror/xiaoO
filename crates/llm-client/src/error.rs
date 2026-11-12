@@ -176,17 +176,51 @@ pub(crate) fn parse_stream_error(data: &str) -> Option<LlmError> {
         return None;
     }
 
-    let response_body = serde_json::to_string(&body).ok()?;
+    Some(classify_stream_error(&body))
+}
 
-    if error_code(&body) == Some("context_length_exceeded")
-        || is_overflow_message(&extract_error_message(&body))
-    {
-        return Some(LlmError::ContextLengthExceeded {
-            message: format!("stream error: {response_body}"),
+pub(crate) fn parse_openai_stream_error(data: &str) -> Option<LlmError> {
+    let body = parse_json_object(data)?;
+    // Keep the existing top-level error envelope's classification unchanged.
+    if body.get("type").and_then(Value::as_str) == Some("error") {
+        return Some(classify_stream_error(&body));
+    }
+    let error = body.get("error")?.as_object()?;
+    let rate_limited = [error.get("type"), error.get("code")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|value| {
+            matches!(
+                value,
+                "rate_limit_error" | "rate_limit_exceeded" | "insufficient_quota"
+            )
         });
+    if rate_limited {
+        // SSE carries no HTTP failure status or Retry-After header. Use the
+        // same default wait as a non-streaming 429 without a usable hint.
+        return Some(map_api_status_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            &body.to_string(),
+            "",
+            None,
+        ));
+    }
+    Some(classify_stream_error(&body))
+}
+
+fn classify_stream_error(body: &Value) -> LlmError {
+    let response_body = body.to_string();
+
+    if error_code(body) == Some("context_length_exceeded")
+        || is_overflow_message(&extract_error_message(body))
+    {
+        return LlmError::ContextLengthExceeded {
+            message: format!("stream error: {response_body}"),
+        };
     }
 
-    Some(LlmError::ApiError(format!("stream error: {response_body}")))
+    LlmError::ApiError(format!("stream error: {response_body}"))
 }
 
 fn is_context_overflow(status: StatusCode, response_body: &str) -> bool {
