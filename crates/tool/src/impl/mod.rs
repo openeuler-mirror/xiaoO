@@ -12,6 +12,10 @@ pub use builtin::file_read;
 pub use builtin::{
     checkpoint_todos, open_todo_lines, restore_checkpoint_todos, CheckpointTodoItem,
 };
+pub use builtin::{
+    FILE_EDIT_TOOL_NAME, FILE_PATH_INPUT_KEY, FILE_WRITE_TOOL_NAME, SKILL_NAME_INPUT_KEY,
+    SKILL_TOOL_NAME,
+};
 pub use mcp::McpToolSource;
 pub use plugin::{
     declarative_tool_catalog, render_declarative_tool, test_declarative_tool,
