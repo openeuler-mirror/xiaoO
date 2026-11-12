@@ -174,3 +174,18 @@ xiaoO traces context-management behavior so you can answer:
 - whether a provider context-limit error triggered recovery.
 
 This is especially useful when tuning compaction thresholds in production.
+
+### Summary output capabilities
+
+Summary requests use JSON mode only when the provider's existing
+`ProviderCapabilities.supports_json_mode` is true. Integrators using
+`OpenAiCompatibleProviderConfig` can set this capability to false for endpoints
+that require ordinary text requests; the summary still must contain the same
+JSON object, optionally enclosed in a Markdown code fence. Invalid JSON remains
+a compression error. Providers constructed without explicit capabilities retain
+their existing JSON-mode default.
+
+The rough compression estimate includes reasoning returned with assistant tool
+calls, matching the OpenAI-compatible wire conversion. When dynamic context
+resolution cannot supply a window, application assembly logs a warning before
+using the existing static fallback.

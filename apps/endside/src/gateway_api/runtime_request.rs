@@ -808,7 +808,7 @@ async fn resolve_window_with_probe(
             // possible — degrade to an uncached probe, still budget-bound.
             return match tokio::time::timeout(budget, probe).await {
                 Ok(ProbeConclusion::Window(window)) => Some(window),
-                _ => static_window,
+                _ => static_context_fallback(static_window),
             };
         };
         match guard.get(&cache_key) {
@@ -896,7 +896,7 @@ async fn wait_for_probe_conclusion(
     match tokio::time::timeout(budget, rx.changed()).await {
         Ok(Ok(())) => match *rx.borrow_and_update() {
             Some(window) => Some(window),
-            None => static_window,
+            None => static_context_fallback(static_window),
         },
         // Every sender dropped = the probe task died without sending. The
         // real conclusion may already have been written before it died
@@ -916,7 +916,7 @@ async fn wait_for_probe_conclusion(
                     }
                 }
             }
-            static_window
+            static_context_fallback(static_window)
         }
         Err(_) => {
             tracing::debug!(
@@ -924,9 +924,19 @@ async fn wait_for_probe_conclusion(
                 "dynamic context window probe exceeded total budget; \
                  using static estimate for this turn (probe continues in background)"
             );
-            static_window
+            static_context_fallback(static_window)
         }
     }
+}
+
+fn static_context_fallback(window: Option<usize>) -> Option<usize> {
+    if let Some(context_window) = window {
+        tracing::warn!(
+            context_window,
+            "context window unresolved; using static provider default"
+        );
+    }
+    window
 }
 
 /// Maps a cache conclusion to a window: positive → the probed window;
@@ -934,7 +944,7 @@ async fn wait_for_probe_conclusion(
 fn cached_outcome(entry: CachedWindow, static_window: Option<usize>) -> Option<usize> {
     match entry.window {
         Some(window) => Some(window),
-        None => static_window,
+        None => static_context_fallback(static_window),
     }
 }
 

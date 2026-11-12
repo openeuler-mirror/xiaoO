@@ -250,3 +250,26 @@ async fn complete_stream_surfaces_real_401_when_all_candidates_unauthorized() {
     );
     assert!(error.to_string().contains("HTTP 401"));
 }
+
+#[test]
+fn compatible_provider_preserves_explicit_json_capability_and_default() {
+    assert!(make_provider().capabilities().supports_json_mode);
+    for supported in [false, true] {
+        let mut capabilities = make_provider().capabilities().clone();
+        capabilities.supports_json_mode = supported;
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig::new(
+            "http://localhost:8080/v1",
+            "test-key",
+            capabilities,
+        ))
+        .unwrap();
+        assert_eq!(provider.capabilities().supports_json_mode, supported);
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        assert!(provider
+            .inner
+            .build_body(&request, false)
+            .unwrap()
+            .get("response_format")
+            .is_none());
+    }
+}

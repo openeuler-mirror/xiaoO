@@ -435,3 +435,35 @@ async fn budget_cutoff_writes_no_disk_entry() {
     }
     panic!("background probe did not persist its conclusion");
 }
+
+#[test]
+fn static_context_fallback_warns_and_preserves_window() {
+    #[derive(Clone)]
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = LogWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        assert_eq!(super::static_context_fallback(Some(128_000)), Some(128_000));
+        let recorded = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(recorded.contains("WARN"));
+        assert!(recorded.contains("context_window=128000"));
+        assert!(recorded.contains("using static provider default"));
+        output.lock().unwrap().clear();
+        assert_eq!(super::static_context_fallback(None), None);
+        assert!(output.lock().unwrap().is_empty());
+    });
+}
