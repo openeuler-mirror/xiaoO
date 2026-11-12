@@ -767,7 +767,24 @@ async fn compress(
             // cache hits at it. Between compressions history stays strictly
             // append-only. Note: the summarizer above saw the full outputs;
             // only the retained messages are pruned.
-            prune_stale_tool_output(&mut view.messages);
+            // A forced pre-check may exceed its input budget because it also
+            // counts system/tools, while the pipeline analyzes history only.
+            // A no-op pipeline has not invalidated the prefix cache: preserve
+            // it, rather than advancing the prune frontier on every turn.
+            if model_message_content_changed(&messages, &view.messages) {
+                prune_stale_tool_output(&mut view.messages);
+            }
+            // Pipeline rewrites can retain stale per-message cache values.
+            // Recompute after all rewrites, including tool-output pruning.
+            for message in &mut view.messages {
+                message.estimated_tokens = None;
+                ctx.estimator.update_message_cache(message);
+            }
+            view.estimated_tokens = ctx
+                .snapshot
+                .compression_pipeline
+                .analyze(&view.messages, &*ctx.snapshot.token_budget_policy)
+                .estimated_tokens;
 
             tracing::info!(
                 severity = ?analysis.severity,
@@ -799,14 +816,7 @@ async fn compress(
                     .await;
             }
 
-            // Compression may synthesize/trim messages; the returned
-            // `view.messages` is a fresh Vec without per-message token
-            // caches. Populate them so the next analyze reads cached values.
-            let mut new_messages = view.messages.clone();
-            for msg in &mut new_messages {
-                ctx.estimator.update_message_cache(msg);
-            }
-            *ctx.state.messages.write() = new_messages;
+            *ctx.state.messages.write() = view.messages.clone();
             ctx.state.compression_meta = view.updated_meta.clone();
             ctx.turn.compression_output = Some(view);
 
@@ -821,6 +831,17 @@ async fn compress(
             Err(e)
         }
     }
+}
+
+// Only model-facing content changes invalidate the request prefix. Local IDs,
+// timestamps and token accounting can change without rewriting model input.
+fn model_message_content_changed(before: &[ChatMessage], after: &[ChatMessage]) -> bool {
+    before.len() != after.len()
+        || before.iter().zip(after).any(|(before, after)| {
+            before.role != after.role
+                || before.blocks != after.blocks
+                || before.reasoning_content != after.reasoning_content
+        })
 }
 
 fn prune_stale_tool_output(messages: &mut [ChatMessage]) {
@@ -840,6 +861,7 @@ fn prune_stale_tool_output(messages: &mut [ChatMessage]) {
                     kept += output.len();
                 } else if output.len() > MIN_PRUNABLE_BYTES {
                     *output = PRUNED_MARKER.to_string();
+                    message.estimated_tokens = None;
                     pruned += 1;
                 }
             }

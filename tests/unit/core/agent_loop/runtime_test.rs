@@ -721,3 +721,313 @@ async fn retry_exhaustion_ends_turn_until_new_user_input() {
     run_agent_loop(&runtime, &mut state, AgentLoopInput::new("try again")).await.unwrap();
     assert_eq!(raw.calls.load(std::sync::atomic::Ordering::SeqCst), 5);
 }
+
+fn long_tool_history(estimator: &TokenEstimator) -> Vec<ChatMessage> {
+    (0..6)
+        .map(|i| {
+            let mut message = ChatMessage::new(
+                MessageRole::Tool,
+                vec![ContentBlock::ToolResult {
+                    call_id: format!("call-{i}"),
+                    tool_name: "read".into(),
+                    output: "x".repeat(20_000),
+                    is_error: false,
+                }],
+                Some(format!("m{i}")),
+                0,
+                None,
+            );
+            estimator.update_message_cache(&mut message);
+            message
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn repeated_forced_precheck_preserves_history_when_pipeline_is_noop() {
+    let provider = Arc::new(LlmProviderWrapper::new(
+        Arc::new(StreamingTestProvider::new()),
+        None,
+        None,
+    ));
+    let runtime = test_runtime(provider.clone());
+    let mut snapshot = runtime.snapshot();
+    snapshot.compression_pipeline = compact::build_context_manager(None, provider).unwrap();
+    let estimator = TokenEstimator::new();
+    let mut state = LoopState::new("precheck-session".into());
+    let mut original = long_tool_history(&estimator);
+    *state.messages.write() = original.clone();
+    // The pre-check accounts for system/tools; the pipeline deliberately
+    // analyzes history only. Keep the latter below its summary threshold.
+    let budget = TokenBudgetConfig {
+        total_budget: 50_000,
+        reserved_for_output: 512,
+        reserved_for_system: 256,
+        hard_limit_ratio: 1.0,
+    };
+    snapshot.system_prompt = Arc::from("s".repeat(100_000));
+    snapshot.token_budget_config = budget.clone();
+    snapshot.token_budget_policy = Arc::new(FixedBudgetPolicy::new(budget));
+    assert!(!snapshot
+        .compression_pipeline
+        .analyze(&original, &*snapshot.token_budget_policy)
+        .needs_compression());
+    let mut ctx = LoopContext {
+        snapshot,
+        state: &mut state,
+        input: AgentLoopInput::new("task"),
+        turn: TurnState::new(1),
+        estimator: &estimator,
+    };
+    for turn in 1..=3 {
+        ctx.turn = TurnState::new(turn);
+        assert!(
+            estimator.estimate_input_tokens(
+                &ctx.snapshot.system_prompt,
+                0,
+                &ctx.state.messages.read()
+            ) > ctx.snapshot.token_budget_config.total_budget
+                - ctx.snapshot.token_budget_config.reserved_for_output
+                - ctx.snapshot.token_budget_config.reserved_for_system
+        );
+        pre_check_token_budget(&mut ctx, &estimator).await.unwrap();
+        assert!(
+            *ctx.state.messages.read() == original,
+            "no-op compression must preserve the provider prefix"
+        );
+        let mut next = ChatMessage::user(format!("next turn {turn}"));
+        estimator.update_message_cache(&mut next);
+        original.push(next.clone());
+        ctx.state.messages.write().push(next);
+    }
+}
+
+#[test]
+fn pruning_invalidates_cached_message_estimates_and_is_idempotent() {
+    let estimator = TokenEstimator::new();
+    let mut messages = long_tool_history(&estimator);
+    let before = estimator.estimate_history_messages(&messages);
+    prune_stale_tool_output(&mut messages);
+    for message in &mut messages {
+        estimator.update_message_cache(message);
+    }
+    let after = estimator.estimate_history_messages(&messages);
+    assert!(
+        after < before,
+        "pruned messages must not retain their old token counts"
+    );
+    let pruned = messages.clone();
+    prune_stale_tool_output(&mut messages);
+    for message in &mut messages {
+        estimator.update_message_cache(message);
+    }
+    assert_eq!(messages, pruned);
+    assert_eq!(estimator.estimate_history_messages(&messages), after);
+}
+
+struct CompactSummaryProvider(ProviderCapabilities);
+
+#[async_trait]
+impl LlmProvider for CompactSummaryProvider {
+    async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        assert!(matches!(
+            request.response_format,
+            agent_types::ResponseFormat::JsonObject
+        ));
+        Ok(LlmResponse {
+            message: AssistantMessage {
+                text: Some(r#"{"previous_context":[],"new_context":["Retain the task and tool outcomes."]}"#.into()),
+                reasoning_content: None,
+                tool_calls: vec![],
+                usage: Default::default(),
+                stop_reason: StopReason::EndTurn,
+            },
+            kv_cache_chunk_hashes: vec![],
+        })
+    }
+    async fn complete_stream(
+        &self,
+        _: &LlmRequest,
+        _: &(dyn Fn(StreamChunk) + Send + Sync),
+    ) -> Result<LlmResponse, LlmError> {
+        panic!("summary completion is non-streaming")
+    }
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &self.0
+    }
+}
+
+#[tokio::test]
+async fn real_summary_compaction_keeps_format_and_refreshes_retained_caches() {
+    let provider = Arc::new(LlmProviderWrapper::new(
+        Arc::new(CompactSummaryProvider(ProviderCapabilities {
+            supports_streaming: false,
+            supports_tool_calls: true,
+            supports_json_mode: true,
+            max_context_window: 20_000,
+            model_name: "summary-model".into(),
+        })),
+        None,
+        None,
+    ));
+    let runtime = test_runtime(provider.clone());
+    let mut snapshot = runtime.snapshot();
+    snapshot.compression_pipeline = compact::build_context_manager(None, provider).unwrap();
+    let budget = TokenBudgetConfig {
+        total_budget: 20_000,
+        reserved_for_output: 512,
+        reserved_for_system: 256,
+        hard_limit_ratio: 1.0,
+    };
+    snapshot.token_budget_config = budget.clone();
+    snapshot.token_budget_policy = Arc::new(FixedBudgetPolicy::new(budget));
+    let estimator = TokenEstimator::new();
+    let mut state = LoopState::new("summary-session".into());
+    let mut messages = vec![ChatMessage::user("original task")];
+    for i in 0..4 {
+        let mut message = ChatMessage::text(MessageRole::Assistant, "earlier findings", 0);
+        message.message_id = Some(format!("history-{i}"));
+        estimator.update_message_cache(&mut message);
+        messages.push(message);
+    }
+    messages.extend(long_tool_history(&estimator));
+    *state.messages.write() = messages;
+    let mut ctx = LoopContext {
+        snapshot,
+        state: &mut state,
+        input: AgentLoopInput::new("task"),
+        turn: TurnState::new(1),
+        estimator: &estimator,
+    };
+    compress(&mut ctx, CompressionTrigger::Automatic)
+        .await
+        .unwrap();
+    let view = ctx
+        .turn
+        .compression_output
+        .as_ref()
+        .expect("summary must trigger");
+    assert!(view.removed_count > 0);
+    assert!(view
+        .summary
+        .as_ref()
+        .unwrap()
+        .starts_with("Conversation summary:\n"));
+    assert!(view.messages.iter().any(|message| message.blocks.iter().any(|block| matches!(block, ContentBlock::Text {text} if text.starts_with("auto_compact:\n")))));
+    assert_eq!(view.messages, *ctx.state.messages.read());
+    let outputs = view
+        .messages
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .filter_map(|block| {
+            if let ContentBlock::ToolResult {
+                call_id, output, ..
+            } = block
+            {
+                Some((call_id.as_str(), output.as_str()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 5, "summary must retain the tool-output tail");
+    for (index, (call_id, output)) in outputs.iter().enumerate() {
+        assert_eq!(*call_id, format!("call-{}", index + 1));
+        if index < 3 {
+            assert_eq!(*output, "[older tool output pruned to save context — re-run the tool or read the file if you still need it]");
+        } else {
+            assert_eq!(*output, "x".repeat(20_000));
+        }
+    }
+    for message in &view.messages {
+        let mut uncached = message.clone();
+        uncached.estimated_tokens = None;
+        assert_eq!(
+            message.estimated_tokens,
+            Some(estimator.estimate_message(&uncached))
+        );
+    }
+}
+
+struct BookkeepingOnlyPipeline;
+
+#[async_trait]
+impl CompressionPipeline for BookkeepingOnlyPipeline {
+    fn analyze(
+        &self,
+        messages: &[ChatMessage],
+        _: &dyn TokenBudgetPolicy,
+    ) -> agent_types::compression::ContextAnalysis {
+        let estimated = TokenEstimator::new().estimate_history_messages(messages);
+        agent_types::compression::ContextAnalysis {
+            severity: agent_types::compression::ContextSeverity::Normal,
+            estimated_tokens: estimated,
+            should_compact: false,
+            total_tokens: estimated,
+            available_tokens: 100_000,
+            usage_ratio: estimated as f64 / 100_000.0,
+        }
+    }
+
+    async fn compress(
+        &self,
+        messages: &[ChatMessage],
+        _: &dyn TokenBudgetPolicy,
+        meta: &agent_types::compression::CompressionMeta,
+    ) -> Result<CompressedView, agent_contracts::CompressionError> {
+        let mut messages = messages.to_vec();
+        for message in &mut messages {
+            message.estimated_tokens = None;
+            message.api_usage_tokens = Some(17);
+            message.timestamp_ms += 1;
+            message.message_id = Some("refreshed-local-id".into());
+        }
+        Ok(CompressedView {
+            messages,
+            removed_count: 0,
+            summary: None,
+            updated_meta: meta.clone(),
+            estimated_tokens: 0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn forced_compression_preserves_tool_output_after_bookkeeping_changes() {
+    let provider = Arc::new(LlmProviderWrapper::new(
+        Arc::new(StreamingTestProvider::new()),
+        None,
+        None,
+    ));
+    let runtime = test_runtime(provider);
+    let mut snapshot = runtime.snapshot();
+    snapshot.compression_pipeline = Arc::new(BookkeepingOnlyPipeline);
+    let estimator = TokenEstimator::new();
+    let original = long_tool_history(&estimator);
+    let mut state = LoopState::new("bookkeeping-session".into());
+    *state.messages.write() = original.clone();
+    let mut ctx = LoopContext {
+        snapshot,
+        state: &mut state,
+        input: AgentLoopInput::new("task"),
+        turn: TurnState::new(1),
+        estimator: &estimator,
+    };
+    compress(&mut ctx, CompressionTrigger::PreCheckExceeded)
+        .await
+        .unwrap();
+    let messages = ctx.state.messages.read();
+    assert_eq!(messages.len(), original.len());
+    for (message, before) in messages.iter().zip(&original) {
+        assert_eq!(message.role, before.role);
+        assert_eq!(
+            message.blocks, before.blocks,
+            "bookkeeping must not trigger pruning"
+        );
+        assert_eq!(message.reasoning_content, before.reasoning_content);
+        assert_ne!(message.message_id, before.message_id);
+        assert_ne!(message.timestamp_ms, before.timestamp_ms);
+        assert_eq!(message.api_usage_tokens, Some(17));
+        assert_eq!(message.estimated_tokens, before.estimated_tokens);
+    }
+}
