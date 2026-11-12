@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use agent_contracts::skill::SkillMatcher;
 use agent_contracts::{SkillRegistry, SkillSpec};
 use agent_types::common::truncate_scalars;
 use agent_types::context::prompt::SkillSummary;
 
 use crate::loading::load_skills;
+use crate::matching::SkillMatchIndex;
 use crate::types::config::SkillsConfig;
 use crate::types::Skill;
 
@@ -17,6 +19,9 @@ pub struct FileSkillRegistry {
     /// `list_skills()` 只做 `Arc` 克隆。registry 会话期不可变，任意轮次
     /// 产出相同清单字节（system prompt 前缀稳定）由结构保证
     summaries: Arc<[SkillSummary]>,
+    /// 预编译匹配索引（与 `summaries` 共享同一 Arc 分配）：
+    /// `skill_matcher()` 以 `Arc` 克隆暴露
+    matcher: Arc<dyn SkillMatcher>,
 }
 
 impl FileSkillRegistry {
@@ -50,13 +55,23 @@ impl FileSkillRegistry {
                 disable_model_invocation: entry.skill.disable_model_invocation,
             })
             .collect();
-        Self { entries, summaries }
+        let matcher: Arc<dyn SkillMatcher> =
+            Arc::new(SkillMatchIndex::from_shared(Arc::clone(&summaries)));
+        Self {
+            entries,
+            summaries,
+            matcher,
+        }
     }
 }
 
 impl SkillRegistry for FileSkillRegistry {
     fn list_skills(&self) -> Arc<[SkillSummary]> {
         Arc::clone(&self.summaries)
+    }
+
+    fn skill_matcher(&self) -> Arc<dyn SkillMatcher> {
+        Arc::clone(&self.matcher)
     }
 
     fn get_skill(&self, skill_id: &str) -> Option<&dyn SkillSpec> {

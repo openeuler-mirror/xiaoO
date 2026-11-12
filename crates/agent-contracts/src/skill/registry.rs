@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use agent_types::context::prompt::SkillSummary;
 
+use super::matching::{empty_skill_matcher, SkillMatcher};
+
 /// Skill 执行模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillContext {
@@ -17,6 +19,11 @@ pub trait SkillRegistry: Send + Sync {
     /// prompt 清单段等逐轮消费方复用，避免每轮全量 clone。
     fn list_skills(&self) -> Arc<[SkillSummary]>;
     fn get_skill(&self, skill_id: &str) -> Option<&dyn SkillSpec>;
+    /// L2 发现用的匹配器（语义见 [`SkillMatcher`]）。默认空匹配器：
+    /// 无清单实现 / 测试桩的兜底，恒为空命中。
+    fn skill_matcher(&self) -> Arc<dyn SkillMatcher> {
+        empty_skill_matcher()
+    }
 }
 
 pub trait SkillSpec: Send + Sync {

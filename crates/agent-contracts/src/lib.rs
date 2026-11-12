@@ -22,7 +22,10 @@ pub use interaction::InteractionHandle;
 pub use llm::{LlmProvider, ProviderCapabilities};
 pub use lsp::LspProvider;
 pub use runtime::{AgentContext, ChannelFileSender, ConversationView, RuntimeView};
-pub use skill::{SkillContext, SkillRegistry, SkillSpec};
+pub use skill::{
+    SkillContext, SkillMatchHit, SkillMatchReason, SkillMatchSignals, SkillMatcher, SkillRegistry,
+    SkillSpec,
+};
 pub use tool::{
     ToolCall, ToolCallBuilder, ToolExecutor, ToolFilter, ToolRegistry, ToolRegistryBuilder,
     ToolSource, ToolSpecView, ToolStateStore, ToolStateStoreBuilder,
