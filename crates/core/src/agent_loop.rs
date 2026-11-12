@@ -24,6 +24,10 @@ use serde_json::{json, Value};
 use crate::input::AgentLoopInput;
 use crate::loop_state::LoopState;
 use crate::runtime::AgentRuntime;
+use crate::skill_discovery::{
+    compensate_pending_write_pivot, inject_user_signal_skill_hints, settle_initial_user_message_l2,
+    InitialUserMessageL2, SkillDiscoveryView,
+};
 use crate::snapshot::RuntimeSnapshot;
 use crate::suspend::LoopRunResult;
 use crate::token_estimator::TokenEstimator;
@@ -86,6 +90,8 @@ pub struct LoopContext<'a> {
     /// populate `ChatMessage::estimated_tokens` before appending. Without
     /// this, every pre-check / compress call re-estimates unchanged messages.
     pub estimator: &'a TokenEstimator,
+    /// L2 skill 发现视图（本 run 一次构建，语义见 `SkillDiscoveryView`）
+    pub skill_discovery: SkillDiscoveryView,
 }
 
 impl LoopContext<'_> {
@@ -100,6 +106,126 @@ impl LoopContext<'_> {
     }
 }
 
+/// 初始用户消息的入史准备（新外部用户回合；恢复 suspended lane 用
+/// `append_user_message=false`，不经此路径）：`/skill-name` 展开、
+/// `command.execute.before` / `chat.message` hook、deny 早返回判定。
+///
+/// `Err(result)` = 命令被插件 deny，run 以该结果提前终止（调用方直接
+/// 返回）。消息 push 与 token 估算缓存在本函数内完成；L2 结算素材经
+/// 返回值交给调用方（消费时机见 `run_agent_loop`）。
+async fn append_initial_user_message(
+    state: &mut LoopState,
+    estimator: &TokenEstimator,
+    input: &mut AgentLoopInput,
+    skill_registry: &dyn agent_contracts::SkillRegistry,
+) -> Result<InitialUserMessageL2, LoopRunResult> {
+    // A new external user turn starts a new accounting period.
+    state.token_usage = Default::default();
+    state.last_token_usage = Default::default();
+
+    // Detect `/skill-name [args]` prefix and expand skill prompt inline.
+    // Expanded content is skill body, not user intent: it must not feed the
+    // user-input discovery signal (Claude's skipSkillDiscovery gate). The
+    // hint-ledger record is DEFERRED until the expanded body actually lands
+    // in history: the command-deny early return, the command-rewrite path,
+    // and a chat.message hook rewrite of the persisted text all drop the
+    // body before it is persisted, and a ledgered-but-never-persisted skill
+    // would silence future discovery hints for good.
+    let mut expanded_from_skill = false;
+    let mut expanded_skill_id: Option<String> = None;
+    if let Some(expanded) = try_expand_skill_prefix(&input.user_message, skill_registry) {
+        expanded_from_skill = true;
+        expanded_skill_id = Some(expanded.skill_id);
+        input.user_message = expanded.body;
+    }
+    // command.execute.before — fires before chat.message so the
+    // command-layer body rewrite feeds into the message-layer hook.
+    if let Some(cmd_ctx) = input.command_context.as_ref() {
+        if let Some(runtime_view) = input.runtime_view.as_ref() {
+            let (body, deny) = run_command_execute_before_hook(
+                runtime_view,
+                &state.session_id,
+                input.agent_id.as_ref(),
+                &cmd_ctx.command,
+                &cmd_ctx.arguments,
+                input.user_message.clone(),
+            )
+            .await;
+            if let Some(reason) = deny {
+                let deny_text =
+                    format!("Command '{}' denied by plugin: {}", cmd_ctx.command, reason);
+                let mut deny_msg = ChatMessage::text(MessageRole::Assistant, &deny_text, now_ms());
+                estimator.update_message_cache(&mut deny_msg);
+                state.messages.write().push(deny_msg);
+                if let Some(ref sink) = input.event_sink {
+                    let agent_id = agent_id_or_anonymous(input.agent_id.as_ref());
+                    sink.on_assistant_message(agent_id, &deny_text);
+                }
+                let mut reply = deny_text;
+                let mut turn_count = 0;
+                let mut token_usage = agent_types::outcome::TokenUsage::default();
+                if let Some(driver) = input.checkpoint_driver.as_ref() {
+                    if driver.flush(state, &mut 1).await {
+                        reply = restored_reply(state).unwrap_or_default();
+                        turn_count = state.turn_count;
+                        token_usage = state.token_usage.clone();
+                    }
+                }
+                // skill 展开记账不发生：全文未入史（deny 早返回）
+                return Err(LoopRunResult::Complete(AgentOutcome::Complete {
+                    reply,
+                    messages: state.messages.read().clone(),
+                    turn_count,
+                    token_usage,
+                    estimated_input_tokens: 0,
+                }));
+            }
+            if input.user_message != body {
+                // 命令 hook 重写了消息体：skill 全文不再进入历史，
+                // 记账资格取消（skip 门保留——展开谱系仍可能引用全文）
+                expanded_skill_id = None;
+            }
+            input.user_message = body;
+        }
+    }
+    let candidate = ChatMessage::text(MessageRole::User, &input.user_message, now_ms());
+    // chat.message — fires before the user message is persisted.
+    let mut final_message = apply_chat_message_hook(
+        input.runtime_view.as_ref(),
+        &state.session_id.to_string(),
+        input.agent_id.as_ref(),
+        candidate,
+    )
+    .await;
+    // chat.message hook 重写检测：`input.user_message` 此刻仍持有待持久化
+    // 的展开体（命令层重写已在上面剔除记账资格）。持久化文本一旦与其
+    // 不一致——被替换（Transform）或转为非文本消息——skill 全文即未
+    // 进入历史，记账资格取消（与命令层同一理由：不压制后续发现提示）。
+    // skip 门保留：展开谱系消息仍不触发用户输入信号匹配
+    if expanded_skill_id.is_some()
+        && final_message.text_content() != Some(input.user_message.as_str())
+    {
+        expanded_skill_id = None;
+    }
+    // Sync transformed text back into loop input for event sinks/tracing.
+    // Non-text transforms are persisted as-is via the message push below.
+    if let Some(text) = final_message.text_content() {
+        input.user_message = text.to_string();
+    }
+    estimator.update_message_cache(&mut final_message);
+    state.messages.write().push(final_message);
+    // 用户输入信号文本（终态、模型可见形态；chat hook 转成非文本消息时
+    // 文本不回写，匹配的仍是用户原始输入——发现信号取用户意图为本源，
+    // 不依赖模型可见形态）。信号不在此消费：注入统一延迟到 loop 首轮
+    // checkpoint `process_pending` 之后（时序理由见 `run_agent_loop`）。
+    let signal_text = (!expanded_from_skill).then(|| input.user_message.clone());
+
+    Ok(InitialUserMessageL2 {
+        expanded_skill_id,
+        signal_text,
+    })
+}
+
 pub async fn run_agent_loop(
     runtime: &AgentRuntime,
     state: &mut LoopState,
@@ -108,79 +234,27 @@ pub async fn run_agent_loop(
     let snapshot = runtime.snapshot();
     let estimator = TokenEstimator::new();
 
-    // Detect `/skill-name` prefix and expand skill prompt inline.
-    if input.append_user_message {
-        // A new external user turn starts a new accounting period. Resuming a
-        // suspended tool/subagent lane uses append_user_message=false.
-        state.token_usage = Default::default();
-        state.last_token_usage = Default::default();
-        if let Some(expanded) =
-            try_expand_skill_prefix(&input.user_message, &*snapshot.skill_registry)
+    // L2 skill 发现视图：matcher 经 `Arc` 克隆自 registry（无重编译），
+    // 门控失败时视图自行退化（匹配器零调用）
+    let skill_discovery = SkillDiscoveryView::new(
+        &snapshot.feature_flags,
+        snapshot.skill_registry.skill_matcher(),
+    );
+
+    // 初始用户消息入史（`/skill-name` 展开、command/chat hook、deny 早
+    // 返回均在 helper 内完成）。L2 结算素材（展开记账 + 用户输入信号）
+    // 不在 push 时立即消费——消费时机与时序理由见 skill_discovery
+    // 模块 doc。
+    let mut initial_message_l2 = if input.append_user_message {
+        match append_initial_user_message(state, &estimator, &mut input, &*snapshot.skill_registry)
+            .await
         {
-            input.user_message = expanded;
+            Err(denied) => return Ok(denied),
+            Ok(l2) => Some(l2),
         }
-        // command.execute.before — fires before chat.message so the
-        // command-layer body rewrite feeds into the message-layer hook.
-        if let Some(cmd_ctx) = input.command_context.as_ref() {
-            if let Some(runtime_view) = input.runtime_view.as_ref() {
-                let (body, deny) = run_command_execute_before_hook(
-                    runtime_view,
-                    &state.session_id,
-                    input.agent_id.as_ref(),
-                    &cmd_ctx.command,
-                    &cmd_ctx.arguments,
-                    input.user_message.clone(),
-                )
-                .await;
-                if let Some(reason) = deny {
-                    let deny_text =
-                        format!("Command '{}' denied by plugin: {}", cmd_ctx.command, reason);
-                    let mut deny_msg =
-                        ChatMessage::text(MessageRole::Assistant, &deny_text, now_ms());
-                    estimator.update_message_cache(&mut deny_msg);
-                    state.messages.write().push(deny_msg);
-                    if let Some(ref sink) = input.event_sink {
-                        let agent_id = agent_id_or_anonymous(input.agent_id.as_ref());
-                        sink.on_assistant_message(agent_id, &deny_text);
-                    }
-                    let mut reply = deny_text;
-                    let mut turn_count = 0;
-                    let mut token_usage = agent_types::outcome::TokenUsage::default();
-                    if let Some(driver) = input.checkpoint_driver.as_ref() {
-                        if driver.flush(state, &mut 1).await {
-                            reply = restored_reply(state).unwrap_or_default();
-                            turn_count = state.turn_count;
-                            token_usage = state.token_usage.clone();
-                        }
-                    }
-                    return Ok(LoopRunResult::Complete(AgentOutcome::Complete {
-                        reply,
-                        messages: state.messages.read().clone(),
-                        turn_count,
-                        token_usage,
-                        estimated_input_tokens: 0,
-                    }));
-                }
-                input.user_message = body;
-            }
-        }
-        let candidate = ChatMessage::text(MessageRole::User, &input.user_message, now_ms());
-        // chat.message — fires before the user message is persisted.
-        let mut final_message = apply_chat_message_hook(
-            input.runtime_view.as_ref(),
-            &state.session_id.to_string(),
-            input.agent_id.as_ref(),
-            candidate,
-        )
-        .await;
-        // Sync transformed text back into loop input for event sinks/tracing.
-        // Non-text transforms are persisted as-is via the message push below.
-        if let Some(text) = final_message.text_content() {
-            input.user_message = text.to_string();
-        }
-        estimator.update_message_cache(&mut final_message);
-        state.messages.write().push(final_message);
-    }
+    } else {
+        None
+    };
 
     let mut ctx = LoopContext {
         snapshot,
@@ -188,7 +262,13 @@ pub async fn run_agent_loop(
         input,
         turn: TurnState::new(1),
         estimator: &estimator,
+        skill_discovery,
     };
+
+    // 两个一次性 L2 守卫：初始消息结算与 write pivot 补偿都只在本 run
+    // 首轮执行一次
+    let mut initial_l2_settled = false;
+    let mut write_pivot_compensated = false;
 
     loop {
         if let Some(driver) = ctx.input.checkpoint_driver.as_ref() {
@@ -199,6 +279,18 @@ pub async fn run_agent_loop(
                     ctx.input.append_user_message,
                 )
                 .await;
+        }
+        // 两处 L2 结算都必须在 checkpoint `process_pending` 之后（restore
+        // 回插/回滚交互的时序理由见 skill_discovery 模块 doc）
+        if !initial_l2_settled {
+            initial_l2_settled = true;
+            if let Some(l2) = initial_message_l2.take() {
+                settle_initial_user_message_l2(&mut ctx, l2);
+            }
+        }
+        if !write_pivot_compensated {
+            write_pivot_compensated = true;
+            compensate_pending_write_pivot(&mut ctx);
         }
         ctx.turn = TurnState::new(ctx.turn.turn_number);
         begin_turn_span(&mut ctx).await;
@@ -461,7 +553,19 @@ async fn drain_pending_user_messages(ctx: &mut LoopContext<'_>) {
         )
         .await;
         ctx.estimator.update_message_cache(&mut final_message);
+        // 用户输入信号（L2 发现）：drain 消息同样是用户意图的表达，
+        // push 后触发匹配（注入不过 chat hook）
+        let signal_text = final_message
+            .text_content()
+            .map(str::to_owned)
+            .unwrap_or(message);
         ctx.state.messages.write().push(final_message);
+        inject_user_signal_skill_hints(
+            ctx.state,
+            ctx.estimator,
+            &ctx.skill_discovery,
+            &signal_text,
+        );
     }
 }
 
@@ -819,6 +923,9 @@ async fn compress(
             *ctx.state.messages.write() = view.messages.clone();
             ctx.state.compression_meta = view.updated_meta.clone();
             ctx.turn.compression_output = Some(view);
+            // 压缩已 wholesale 重写历史，L2 提示消息已被吃掉——账本清空，
+            // 仍相关的 skill 可再次发现（语义见 `skill_hint_sent` 字段注释）
+            ctx.state.skill_hint_sent.clear();
 
             Ok(())
         }
@@ -2077,14 +2184,24 @@ fn emit_loop_end(ctx: &LoopContext<'_>, stop_reason: &str) {
     }
 }
 
+/// `/skill-name` 展开产物：`body` = 展开后的消息全文；`skill_id` =
+/// registry 规范 skill id（供 L2 账本记账——全文已作为用户消息进入历史，
+/// 等同已加载，账本作用域内不再对其做发现提示；规范 id 与
+/// `SkillSummary::skill_id` 同一键空间，账本去重才不依赖
+/// "调用名 == 清单 id" 的隐性约定）
+struct ExpandedSkillPrompt {
+    body: String,
+    skill_id: String,
+}
+
 /// Detect `/skill-name [args]` prefix in user message and expand to skill prompt.
 ///
-/// Returns `Some(expanded_message)` if a valid skill invocation is detected,
+/// Returns `Some(expanded)` if a valid skill invocation is detected,
 /// `None` otherwise (message is passed through unchanged).
 fn try_expand_skill_prefix(
     user_message: &str,
     skill_registry: &dyn agent_contracts::SkillRegistry,
-) -> Option<String> {
+) -> Option<ExpandedSkillPrompt> {
     let trimmed = user_message.trim();
     if !trimmed.starts_with('/') {
         return None;
@@ -2121,7 +2238,10 @@ fn try_expand_skill_prefix(
         expanded.push_str(args);
     }
 
-    Some(expanded)
+    Some(ExpandedSkillPrompt {
+        body: expanded,
+        skill_id: spec.skill_id().to_string(),
+    })
 }
 
 fn now_ms() -> u64 {

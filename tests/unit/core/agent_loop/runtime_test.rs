@@ -453,12 +453,20 @@ fn loop_stop_rule_matches_only_configured_successful_tool() {
         tool_name: "todo_write".to_string(),
     }]);
     let estimator = TokenEstimator::new();
+    // 关闭形态视图：该测试不触发 L2 发现（门控失败即对匹配器零调用）
     let ctx = LoopContext {
         snapshot: runtime.snapshot(),
         state: &mut loop_state,
         input,
         turn: TurnState::new(1),
         estimator: &estimator,
+        skill_discovery: SkillDiscoveryView::new(
+            &FeatureFlags {
+                skill_discovery: false,
+                ..FeatureFlags::default()
+            },
+            agent_contracts::skill::matching::empty_skill_matcher(),
+        ),
     };
     let result = ToolExecutionResult::Completed {
         final_call: agent_types::tool::FinalToolCall {
@@ -778,6 +786,13 @@ async fn repeated_forced_precheck_preserves_history_when_pipeline_is_noop() {
         input: AgentLoopInput::new("task"),
         turn: TurnState::new(1),
         estimator: &estimator,
+        skill_discovery: SkillDiscoveryView::new(
+            &FeatureFlags {
+                skill_discovery: false,
+                ..FeatureFlags::default()
+            },
+            agent_contracts::skill::matching::empty_skill_matcher(),
+        ),
     };
     for turn in 1..=3 {
         ctx.turn = TurnState::new(turn);
@@ -898,6 +913,13 @@ async fn real_summary_compaction_keeps_format_and_refreshes_retained_caches() {
         input: AgentLoopInput::new("task"),
         turn: TurnState::new(1),
         estimator: &estimator,
+        skill_discovery: SkillDiscoveryView::new(
+            &FeatureFlags {
+                skill_discovery: false,
+                ..FeatureFlags::default()
+            },
+            agent_contracts::skill::matching::empty_skill_matcher(),
+        ),
     };
     compress(&mut ctx, CompressionTrigger::Automatic)
         .await
@@ -1012,6 +1034,13 @@ async fn forced_compression_preserves_tool_output_after_bookkeeping_changes() {
         input: AgentLoopInput::new("task"),
         turn: TurnState::new(1),
         estimator: &estimator,
+        skill_discovery: SkillDiscoveryView::new(
+            &FeatureFlags {
+                skill_discovery: false,
+                ..FeatureFlags::default()
+            },
+            agent_contracts::skill::matching::empty_skill_matcher(),
+        ),
     };
     compress(&mut ctx, CompressionTrigger::PreCheckExceeded)
         .await

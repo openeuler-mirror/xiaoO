@@ -692,6 +692,8 @@ async fn open_session_preserves_imported_loop_state() {
         token_usage: Default::default(),
         compression_meta: Default::default(),
         kv_cache_map: Default::default(),
+        skill_hint_sent: Default::default(),
+        pending_write_pivot: Default::default(),
     });
     store.save(seeded.clone()).await;
 
