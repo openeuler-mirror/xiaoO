@@ -8,7 +8,7 @@ use crate::convert::{
 };
 use crate::error::{
     map_api_status_error, map_reqwest_error_raw as map_reqwest_error, map_serde_error,
-    parse_stream_error, ErrorRedactor, LlmError,
+    parse_openai_stream_error, ErrorRedactor, LlmError,
 };
 use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::url_fallback::{
@@ -660,7 +660,7 @@ pub(crate) fn parse_openai_family_stream_line(line: &str) -> Result<Option<Parse
         return Ok(None);
     }
 
-    if let Some(error) = parse_stream_error(data) {
+    if let Some(error) = parse_openai_stream_error(data) {
         return Err(error);
     }
 

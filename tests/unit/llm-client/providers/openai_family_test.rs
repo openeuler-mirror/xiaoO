@@ -273,3 +273,182 @@ fn compatible_provider_preserves_explicit_json_capability_and_default() {
             .is_none());
     }
 }
+
+#[test]
+fn stream_error_frame_preserves_gateway_diagnostics() {
+    let line = r#"data: {"error":{"message":"[model_service] upstream omitted a completion reason","type":"model_error","code":"invalid_upstream_response","param":null}}"#;
+    let error = parse_openai_family_stream_line(line).unwrap_err();
+    match error {
+        LlmError::ApiError(message) => {
+            for diagnostic in [
+                "[model_service] upstream omitted a completion reason",
+                "model_error",
+                "invalid_upstream_response",
+            ] {
+                assert!(message.contains(diagnostic), "{message}");
+            }
+            assert!(!message.contains("missing field"));
+        }
+        other => panic!("expected provider API error, got {other:?}"),
+    }
+}
+
+#[test]
+fn stream_error_frame_classifies_openai_rate_limits() {
+    for fields in [
+        serde_json::json!({"type":"tokens","code":"rate_limit_exceeded"}),
+        serde_json::json!({"type":"rate_limit_error","code":null}),
+        serde_json::json!({"type":"insufficient_quota","code":"insufficient_quota"}),
+    ] {
+        let mut error = fields;
+        error["message"] = serde_json::json!("Rate limit reached for model");
+        let body = serde_json::json!({"error":error}).to_string();
+        let streamed = parse_openai_family_stream_line(&format!("data: {body}"));
+        let http = map_api_status_error(reqwest::StatusCode::TOO_MANY_REQUESTS, &body, "", None);
+        match (streamed, http) {
+            (
+                Err(LlmError::RateLimited {
+                    retry_after_ms,
+                    message,
+                }),
+                LlmError::RateLimited {
+                    retry_after_ms: expected,
+                    ..
+                },
+            ) => {
+                assert_eq!(retry_after_ms, expected);
+                assert!(message.contains("Rate limit reached"));
+                assert!(message.contains(error["type"].as_str().unwrap()));
+            }
+            (actual, _) => panic!("expected rate limit, got {actual:?}"),
+        }
+    }
+}
+
+#[test]
+fn stream_error_frame_classifies_openai_context_overflow() {
+    for body in [
+        r#"{"error":{"message":"too many tokens","type":"invalid_request_error","code":"context_length_exceeded","param":"messages"}}"#,
+        r#"{"error":{"message":"This model's maximum context length is 8192 tokens","type":"invalid_request_error","code":null}}"#,
+    ] {
+        let error = parse_openai_family_stream_line(&format!("data: {body}")).unwrap_err();
+        assert!(
+            matches!(error, LlmError::ContextLengthExceeded { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("invalid_request_error"));
+    }
+}
+
+#[test]
+fn stream_error_frame_keeps_legacy_and_normal_chunks() {
+    for body in [
+        r#"{"type":"error","error":{"code":"invalid_prompt","message":"bad prompt"}}"#,
+        r#"{"type":"error","error":{"code":"context_length_exceeded","message":"overflow"}}"#,
+        r#"{"type":"error","error":{"type":"rate_limit_error","message":"busy"}}"#,
+    ] {
+        let actual = parse_openai_family_stream_line(&format!("data: {body}")).unwrap_err();
+        assert_eq!(
+            actual.to_string(),
+            crate::error::parse_stream_error(body).unwrap().to_string()
+        );
+    }
+    let parsed = parse_openai_family_stream_line(
+        r#"data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"hello","reasoning_content":"thinking"},"finish_reason":"stop"}],"error":null}"#,
+    ).unwrap().unwrap();
+    assert_eq!(parsed.content.as_deref(), Some("hello"));
+    assert_eq!(parsed.reasoning.as_deref(), Some("thinking"));
+    assert_eq!(parsed.finish_reason.as_deref(), Some("stop"));
+    assert!(parse_openai_family_stream_line("data: [DONE]")
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        parse_openai_family_stream_line("data: {broken"),
+        Err(LlmError::ParseError(_))
+    ));
+}
+
+#[tokio::test]
+async fn stream_error_frame_redacts_credentials_at_provider_boundary() {
+    let mut server = mockito::Server::new_async().await;
+    let body = serde_json::json!({"error":{
+        "message":"[model_service] upstream omitted a completion reason; credential-test-secret",
+        "type":"model_error", "code":"invalid_upstream_response"
+    }});
+    let mock = server
+        .mock("POST", mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(format!("data: {body}\n\ndata: [DONE]\n\n"))
+        .expect(1)
+        .create_async()
+        .await;
+    let provider = OpenAiFamilyProvider::new(
+        "credential-test-secret".into(),
+        server.url(),
+        "test".into(),
+        OpenAiFamilyAuthStyle::Bearer,
+        vec![],
+    );
+    let chunks = std::sync::atomic::AtomicUsize::new(0);
+    let error = provider
+        .complete_stream(
+            &LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]),
+            &|_| {
+                chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LlmError::ApiError(_)), "{error:?}");
+    let message = error.to_string();
+    assert!(message.contains("upstream omitted a completion reason"));
+    assert!(message.contains("model_error"));
+    assert!(message.contains("invalid_upstream_response"));
+    assert!(!message.contains("credential-test-secret"));
+    assert_eq!(chunks.load(std::sync::atomic::Ordering::Relaxed), 0);
+    mock.assert_async().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_error_frame_retry_policy_matches_http_errors() {
+    for (body, status, retryable) in [
+        (
+            r#"{"error":{"message":"[model_service] upstream omitted a completion reason","type":"model_error","code":"invalid_upstream_response"}}"#,
+            reqwest::StatusCode::BAD_REQUEST,
+            false,
+        ),
+        (
+            r#"{"error":{"message":"Rate limit reached","type":"tokens","code":"rate_limit_exceeded"}}"#,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            true,
+        ),
+        (
+            r#"{"error":{"message":"too many tokens","type":"invalid_request_error","code":"context_length_exceeded"}}"#,
+            reqwest::StatusCode::BAD_REQUEST,
+            false,
+        ),
+        (
+            r#"{"error":{"message":"connection reset by peer","type":"server_error","code":null}}"#,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            true,
+        ),
+    ] {
+        let streamed = parse_openai_family_stream_line(&format!("data: {body}")).unwrap_err();
+        let http = map_api_status_error(status, body, "", None);
+        for error in [streamed, http] {
+            let mut calls = 0;
+            let result = crate::request_policy::run_stream(|_| {
+                calls += 1;
+                std::future::ready(if calls == 1 {
+                    Err(error.clone())
+                } else {
+                    Ok(())
+                })
+            })
+            .await;
+            assert_eq!(result.is_ok(), retryable, "{error:?}");
+            assert_eq!(calls, if retryable { 2 } else { 1 }, "{error:?}");
+        }
+    }
+}
