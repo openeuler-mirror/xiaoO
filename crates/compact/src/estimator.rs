@@ -1,5 +1,5 @@
 use agent_contracts::TokenEstimator;
-use agent_types::{ChatMessage, ContentBlock};
+use agent_types::{ChatMessage, ContentBlock, MessageRole};
 use serde::{Deserialize, Serialize};
 
 use crate::{CompactError, CompactResult};
@@ -36,7 +36,24 @@ impl RoughTokenEstimator {
 
 impl TokenEstimator for RoughTokenEstimator {
     fn estimate_message_tokens(&self, message: &ChatMessage) -> usize {
+        // OpenAI-compatible conversion sends reasoning only on assistant
+        // messages containing tool calls (see llm-client's wire conversion).
+        let reasoning_tokens = if message.role == MessageRole::Assistant
+            && message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        {
+            message
+                .reasoning_content
+                .as_deref()
+                .map(|text| self.estimate_text_tokens(text))
+                .unwrap_or(0)
+        } else {
+            0
+        };
         self.config.message_overhead_tokens
+            + reasoning_tokens
             + message
                 .blocks
                 .iter()

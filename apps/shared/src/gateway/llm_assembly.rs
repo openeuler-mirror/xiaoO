@@ -273,5 +273,7 @@ async fn resolve_effective_context_window(
         ModelContextResolution::NotFound | ModelContextResolution::Degraded => {}
     }
 
+    tracing::warn!(model = %model, context_window = static_fallback.max(1),
+        "context window unresolved; using static provider default");
     static_fallback.max(1)
 }

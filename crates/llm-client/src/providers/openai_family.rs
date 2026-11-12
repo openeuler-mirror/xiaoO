@@ -67,9 +67,27 @@ impl OpenAiFamilyProvider {
         auth_style: OpenAiFamilyAuthStyle,
         default_headers: Vec<(String, String)>,
     ) -> Self {
+        let capabilities = ProviderCapabilities {
+            supports_streaming: true,
+            supports_tool_calls: true,
+            supports_json_mode: true,
+            max_context_window: crate::provider_registry::ProtocolFamily::OpenAiCompatible
+                .static_context_window(),
+            model_name: model,
+        };
+        Self::from_config(
+            OpenAiCompatibleProviderConfig::new(api_base, api_key, capabilities),
+            auth_style,
+            default_headers,
+        )
+    }
+
+    fn from_config(
+        config: OpenAiCompatibleProviderConfig,
+        auth_style: OpenAiFamilyAuthStyle,
+        default_headers: Vec<(String, String)>,
+    ) -> Self {
         let skip_tls_verify = crate::http::tls_verification_disabled();
-        let max_context_window =
-            crate::provider_registry::ProtocolFamily::OpenAiCompatible.static_context_window();
         Self {
             // No total client timeout; request_policy owns every deadline.
             client: reqwest::Client::builder()
@@ -78,18 +96,12 @@ impl OpenAiFamilyProvider {
                 .http1_only()
                 .build()
                 .unwrap_or_else(crate::http::client_build_failed),
-            api_key,
-            api_base,
+            api_key: config.api_key,
+            api_base: config.api_base,
             auth_style,
             default_headers,
             reasoning_dialect: ReasoningDialect::default(),
-            capabilities: ProviderCapabilities {
-                supports_streaming: true,
-                supports_tool_calls: true,
-                supports_json_mode: true,
-                max_context_window,
-                model_name: model,
-            },
+            capabilities: config.capabilities,
             cached_endpoint_url: Arc::new(RwLock::new(None)),
         }
     }
@@ -727,15 +739,8 @@ impl OpenAiCompatibleProvider {
                 "api_key must not be empty".to_string(),
             ));
         }
-        let model = config.capabilities.model_name.clone();
-        let mut inner = OpenAiFamilyProvider::new(
-            config.api_key,
-            config.api_base,
-            model,
-            OpenAiFamilyAuthStyle::Bearer,
-            Vec::new(),
-        );
-        inner.capabilities = config.capabilities;
+        let inner =
+            OpenAiFamilyProvider::from_config(config, OpenAiFamilyAuthStyle::Bearer, Vec::new());
         Ok(Self { inner })
     }
 }

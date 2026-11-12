@@ -123,6 +123,7 @@ pub async fn summarize_messages_with_previous(
             new_context: new_lines.clone(),
         },
         request_config,
+        provider.capabilities().supports_json_mode,
     )?;
     let response = provider
         .complete_with_budget(&request, RetryBudget::Background)
@@ -188,6 +189,7 @@ pub async fn summarize_messages_with_previous(
 fn build_summary_request(
     source: &CompactSummarySource,
     request_config: &CompletionConfig,
+    supports_json_mode: bool,
 ) -> CompactResult<LlmRequest> {
     let source_json =
         serde_json::to_string_pretty(source).map_err(|error| CompactError::SummaryParse {
@@ -204,7 +206,11 @@ fn build_summary_request(
     ]);
     request.max_tokens = Some(request_config.max_tokens);
     request.temperature = Some(request_config.temperature);
-    request.response_format = ResponseFormat::JsonObject;
+    request.response_format = if supports_json_mode {
+        ResponseFormat::JsonObject
+    } else {
+        ResponseFormat::Text
+    };
     Ok(request)
 }
 
