@@ -92,6 +92,7 @@ pub fn parse_skill_toml_content(
     Ok(Skill {
         name,
         description: skill_section.description.unwrap_or_default(),
+        when_to_use: skill_section.when_to_use,
         version: skill_section.version,
         author: skill_section.author,
         tags: skill_section.tags.unwrap_or_default(),
@@ -117,6 +118,8 @@ struct SkillManifest {
 struct SkillSection {
     name: Option<String>,
     description: Option<String>,
+    #[serde(alias = "when-to-use")]
+    when_to_use: Option<String>,
     version: Option<String>,
     author: Option<String>,
     tags: Option<Vec<String>>,

@@ -9,6 +9,7 @@ pub struct Skill {
     // --- Basic metadata ---
     pub name: String,
     pub description: String,
+    pub when_to_use: Option<String>,
     pub version: Option<String>,
     pub author: Option<String>,
     pub tags: Vec<String>,
@@ -36,6 +37,7 @@ impl Default for Skill {
         Self {
             name: String::new(),
             description: String::new(),
+            when_to_use: None,
             version: None,
             author: None,
             tags: Vec::new(),

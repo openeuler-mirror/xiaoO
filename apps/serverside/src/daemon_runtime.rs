@@ -821,6 +821,10 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
         Some(&self.bound_control)
     }
 
+    fn skills_listing_limit(&self) -> usize {
+        self.skills_config.max_listing_description_chars
+    }
+
     async fn resolve(
         &self,
         request: &SessionRuntimeBuildInput,
@@ -968,7 +972,10 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             llm_provider: llm_runtime.llm_provider,
             tool_registry,
             skill_registry: if is_e2b || profile == RuntimeCapabilityProfile::McpChatbot {
-                Some(Arc::new(FileSkillRegistry::from_skills(Vec::new())))
+                Some(Arc::new(FileSkillRegistry::from_skills_with_limit(
+                    Vec::new(),
+                    self.skills_config.max_listing_description_chars,
+                )))
             } else {
                 Some(Arc::clone(&self.skill_registry))
             },

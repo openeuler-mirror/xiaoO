@@ -205,6 +205,10 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             .subagent_control = Some(control);
     }
 
+    fn skills_listing_limit(&self) -> usize {
+        self.config.skills_config.max_listing_description_chars
+    }
+
     async fn resolve(
         &self,
         request: &SessionRuntimeBuildInput,

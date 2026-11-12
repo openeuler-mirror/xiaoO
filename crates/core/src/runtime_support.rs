@@ -63,8 +63,8 @@ impl EmptySkillRegistry {
 }
 
 impl SkillRegistry for EmptySkillRegistry {
-    fn list_skills(&self) -> Vec<SkillSummary> {
-        Vec::new()
+    fn list_skills(&self) -> Arc<[SkillSummary]> {
+        Vec::new().into()
     }
 
     fn get_skill(&self, _skill_id: &str) -> Option<&dyn agent_contracts::skill::SkillSpec> {

@@ -1,4 +1,5 @@
 use crate::context::PromptContext;
+use agent_types::common::sanitize_prompt_field;
 
 pub struct ChannelPromptSections<'a> {
     pub memory_prompt: &'a str,
@@ -294,17 +295,29 @@ fn compose_instructions_section(context: &PromptContext) -> Option<String> {
 }
 
 fn compose_skill_section(context: &PromptContext) -> Option<String> {
-    if context.skill_snippets.is_empty() {
+    // disable_model_invocation = 仅用户可 /skill-name 触发，模型侧无法调用
+    // （skill 执行器会拒绝）。系统提示是模型侧视图，列出这类 skill 只会
+    // 引导模型做必然失败的调用，故过滤；用户侧视图（/skills、管理目录）
+    // 不过滤，仍展示全部。
+    // 可信边界：skill 元数据（skill_id / description）是第三方可写内容，
+    // 插值前一律过 `sanitize_prompt_field`（与 L2 发现提示同源，见
+    // agent-types 的 text_sanitize）——换行折叠防伪 system prompt 段落
+    // 结构、闭合标签中和防逃逸提醒包裹层。截断已在 registry 快照完成
+    // （截断后文本可能残留不完整的闭合标签前缀，不构成合法闭合形式）。
+    let lines: Vec<String> = context
+        .skill_snippets
+        .iter()
+        .filter(|snippet| !snippet.disable_model_invocation)
+        .map(|snippet| {
+            format!(
+                "- {}: {}",
+                sanitize_prompt_field(snippet.skill_id.trim()),
+                sanitize_prompt_field(snippet.description.trim())
+            )
+        })
+        .collect();
+    if lines.is_empty() {
         return None;
-    }
-
-    let mut lines = Vec::new();
-
-    for snippet in &context.skill_snippets {
-        let skill_id = snippet.skill_id.trim();
-        let desc = snippet.description.trim();
-
-        lines.push(format!("- {}: {}", skill_id, desc));
     }
 
     let mut section = String::from("### Available Skills\n\nInvoke skills by name using `skill` tool or `/skill-name` command.\n");

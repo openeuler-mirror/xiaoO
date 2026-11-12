@@ -22,6 +22,8 @@ pub struct SkillSummary {
     pub id: String,
     pub enabled: bool,
     pub description: String,
+    /// 场景提示（何时该用这个 skill），可缺省
+    pub when_to_use: Option<String>,
     pub location: Option<String>,
     pub context: String,
     pub user_invocable: bool,
@@ -44,13 +46,16 @@ pub fn skill_catalog(config: &DaemonConfig, workspace: &Path) -> SkillCatalogRep
     let registry = FileSkillRegistry::new(&discovery_config);
     let skills = registry
         .list_skills()
-        .into_iter()
+        .iter()
         .filter_map(|summary| {
             let skill = registry.get_skill(&summary.skill_id)?;
             Some(SkillSummary {
-                id: summary.skill_id,
+                id: summary.skill_id.clone(),
                 enabled: !disabled.contains(skill.skill_id()),
-                description: summary.description,
+                // spec 访问器取全文：L1 清单截断（max_listing_description_chars）
+                // 只作用于 prompt 视图，管理侧目录不截断
+                description: skill.description().to_string(),
+                when_to_use: skill.when_to_use().map(str::to_string),
                 location: skill.location().map(|path| path.display().to_string()),
                 context: format!("{:?}", skill.context()).to_lowercase(),
                 user_invocable: skill.user_invocable(),

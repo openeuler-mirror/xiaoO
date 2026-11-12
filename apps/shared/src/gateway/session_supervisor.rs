@@ -719,6 +719,7 @@ impl SessionSupervisor {
             crate::gateway::finalize_e2b_runtime(
                 &mut resolved_runtime,
                 Arc::clone(&operation_backend),
+                self.runtime_resolver.skills_listing_limit(),
             )
             .await?;
             let session_snapshot = self.snapshot().await;

@@ -19,7 +19,9 @@ pub fn render_skills_overview_with_config(skills_config: &SkillsConfig) -> Strin
     scanned_dirs.dedup();
 
     let registry = FileSkillRegistry::new(skills_config);
-    let mut skills = registry.list_skills();
+    // 共享快照（`Arc<[SkillSummary]>`）不整体深拷贝：借用排序、借用渲染
+    let summaries = registry.list_skills();
+    let mut skills: Vec<_> = summaries.iter().collect();
     skills.sort_by(|left, right| left.skill_id.cmp(&right.skill_id));
 
     if skills.is_empty() {

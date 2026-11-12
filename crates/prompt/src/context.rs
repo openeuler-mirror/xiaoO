@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use agent_contracts::PromptBuildInput;
 use agent_types::context::prompt::{EnvironmentInfo, MemorySnippet, SkillSummary};
 use agent_types::ChatMessage;
@@ -30,7 +32,8 @@ pub struct PromptContext {
     pub environment: EnvironmentInfo,
     pub instructions: Vec<InstructionContext>,
     pub memory_snippets: Vec<MemorySnippet>,
-    pub skill_snippets: Vec<SkillSummary>,
+    /// skill 清单快照（registry 共享形态，compose 侧只读迭代）
+    pub skill_snippets: Arc<[SkillSummary]>,
     pub history: CompressedHistory,
 }
 

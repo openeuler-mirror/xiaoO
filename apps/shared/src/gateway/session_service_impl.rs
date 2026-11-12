@@ -1336,8 +1336,12 @@ impl CoreBackedSessionService {
             self.session_store.clone(),
         )
         .await?;
-        if let Err(error) =
-            crate::gateway::finalize_e2b_runtime(&mut resolved, backend_lease.backend()).await
+        if let Err(error) = crate::gateway::finalize_e2b_runtime(
+            &mut resolved,
+            backend_lease.backend(),
+            self.runtime_resolver.skills_listing_limit(),
+        )
+        .await
         {
             if is_new_session {
                 self.backend_manager
@@ -1537,8 +1541,12 @@ impl CoreBackedSessionService {
             self.session_store.clone(),
         )
         .await?;
-        if let Err(error) =
-            crate::gateway::finalize_e2b_runtime(&mut resolved, backend_lease.backend()).await
+        if let Err(error) = crate::gateway::finalize_e2b_runtime(
+            &mut resolved,
+            backend_lease.backend(),
+            self.runtime_resolver.skills_listing_limit(),
+        )
+        .await
         {
             if is_new_session {
                 self.backend_manager
