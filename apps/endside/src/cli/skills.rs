@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::cli::config::FileConfig;
 use xiaoo_api::skills::SkillRegistry;
 use xiaoo_api::skills::{audit_skill_directory, FileSkillRegistry, SkillAuditOptions};
-use xiaoo_shared::skills_support::SkillsConfig;
+use xiaoo_shared::skills_support::{SkillsConfig, SkillsSection};
 
 #[derive(clap::Subcommand)]
 pub(super) enum SkillCommands {
@@ -63,64 +63,19 @@ pub(super) fn resolve_skills_config_from_file(file_cfg: &FileConfig) -> SkillsCo
             .as_ref()
             .map(|skills| skills.disabled.iter().cloned().collect())
             .unwrap_or_default(),
+        max_listing_description_chars: SkillsSection::resolve_listing_limit(
+            file_cfg.skills.as_ref(),
+        ),
         ..SkillsConfig::default()
     }
 }
 
-fn resolve_all_skills_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    // The four directory levels and their dedup conditions match
-    // `resolve_skills_config_from_file`; see the docs there.
-    dirs.push(PathBuf::from(".xiaoo/skills"));
-
-    let file_cfg = FileConfig::load(None, false);
-    if let Some(skills) = file_cfg.skills.as_ref() {
-        if let Some(extra_dirs) = skills.dirs.as_ref() {
-            for dir in extra_dirs {
-                let path = PathBuf::from(dir);
-                let dir_str = path.to_string_lossy();
-                if dir_str != ".xiaoo/skills"
-                    && !dir_str.ends_with("/.xiaoo/skills")
-                    && !dir_str.ends_with("\\.xiaoo\\skills")
-                    && dir_str != "/usr/lib/.xiaoo/skills"
-                {
-                    dirs.push(path);
-                }
-            }
-        }
-    }
-
-    if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".xiaoo").join("skills"));
-    }
-
-    dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
-
-    dirs
-}
-
-fn build_skills_config() -> SkillsConfig {
-    let skills_dirs = resolve_all_skills_dirs();
-
-    let file_cfg = FileConfig::load(None, false);
-    let allow_scripts = file_cfg
-        .skills
-        .as_ref()
-        .and_then(|s| s.allow_scripts)
-        .unwrap_or(false);
-    let disabled = file_cfg
-        .skills
-        .as_ref()
-        .map(|skills| skills.disabled.iter().cloned().collect())
-        .unwrap_or_default();
-
-    SkillsConfig {
-        skills_dirs,
-        allow_scripts,
-        disabled,
-        ..SkillsConfig::default()
-    }
+fn default_skills_config() -> SkillsConfig {
+    // `skill list` / `skill show` 等管理与运行时入口（entry.rs）读同一份
+    // config.toml、同一套解析（含 max-listing-description-chars）——目录
+    // 装配不允许静默回退默认值。展示文本走 spec 访问器取全文，不受清单
+    // 截断影响
+    resolve_skills_config_from_file(&FileConfig::load(None, false))
 }
 
 fn project_skills_dir() -> PathBuf {
@@ -135,19 +90,15 @@ fn system_skills_dir() -> PathBuf {
     PathBuf::from("/usr/lib/.xiaoo/skills")
 }
 
-fn default_skills_config() -> SkillsConfig {
-    build_skills_config()
-}
-
 pub(super) fn handle_skill_command(command: SkillCommands) {
     match command {
         SkillCommands::List => {
-            let registry = FileSkillRegistry::new(&default_skills_config());
+            let skills_config = default_skills_config();
+            let registry = FileSkillRegistry::new(&skills_config);
             let skills = registry.list_skills();
             if skills.is_empty() {
                 println!("No skills installed.");
-                let dirs = resolve_all_skills_dirs();
-                for d in &dirs {
+                for d in &skills_config.skills_dirs {
                     println!("  Skills directory: {}", d.display());
                 }
                 return;

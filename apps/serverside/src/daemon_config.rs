@@ -21,6 +21,7 @@ use xiaoo_shared::mcp_support::{
     load_json_servers, merge_server_configs, resolve_json_config_path, McpSection,
 };
 use xiaoo_shared::skills_support::SkillsConfig;
+pub use xiaoo_shared::skills_support::SkillsSection;
 
 const DEFAULT_OUTPUT_TOKENS: usize = 16384;
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.txt");
@@ -267,16 +268,6 @@ impl DashboardConfig {
     pub fn is_enabled(&self) -> bool {
         self.enabled.unwrap_or(true)
     }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct SkillsSection {
-    #[serde(default)]
-    pub dirs: Option<Vec<String>>,
-    #[serde(default)]
-    pub allow_scripts: Option<bool>,
-    #[serde(default)]
-    pub disabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -924,6 +915,9 @@ impl DaemonConfig {
                 .as_ref()
                 .map(|skills| skills.disabled.iter().cloned().collect())
                 .unwrap_or_default(),
+            max_listing_description_chars: SkillsSection::resolve_listing_limit(
+                self.app.skills.as_ref(),
+            ),
             ..SkillsConfig::default()
         }
     }

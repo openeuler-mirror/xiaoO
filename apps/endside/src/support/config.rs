@@ -13,6 +13,7 @@ use xiaoo_shared::gateway::MemoryAutomationConfig;
 use xiaoo_shared::lsp_support::{build_extra_server_configs, LspServiceRegistry};
 use xiaoo_shared::mcp_support::{self, McpSection};
 use xiaoo_shared::skills_support::SkillsConfig as ResolvedSkillsConfig;
+pub use xiaoo_shared::skills_support::SkillsSection;
 
 const DEFAULT_AGENT_ID: &str = "main";
 const DEFAULT_LLM_MAX_TOKENS: u32 = 16384;
@@ -203,16 +204,6 @@ pub struct SubagentRoleConfig {
     pub tools: BTreeMap<String, bool>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SkillsSection {
-    #[serde(default)]
-    pub dirs: Option<Vec<String>>,
-    #[serde(default)]
-    pub allow_scripts: Option<bool>,
-    #[serde(default)]
-    pub disabled: Vec<String>,
-}
-
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
@@ -398,6 +389,9 @@ impl Config {
                 .as_ref()
                 .map(|skills| skills.disabled.iter().cloned().collect())
                 .unwrap_or_default(),
+            max_listing_description_chars: SkillsSection::resolve_listing_limit(
+                self.skills.as_ref(),
+            ),
             ..ResolvedSkillsConfig::default()
         }
     }
