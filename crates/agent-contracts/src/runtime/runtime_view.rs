@@ -8,6 +8,7 @@ use crate::skill::registry::SkillRegistry;
 use crate::tool::state::ToolStateStore;
 use crate::trace::TraceRecorder;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 pub trait RuntimeView: Send + Sync {
     fn state_store(&self) -> &dyn ToolStateStore;
@@ -26,6 +27,16 @@ pub trait RuntimeView: Send + Sync {
     }
     /// Operation backend for delegating operations to a remote service.
     fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
+        None
+    }
+
+    /// Token that fires when the running turn is cancelled.
+    ///
+    /// Long-running tools use this to abandon in-flight work and, where the
+    /// protocol supports it (MCP), notify the peer that the request is no
+    /// longer wanted. `None` means the runtime has no cancellation source,
+    /// so tools must run to completion as before.
+    fn cancel_token(&self) -> Option<CancellationToken> {
         None
     }
 }

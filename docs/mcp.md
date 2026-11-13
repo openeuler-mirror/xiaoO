@@ -199,6 +199,7 @@ If no `tools` map is configured for a role, all MCP tools are visible by default
 - **Input schema**: the MCP server's JSON Schema is passed through to the LLM unchanged — the model sees exactly what the server declares.
 - **Output**: MCP `content` blocks are flattened to a string. Text blocks are concatenated; image and resource blocks are summarised as placeholders (e.g. `[image mime=image/png bytes=2048]`).
 - **Errors**: if the server returns `is_error: true`, the tool result is marked as an error for the agent; JSON-RPC-level errors surface as a failed tool execution.
+- **Cancellation**: when the turn is cancelled, an in-flight `tools/call` is abandoned — the transport sends `notifications/cancelled` for that request id, stops waiting, and drops any response that arrives afterwards. MCP cancellation is advisory: a server may still finish side effects it has already started.
 
 ## Lifecycle
 

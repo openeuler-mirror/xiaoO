@@ -400,6 +400,10 @@ impl PluginToolHookerAdaptor {
                 "type": "permission_denied",
                 "message": message,
             }),
+            ToolExecutionError::Cancelled { message } => json!({
+                "type": "cancelled",
+                "message": message,
+            }),
         }
     }
 

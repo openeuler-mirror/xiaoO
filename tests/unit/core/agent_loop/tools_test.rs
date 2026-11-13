@@ -425,8 +425,8 @@ struct SingleToolRegistry {
 }
 
 impl SingleToolRegistry {
-    fn new() -> Self {
-        let spec = Arc::new(VisibleToolSpec {
+    fn spec() -> Arc<VisibleToolSpec> {
+        Arc::new(VisibleToolSpec {
             id: ToolId("tool.peek".to_string()),
             name: ToolName("peek".to_string()),
             description: "Read-only peek".to_string(),
@@ -442,10 +442,18 @@ impl SingleToolRegistry {
                 network_access: false,
                 side_effects: false,
             },
-        });
-        let executor: Arc<dyn ToolExecutor> = Arc::new(AlwaysSucceedsExecutor {
-            spec: Arc::clone(&spec),
-        });
+        })
+    }
+
+    fn new() -> Self {
+        Self::with_executor(|spec| Arc::new(AlwaysSucceedsExecutor { spec }))
+    }
+
+    fn with_executor(
+        make_executor: impl FnOnce(Arc<VisibleToolSpec>) -> Arc<dyn ToolExecutor>,
+    ) -> Self {
+        let spec = Self::spec();
+        let executor = make_executor(Arc::clone(&spec));
         Self { spec, executor }
     }
 
@@ -662,4 +670,112 @@ async fn tool_batch_preserves_build_failures_between_successful_calls() {
             ));
         }
     }
+}
+
+/// Blocks until the turn is cancelled, then reports `Cancelled` the same way
+/// the MCP executor does. Models a slow tool that observes the turn token.
+struct BlockingCancelledExecutor {
+    spec: Arc<VisibleToolSpec>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+#[async_trait]
+impl ToolExecutor for BlockingCancelledExecutor {
+    fn spec(&self) -> &dyn ToolSpecView {
+        self.spec.as_ref()
+    }
+
+    async fn invoke(
+        &self,
+        _call: &FinalToolCall,
+        _runtime: &dyn RuntimeView,
+    ) -> Result<ToolExecutorOutput, ToolExecutionError> {
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancel.cancelled().await;
+        Err(ToolExecutionError::Cancelled {
+            message: "cancelled by test".to_string(),
+        })
+    }
+}
+
+/// Cancelling a turn while tools are running must not persist any tool_result,
+/// and must drop the assistant `tool_use` blocks that would otherwise dangle
+/// in the transcript (issue #184 review follow-up).
+#[tokio::test]
+async fn cancelled_tool_batch_leaves_no_tool_results_in_history() {
+    let provider = Arc::new(LlmProviderWrapper::new(
+        Arc::new(TwoToolCallProvider::new()),
+        None,
+        None,
+    ));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let registry = SingleToolRegistry::with_executor({
+        let cancel = cancel.clone();
+        let started = Arc::clone(&started);
+        move |spec| {
+            Arc::new(BlockingCancelledExecutor {
+                spec,
+                started,
+                cancel,
+            })
+        }
+    });
+    let visible = registry.visible();
+    let runtime = test_runtime_with_registry(provider, 4, Arc::new(registry));
+    let mut loop_state =
+        LoopState::new_with_cancel(uuid::Uuid::new_v4().to_string(), cancel.clone());
+
+    let loop_task = tokio::spawn(async move {
+        run_agent_loop(
+            &runtime,
+            &mut loop_state,
+            AgentLoopInput::new("use the slow tool")
+                .with_agent_id(AgentId("test-agent".to_string()))
+                .with_visible_tools(visible)
+                .with_runtime_view(Arc::new(NoopRuntimeView::new())),
+        )
+        .await
+        .expect("a cancelled run still returns Ok")
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !started.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "tool never started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    cancel.cancel();
+
+    let result = loop_task.await.expect("loop task must not panic");
+    let LoopRunResult::Complete(AgentOutcome::Cancelled { messages, .. }) = result else {
+        panic!("expected a cancelled outcome");
+    };
+
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.role == MessageRole::Tool),
+        "a cancelled turn must not persist tool_result messages: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| {
+            message.role == MessageRole::Assistant
+                && message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        }),
+        "a cancelled turn must not leave dangling tool_use blocks: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.text_content() == Some("calling tools")),
+        "assistant text must survive when its tool_use blocks are dropped"
+    );
 }

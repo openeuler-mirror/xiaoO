@@ -17,6 +17,7 @@ use hook::HookerRegistryBuilder;
 use prompt::PromptBuilderImpl;
 use serde_json::Value;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tool::{
     snapshot_tool_specs, tool_specs_from_snapshot, EmptyToolRegistry, ToolSpecSnapshot,
     ToolStateStoreBuilderImpl,
@@ -79,6 +80,7 @@ impl AppRuntimeFactory {
         messages: Arc<RwLock<Vec<agent_types::ChatMessage>>>,
         existing_tool_manifest: Option<Vec<ToolSpecSnapshot>>,
         operation_backend: Arc<dyn OperationBackend>,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<AppRuntimeAssembly, AppRuntimeFactoryError> {
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl);
         // Defense-in-depth: every code path that resolves a session runtime
@@ -178,7 +180,8 @@ impl AppRuntimeFactory {
                 Box::new(ArcInteractionHandle::new(interaction_handle)),
                 hookers,
                 Some(operation_backend.clone()),
-            );
+            )
+            .with_cancel_token(cancel_token);
             let runtime_view: Arc<dyn RuntimeView> = Arc::new(SkillAwareRuntimeView {
                 inner,
                 skill_registry: skill_registry.clone(),
@@ -377,5 +380,8 @@ impl RuntimeView for SkillAwareRuntimeView {
     }
     fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
         self.inner.operation_backend()
+    }
+    fn cancel_token(&self) -> Option<CancellationToken> {
+        self.inner.cancel_token()
     }
 }

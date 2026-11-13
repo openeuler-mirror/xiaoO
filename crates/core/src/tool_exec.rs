@@ -15,7 +15,7 @@ use agent_types::outcome::AgentError;
 use agent_types::tool::{
     EffectProfile, FinalToolCall, RawToolCall, RawToolOutcome, ToolExecutionResult,
 };
-use agent_types::{AssistantMessage, ChatMessage, ToolUseBlock};
+use agent_types::{AssistantMessage, ChatMessage, ContentBlock, MessageRole, ToolUseBlock};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,7 +62,41 @@ pub(super) async fn run(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCa
                 .is_some_and(|spec| is_parallel_safe(spec.effect_profile()))
         });
     let results = execute_tool_batch(built, runtime.as_ref(), serialize).await;
+
+    // A cancelled turn must not leave tool results in the transcript: the
+    // model would otherwise see a cancelled MCP call as a real tool failure
+    // on the next turn. Drop both the results and the assistant `tool_use`
+    // blocks that were appended before execution, so the persisted history
+    // has no dangling tool call either.
+    if ctx.state.cancel.is_cancelled() {
+        discard_unanswered_tool_calls(ctx);
+        return Ok(Vec::new());
+    }
+
     Ok(record_tool_results(ctx, results).await)
+}
+
+/// Remove the assistant `tool_use` blocks for a batch that was cancelled
+/// before its results could be recorded.
+///
+/// `process_llm_tool_calls` appends the assistant message before execution so
+/// that suspended calls have their tool_use block in place. When the turn is
+/// cancelled, that block has no matching tool_result and must not be
+/// persisted; text blocks (if any) are kept, and an assistant message that
+/// only carried tool calls is removed entirely.
+fn discard_unanswered_tool_calls(ctx: &mut LoopContext<'_>) {
+    let mut messages = ctx.state.messages.write();
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    if last.role != MessageRole::Assistant {
+        return;
+    }
+    last.blocks
+        .retain(|block| !matches!(block, ContentBlock::ToolUse { .. }));
+    if last.blocks.is_empty() {
+        messages.pop();
+    }
 }
 
 fn normalized_tool_calls(ctx: &mut LoopContext<'_>) -> (Vec<ToolUseBlock>, Vec<ToolUseBlock>) {

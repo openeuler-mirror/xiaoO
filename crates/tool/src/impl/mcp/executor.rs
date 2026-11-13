@@ -32,18 +32,36 @@ impl ToolExecutor for McpToolExecutor {
     async fn invoke(
         &self,
         call: &FinalToolCall,
-        _runtime: &dyn RuntimeView,
+        runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
+        // The runtime only carries a token when the turn is cancellable.
+        // Passing it down stops this call from waiting for a slow MCP tool
+        // after the user cancels, and lets the transport tell the server.
+        let cancel = runtime.cancel_token();
         let result = self
             .client
-            .call_tool(&self.tool_name, call.input.clone())
+            .call_tool_with_cancel(&self.tool_name, call.input.clone(), cancel.as_ref())
             .await
-            .map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "mcp tool '{}' on server '{}' failed: {error}",
-                    self.tool_name,
-                    self.client.server_name(),
-                ),
+            .map_err(|error| {
+                // Cancellation is a turn-level outcome, not a tool failure:
+                // tool_exec drops it from the transcript and the event stream.
+                if matches!(error, mcp::McpError::Cancelled) {
+                    ToolExecutionError::Cancelled {
+                        message: format!(
+                            "mcp tool '{}' on server '{}' cancelled",
+                            self.tool_name,
+                            self.client.server_name(),
+                        ),
+                    }
+                } else {
+                    ToolExecutionError::ExecutionFailed {
+                        message: format!(
+                            "mcp tool '{}' on server '{}' failed: {error}",
+                            self.tool_name,
+                            self.client.server_name(),
+                        ),
+                    }
+                }
             })?;
 
         let output = result.flatten_text();

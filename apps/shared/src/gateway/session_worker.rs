@@ -123,6 +123,7 @@ impl SessionWorker {
             messages,
             input.tool_manifest.clone(),
             input.operation_backend.clone(),
+            input.cancellation_token.clone(),
         )
         .await?;
         let tool_manifest = assembly.tool_manifest.clone();
