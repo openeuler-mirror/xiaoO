@@ -14,6 +14,7 @@ use tokio::time::timeout;
 use tracing::warn;
 
 use crate::error::McpError;
+use crate::transport::with_forced_http1;
 use crate::transport::McpTransport;
 use crate::types::{InboundMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
@@ -38,7 +39,7 @@ pub struct SseTransport {
 
 impl SseTransport {
     pub async fn connect(url: &str, timeout_ms: u64) -> Result<Self, McpError> {
-        let http = HttpClient::builder()
+        let http = with_forced_http1(HttpClient::builder())
             .connect_timeout(std::time::Duration::from_millis(timeout_ms))
             .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()

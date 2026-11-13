@@ -11,6 +11,7 @@ use tokio::time::{sleep, timeout, Instant};
 
 use crate::config::{validate_fixed_headers, McpServerConfig};
 use crate::error::McpError;
+use crate::transport::with_forced_http1;
 use crate::transport::McpTransport;
 use crate::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
@@ -170,7 +171,7 @@ impl StreamableHttpTransport {
                 .map_err(|e| McpError::Protocol(format!("invalid HTTP header value: {e}")))?;
             headers.insert(name, value);
         }
-        let http = HttpClient::builder()
+        let http = with_forced_http1(HttpClient::builder())
             .connect_timeout(std::time::Duration::from_millis(config.timeout_ms))
             .tcp_keepalive(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())

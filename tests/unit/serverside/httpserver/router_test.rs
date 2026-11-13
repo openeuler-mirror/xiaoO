@@ -1208,3 +1208,192 @@ async fn health_gates_host_identity_on_bearer_auth() {
         );
     }
 }
+
+/// Serve a health router wrapped in the real loopback Host guard on a
+/// loopback listener, mirroring how `main.rs` puts the API surface on the
+/// wire. Protocol negotiation happens below the tower layer, so the guard's
+/// behavior over h2c can only be pinned against a real connection.
+async fn spawn_guarded_health_server() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let address = listener.local_addr().expect("listener address");
+    let router = apply_loopback_host_guard(
+        axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
+        ),
+        Some(address),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve guarded router");
+    });
+    address
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn loopback_host_guard_accepts_h2c_authority_and_plain_http1() {
+    let address = spawn_guarded_health_server().await;
+    let base = format!("http://{address}");
+
+    // hyper maps the h2 `:authority` pseudo-header onto the Host header, so
+    // the guard must keep accepting a loopback authority over h2c.
+    let h2c = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .expect("h2c client");
+    let response = h2c
+        .get(format!("{base}/health"))
+        .send()
+        .await
+        .expect("h2c health request");
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    // Regression: the same listener keeps answering plain HTTP/1.1 callers.
+    let http1 = reqwest::Client::new();
+    let response = http1
+        .get(format!("{base}/health"))
+        .send()
+        .await
+        .expect("http1 health request");
+    assert_eq!(response.version(), reqwest::Version::HTTP_11);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn loopback_host_guard_rejects_non_loopback_h2c_authority() {
+    let address = spawn_guarded_health_server().await;
+
+    // DNS-rebinding shape over h2c: the `:authority` names the attacker's
+    // domain while a pinned resolve keeps the connection on loopback. The
+    // guard must reject the forged authority just like over HTTP/1.1.
+    let rebind = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .resolve("rebind.example.test", address)
+        .build()
+        .expect("rebinding h2c client");
+    let response = rebind
+        .get(format!(
+            "http://rebind.example.test:{}/health",
+            address.port()
+        ))
+        .send()
+        .await
+        .expect("rebinding request");
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn loopback_host_guard_rejects_conflicting_host_header_and_authority() {
+    // This test drives the router through `oneshot`, so no socket is ever
+    // contacted; the guard state only needs a concrete loopback port to
+    // compare against. Bind without serving (and keep the listener bound so
+    // the port cannot be reclaimed mid-test) instead of spawning a real
+    // guarded server that would never be hit.
+    let port_holder = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback port holder");
+    let address = port_holder.local_addr().expect("holder address");
+    let router = apply_loopback_host_guard(
+        axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
+        ),
+        Some(address),
+    );
+
+    // An HTTP/2 request may carry both an `:authority` (mapped onto the URI)
+    // and a regular Host header. A benign Host header must not smuggle a
+    // request whose authority names someone else's domain.
+    let smuggled = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "http://rebind.example.test:{}/health",
+                    address.port()
+                ))
+                .header("host", format!("127.0.0.1:{}", address.port()))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("smuggled request should respond");
+    assert_eq!(smuggled.status(), StatusCode::FORBIDDEN);
+
+    // When both forms agree on the loopback listener the request passes.
+    let honest = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("http://127.0.0.1:{}/health", address.port()))
+                .header("host", format!("127.0.0.1:{}", address.port()))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("honest request should respond");
+    assert_eq!(honest.status(), StatusCode::OK);
+}
+
+/// The system-test mirror (`tests/system/serverside/http2_serving_test.rs`)
+/// pins axum/hyper's dual-protocol behavior in isolation; this one is a layer
+/// up — the daemon's real router (turn pipeline: lease check, SSE sink chain,
+/// diff-tracker wiring, spawned turn task) must serve a full SSE turn over an
+/// h2c prior-knowledge connection, not only HTTP/1.1 oneshots. The fake
+/// session service emits no loop events, so the stream is expected to carry
+/// exactly the terminal `done` event with the reply payload.
+#[tokio::test(flavor = "current_thread")]
+async fn sse_turn_stream_serves_h2c_on_real_router() {
+    let router = create_router_with_auth(
+        Arc::new(FakeSessionService::new("h2c turn reply")),
+        None,
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let address = listener.local_addr().expect("listener address");
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve real router");
+    });
+
+    let h2c = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .expect("h2c client");
+    let response = h2c
+        .post(format!("http://{address}/api/v1/runtimes/input"))
+        .header("content-type", "application/json")
+        .body(
+            r#"{"runtime_id":"runtime-1","entry":{"kind":"tui"},"channel":"tui","conversation_id":"conv-1","sender_id":"user-1","text":"hello","mentions":[]}"#
+                .to_string(),
+        )
+        .send()
+        .await
+        .expect("h2c turn request");
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "unexpected content type: {content_type}"
+    );
+    let body = response.text().await.expect("sse body");
+    assert!(
+        body.contains("event: done"),
+        "turn must terminate in a done event; body: {body}"
+    );
+    assert!(
+        body.contains("h2c turn reply"),
+        "done event must carry the turn reply; body: {body}"
+    );
+}

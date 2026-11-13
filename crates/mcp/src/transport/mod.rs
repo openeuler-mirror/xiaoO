@@ -17,6 +17,31 @@ use crate::error::McpError;
 /// that stops reading stdin must not make cancellation wait forever.
 const CANCELLATION_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// 出站 HTTP transport 的"锁回 HTTP/1.1"逃生门，与
+/// `crates/llm-client/src/http.rs` 的 `http1_forced` 读取同一个环境变量
+/// `XIAOO_LLM_FORCE_HTTP1`、同一套取值语义：空串 / `0` / 小写 `false`
+/// （仅去首尾空白，区分大小写）视为关闭，其余任意值（含 `off` / `no` /
+/// `False`）一律开启。判据在这里另写一份而非复用 llm-client：mcp 是更
+/// 底层的 crate，不该为三行 env 解析反向依赖 llm-client。用途：reqwest
+/// 的 `http2` feature 在 workspace 层声明后经特性统一波及进程内所有
+/// reqwest client，上游 MCP 网关若经 ALPN 协商到有缺陷的 h2 流式实现，
+/// 现场用这一个开关把 LLM 客户端与 MCP 出站一起锁回 HTTP/1.1，无需发版。
+fn with_forced_http1(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    if http1_forced() {
+        builder.http1_only()
+    } else {
+        builder
+    }
+}
+
+/// [`with_forced_http1`] 的判据本体；与 llm-client 侧逐字符一致，
+/// 改动取值语义时两侧必须同步。
+fn http1_forced() -> bool {
+    std::env::var("XIAOO_LLM_FORCE_HTTP1")
+        .ok()
+        .is_some_and(|value| !matches!(value.trim(), "" | "0" | "false"))
+}
+
 /// Bidirectional JSON-RPC transport. Implementations own the underlying
 /// connection (child process pipes, HTTP stream) and serialise requests.
 #[async_trait]

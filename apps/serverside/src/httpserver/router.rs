@@ -830,24 +830,34 @@ fn loopback_host_guard(listen_addr: Option<SocketAddr>) -> Option<LoopbackHostGu
     Some(LoopbackHostGuard { port: addr.port() })
 }
 
-/// Reject requests whose Host header does not name this listener.
+/// Reject requests whose host identity does not name this listener.
 ///
-/// A DNS-rebinding attack delivers browser requests whose Host is the
+/// A DNS-rebinding attack delivers browser requests whose host is the
 /// attacker's domain while the connection lands on loopback; the browser
-/// treats them as same-origin so CORS never applies, which makes the Host
-/// header the only signal left. It must name a loopback host at the port we
-/// serve on.
+/// treats them as same-origin so CORS never applies, which makes the host
+/// identity the only signal left. It must name a loopback host at the port
+/// we serve on. HTTP/1.1 carries it in the Host header; HTTP/2 carries it in
+/// the `:authority` pseudo-header, which hyper maps onto the request URI's
+/// authority (no Host header is synthesized), so both forms are checked and
+/// must agree when a request carries both.
 async fn enforce_loopback_host(
     State(guard): State<LoopbackHostGuard>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let host = request
+    let host_header = request
         .headers()
         .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(StatusCode::FORBIDDEN)?;
-    if !host_names_listener(host, guard.port) {
+        .and_then(|value| value.to_str().ok());
+    let uri_authority = request.uri().authority().map(Authority::as_str);
+    let mut carried_host = false;
+    for host in host_header.into_iter().chain(uri_authority) {
+        carried_host = true;
+        if !host_names_listener(host, guard.port) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    if !carried_host {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(next.run(request).await)
@@ -888,7 +898,7 @@ fn authority_port_segment(authority: &Authority) -> Option<&str> {
         .and_then(|rest| rest.strip_prefix(':'))
 }
 
-/// Wrap an arbitrary daemon router with the loopback Host-header guard for
+/// Wrap an arbitrary daemon router with the loopback host guard for
 /// `listen_addr`.
 ///
 /// Shares the [`enforce_loopback_host`] middleware the main API router gets

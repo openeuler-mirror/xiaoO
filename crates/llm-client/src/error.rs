@@ -170,15 +170,6 @@ fn parse_retry_after_value(value: &str) -> Option<u64> {
     )
 }
 
-pub(crate) fn parse_stream_error(data: &str) -> Option<LlmError> {
-    let body = parse_json_object(data)?;
-    if body.get("type").and_then(Value::as_str) != Some("error") {
-        return None;
-    }
-
-    Some(classify_stream_error(&body))
-}
-
 pub(crate) fn parse_openai_stream_error(data: &str) -> Option<LlmError> {
     let body = parse_json_object(data)?;
     // Keep the existing top-level error envelope's classification unchanged.

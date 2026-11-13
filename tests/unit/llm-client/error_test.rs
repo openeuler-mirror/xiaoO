@@ -155,26 +155,5 @@ fn parse_retry_after_value_accepts_seconds_ms_suffix_and_fractions() {
     assert_eq!(parse_retry_after_value("-1"), None);
 }
 
-#[test]
-fn parse_stream_error_classifies_context_length_exceeded() {
-    let error = parse_stream_error(
-        r#"{"type":"error","error":{"code":"context_length_exceeded","message":"overflow"}}"#,
-    );
-
-    assert!(matches!(
-        error,
-        Some(LlmError::ContextLengthExceeded { .. })
-    ));
-}
-
-#[test]
-fn parse_stream_error_keeps_other_stream_errors_as_api_errors() {
-    let error = parse_stream_error(
-        r#"{"type":"error","error":{"code":"invalid_prompt","message":"bad prompt"}}"#,
-    );
-
-    assert!(matches!(error, Some(LlmError::ApiError(_))));
-}
-
 #[path = "error_redaction_test.rs"]
 mod redaction;
