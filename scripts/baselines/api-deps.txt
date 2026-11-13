@@ -1,5 +1,9 @@
 # xiaoo-api 冻结的 path 依赖名基线。
-# 取自重构完成时 crates/xiaoo-api/Cargo.toml 的 path 依赖名；扩充即报错。
+# workspace-version: 0.1.0
+# 取自重构完成时 crates/xiaoo-api/Cargo.toml 的 path 依赖名；与当前集合精确比对，
+# 新增、删除、改名均报错（依赖边冻结）。
+# 修改基线条目前须先 bump [workspace.package].version，再同步本文件的
+# workspace-version 头；仅改注释不影响校验。
 # 改基线时改本文件即可，check-facade.sh 自动读取。
 # 再生成（与 check-facade.sh 的提取逻辑同源，便于核对/重置基线）：
 #   awk '/^\[dependencies\][[:space:]]*$/{in_dep=1;next}/^\[/{in_dep=0;next}in_dep' crates/xiaoo-api/Cargo.toml \
