@@ -31,6 +31,9 @@ pub enum McpError {
 
     #[error("mcp server disconnected during request")]
     Disconnected,
+
+    #[error("mcp request cancelled")]
+    Cancelled,
 }
 
 impl From<std::io::Error> for McpError {

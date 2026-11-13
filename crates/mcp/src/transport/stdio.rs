@@ -10,6 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::error::McpError;
@@ -156,37 +157,107 @@ impl StdioTransport {
         let mut buf = Vec::with_capacity(line.len() + 1);
         buf.extend_from_slice(line.as_bytes());
         buf.push(b'\n');
-        match timeout(
-            std::time::Duration::from_millis(self.timeout_ms),
-            stdin.write_all(&buf),
-        )
-        .await
-        {
-            Ok(Ok(())) => {
-                // `flush` is a no-op for pipes (data goes straight to the
-                // kernel buffer) but call for correctness.
-                if let Err(e) = stdin.flush().await {
-                    // stdin is dropped here (not put back), poisoning the
-                    // connection.
-                    return Err(McpError::Io(e.to_string()));
-                }
+        match write_buf(&mut stdin, &buf, self.timeout_ms).await {
+            Ok(()) => {
                 *guard = Some(stdin);
                 Ok(())
             }
-            Ok(Err(e)) => {
-                // Write error — pipe is broken. stdin is dropped, leaving
-                // guard as None so future calls return TransportClosed.
-                Err(McpError::Io(e.to_string()))
-            }
-            Err(_) => {
-                // Timeout: an unknown number of bytes may have reached the
-                // pipe buffer. Poison stdin (not put back) to prevent
-                // subsequent writes from corrupting the framing.
-                Err(McpError::Timeout {
-                    timeout_ms: self.timeout_ms,
-                })
-            }
+            // Write error or timeout: stdin is dropped, leaving guard as None
+            // so future calls return TransportClosed. On timeout an unknown
+            // number of bytes may already be in the pipe, so not putting
+            // stdin back is what prevents framing corruption.
+            Err(error) => Err(error),
         }
+    }
+
+    /// Shared request path for [`McpTransport::send_request`] and
+    /// [`McpTransport::send_request_cancellable`].
+    ///
+    /// The frame is always fully written before the cancellation race starts,
+    /// so cancelling can never leave a partial JSON-RPC line in the child's
+    /// stdin (which would corrupt every later request). This also bounds when
+    /// cancellation can take effect: if the child stopped reading stdin, a
+    /// blocked write is only abandoned at `timeout_ms`, not immediately.
+    /// Racing the write itself would require detaching it and would risk a
+    /// half-written frame. On cancellation the
+    /// pending entry is removed before the notification is sent: the late
+    /// response then finds no receiver and is dropped by the reader loop,
+    /// as MCP requires for a cancelled request.
+    async fn send_request_inner(
+        &self,
+        id: u64,
+        method: &str,
+        params: Option<Value>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Value, McpError> {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Err(McpError::Cancelled);
+        }
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: id.into(),
+            method: method.to_string(),
+            params,
+        };
+        let line = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
+
+        let (tx, rx) = oneshot::channel::<JsonRpcResponse>();
+        {
+            let mut map = self.pending.lock().await;
+            map.insert(id, tx);
+        }
+
+        if let Err(e) = self.write_line(&line).await {
+            let mut map = self.pending.lock().await;
+            map.remove(&id);
+            return Err(e);
+        }
+
+        let wait = timeout(std::time::Duration::from_millis(self.timeout_ms), rx);
+        let outcome = match cancel {
+            Some(token) => tokio::select! {
+                biased;
+                _ = token.cancelled() => Err(McpError::Cancelled),
+                result = wait => map_wait_result(result, self.timeout_ms),
+            },
+            None => map_wait_result(wait.await, self.timeout_ms),
+        };
+
+        let resp = match outcome {
+            Ok(resp) => resp,
+            Err(error) => {
+                self.pending.lock().await.remove(&id);
+                if matches!(error, McpError::Cancelled) {
+                    self.send_cancelled_notification(id).await;
+                }
+                return Err(error);
+            }
+        };
+
+        if let Some(err) = resp.error {
+            return Err(McpError::ServerError {
+                code: err.code,
+                message: err.message,
+            });
+        }
+        resp.result
+            .ok_or_else(|| McpError::Protocol("empty result".to_string()))
+    }
+}
+
+/// Map the nested `timeout(oneshot)` result onto the transport error model.
+fn map_wait_result(
+    result: Result<
+        Result<JsonRpcResponse, tokio::sync::oneshot::error::RecvError>,
+        tokio::time::error::Elapsed,
+    >,
+    timeout_ms: u64,
+) -> Result<JsonRpcResponse, McpError> {
+    match result {
+        Ok(Ok(resp)) => Ok(resp),
+        Ok(Err(_)) => Err(McpError::Disconnected),
+        Err(_) => Err(McpError::Timeout { timeout_ms }),
     }
 }
 
@@ -245,6 +316,34 @@ async fn reader_loop(stdout: tokio::process::ChildStdout, pending: PendingMap) {
     }
 }
 
+/// Write one framed message, bounding both the write and the flush.
+///
+/// The caller owns `stdin`; on error it must drop the handle instead of
+/// putting it back, because a timeout can leave a partial frame in the pipe.
+async fn write_buf(
+    stdin: &mut tokio::process::ChildStdin,
+    buf: &[u8],
+    timeout_ms: u64,
+) -> Result<(), McpError> {
+    match timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        stdin.write_all(buf),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            // `flush` is a no-op for pipes (data goes straight to the kernel
+            // buffer) but call for correctness.
+            stdin
+                .flush()
+                .await
+                .map_err(|error| McpError::Io(error.to_string()))
+        }
+        Ok(Err(error)) => Err(McpError::Io(error.to_string())),
+        Err(_) => Err(McpError::Timeout { timeout_ms }),
+    }
+}
+
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn send_request(
@@ -253,50 +352,17 @@ impl McpTransport for StdioTransport {
         method: &str,
         params: Option<Value>,
     ) -> Result<Value, McpError> {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: id.into(),
-            method: method.to_string(),
-            params,
-        };
-        let line = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
+        self.send_request_inner(id, method, params, None).await
+    }
 
-        let (tx, rx) = oneshot::channel::<JsonRpcResponse>();
-        {
-            let mut map = self.pending.lock().await;
-            map.insert(id, tx);
-        }
-
-        if let Err(e) = self.write_line(&line).await {
-            let mut map = self.pending.lock().await;
-            map.remove(&id);
-            return Err(e);
-        }
-
-        let resp = match timeout(std::time::Duration::from_millis(self.timeout_ms), rx).await {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(_)) => {
-                let mut map = self.pending.lock().await;
-                map.remove(&id);
-                return Err(McpError::Disconnected);
-            }
-            Err(_) => {
-                let mut map = self.pending.lock().await;
-                map.remove(&id);
-                return Err(McpError::Timeout {
-                    timeout_ms: self.timeout_ms,
-                });
-            }
-        };
-
-        if let Some(err) = resp.error {
-            return Err(McpError::ServerError {
-                code: err.code,
-                message: err.message,
-            });
-        }
-        resp.result
-            .ok_or_else(|| McpError::Protocol("empty result".to_string()))
+    async fn send_request_cancellable(
+        &self,
+        id: u64,
+        method: &str,
+        params: Option<Value>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Value, McpError> {
+        self.send_request_inner(id, method, params, cancel).await
     }
 
     async fn send_notification(&self, method: &str, params: Option<Value>) -> Result<(), McpError> {
@@ -310,8 +376,50 @@ impl McpTransport for StdioTransport {
         Ok(())
     }
 
+    /// Best-effort cancellation notification that never queues behind an
+    /// in-flight write.
+    ///
+    /// The default trait implementation waits up to 1s on the transport. For
+    /// stdio that wait is on `stdin`: if the timeout fires after `write_all`
+    /// started, dropping the future discards the `ChildStdin` taken out of the
+    /// mutex and permanently poisons the connection. A best-effort
+    /// notification must not cost the whole server session, so skip it when
+    /// another write owns the lock, and only accept the poisoning risk once
+    /// the notification write itself has started.
+    async fn send_cancelled_notification(&self, id: u64) {
+        let Ok(mut guard) = self.stdin.try_lock() else {
+            return;
+        };
+        let Some(mut stdin) = guard.take() else {
+            return;
+        };
+        let notif = JsonRpcNotification {
+            jsonrpc: "2.0".to_string(),
+            method: "notifications/cancelled".to_string(),
+            params: Some(serde_json::json!({ "requestId": id })),
+        };
+        let line = match serde_json::to_string(&notif) {
+            Ok(line) => line,
+            Err(_) => {
+                *guard = Some(stdin);
+                return;
+            }
+        };
+        let mut buf = Vec::with_capacity(line.len() + 1);
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(b'\n');
+        if write_buf(&mut stdin, &buf, CANCEL_NOTIFICATION_TIMEOUT_MS)
+            .await
+            .is_ok()
+        {
+            *guard = Some(stdin);
+        }
+    }
+
     async fn set_protocol_version(&self, _protocol_version: &str) {}
 }
+
+const CANCEL_NOTIFICATION_TIMEOUT_MS: u64 = 1_000;
 
 // Note: no custom `Drop` — `Command::kill_on_drop(true)` ensures the child is
 // killed when `Child` (held inside the `Mutex<Option<Child>>`) drops.

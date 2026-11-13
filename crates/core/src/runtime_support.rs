@@ -20,6 +20,7 @@ use agent_types::tool::{
 use agent_types::ChatMessage;
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopToolEventSink;
@@ -173,6 +174,7 @@ pub struct BasicRuntimeView {
     interaction: Box<dyn InteractionHandle>,
     hookers: Box<dyn HookerRegistry>,
     operation_backend: Option<Arc<dyn OperationBackend>>,
+    cancel_token: Option<CancellationToken>,
 }
 
 impl BasicRuntimeView {
@@ -193,7 +195,16 @@ impl BasicRuntimeView {
             interaction,
             hookers,
             operation_backend,
+            cancel_token: None,
         }
+    }
+
+    /// Attach the running turn's cancellation token. Tools read it through
+    /// [`RuntimeView::cancel_token`] to stop in-flight work when the turn is
+    /// cancelled.
+    pub fn with_cancel_token(mut self, cancel_token: Option<CancellationToken>) -> Self {
+        self.cancel_token = cancel_token;
+        self
     }
 }
 
@@ -224,6 +235,10 @@ impl RuntimeView for BasicRuntimeView {
 
     fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
         self.operation_backend.clone()
+    }
+
+    fn cancel_token(&self) -> Option<CancellationToken> {
+        self.cancel_token.clone()
     }
 }
 

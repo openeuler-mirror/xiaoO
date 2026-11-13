@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{McpServerConfig, Transport};
 use crate::error::McpError;
@@ -128,6 +129,22 @@ impl McpClient {
 
     /// Invoke a tool by name with JSON arguments.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<McpCallResult, McpError> {
+        self.call_tool_with_cancel(name, arguments, None).await
+    }
+
+    /// Invoke a tool by name, abandoning the request as soon as `cancel`
+    /// fires.
+    ///
+    /// Cancellation is advisory at the protocol level: the transport sends
+    /// `notifications/cancelled`, stops waiting for the response and drops
+    /// any response that arrives afterwards. The server may still finish the
+    /// side effects it started — MCP cannot force a peer to stop.
+    pub async fn call_tool_with_cancel(
+        &self,
+        name: &str,
+        arguments: Value,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<McpCallResult, McpError> {
         let params = CallToolParams {
             name: name.to_string(),
             arguments,
@@ -136,7 +153,7 @@ impl McpClient {
             serde_json::to_value(&params).map_err(|e| McpError::Protocol(e.to_string()))?;
         let result = self
             .transport
-            .send_request(self.next_id(), "tools/call", Some(params_value))
+            .send_request_cancellable(self.next_id(), "tools/call", Some(params_value), cancel)
             .await?;
         let call: CallToolResult = serde_json::from_value(result)
             .map_err(|e| McpError::Protocol(format!("parse tools/call: {e}")))?;

@@ -84,6 +84,16 @@ impl ToolCallImpl {
     }
 
     pub(super) fn emit_tool_event(&self, runtime: &dyn RuntimeView, event: ToolLifecycleEvent) {
+        // A cancelled turn must not surface a tool failure to the UI or the
+        // event sinks: tool_exec drops the result from the transcript, so a
+        // `Failed` event would describe a call that no longer exists.
+        if matches!(&event, ToolLifecycleEvent::Failed { .. })
+            && runtime
+                .cancel_token()
+                .is_some_and(|token| token.is_cancelled())
+        {
+            return;
+        }
         runtime.tool_events().emit(event);
     }
 }

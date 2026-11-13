@@ -13,6 +13,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time", "macros"] }
 tracing.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 reqwest = { workspace = true, features = ["stream"] }
 futures-util.workspace = true
 url.workspace = true
@@ -30,3 +31,7 @@ path = "../../tests/system/mcp/streamable_http_test.rs"
 [[test]]
 name = "mcp_stdio_handshake"
 path = "../../tests/system/mcp/stdio_handshake_test.rs"
+
+[[test]]
+name = "mcp_cancellation"
+path = "../../tests/system/mcp/cancellation_test.rs"

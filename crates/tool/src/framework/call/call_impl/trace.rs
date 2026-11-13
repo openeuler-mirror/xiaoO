@@ -66,6 +66,18 @@ impl ToolCallImpl {
             return;
         };
 
+        // Cancellation is not an error outcome: report it as `Cancelled` so
+        // traces do not show a tool failure the user caused by cancelling.
+        let outcome = if matches!(outcome, TraceOutcome::Error)
+            && runtime
+                .cancel_token()
+                .is_some_and(|token| token.is_cancelled())
+        {
+            TraceOutcome::Cancelled
+        } else {
+            outcome
+        };
+
         let (result_kind, execution_error) = match result {
             ToolExecutionResult::Completed { raw_outcome, .. } => match raw_outcome {
                 RawToolOutcome::Success { .. } => ("success", None),

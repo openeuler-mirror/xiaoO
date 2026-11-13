@@ -28,6 +28,12 @@ pub enum ToolExecutionError {
 
     #[error("permission denied: {message}")]
     PermissionDenied { message: String },
+
+    /// The turn was cancelled while the tool was running. This is distinct
+    /// from a tool failure: cancellation is a user decision, and the result
+    /// must not be recorded as a failed tool call in the turn's transcript.
+    #[error("cancelled: {message}")]
+    Cancelled { message: String },
 }
 
 #[derive(Clone, Debug)]
