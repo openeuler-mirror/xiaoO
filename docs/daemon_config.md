@@ -1034,11 +1034,17 @@ All events are tagged with `type` and emit a matching SSE `event:` name. `agent_
 
 `tool_file_change` compares the target's content immediately before and after
 each `file_edit` or `file_write` call, independently of earlier calls or user
-turns. Empty-file creation emits `additions: 0, deletions: 0`. If either content
+turns. When content can be read, an event is emitted only if existence or content
+bytes change: identical rewrites (including empty-to-empty) emit nothing, while
+empty-file creation/removal and final-newline changes emit 0/0. If either content
 read fails, the counts are estimates from the tool arguments; large text diffs
 use a common-prefix/suffix approximation. File changes made by other tools,
 including bash creation, deletion and rename, do not emit this event. It is
 not a complete workspace change log.
+
+Consumers that keep only the last event per path within a user turn will omit
+earlier calls under this per-call counting rule; accumulate deltas by call
+instead when displaying the turn's cumulative operation counts.
 
 That is the complete set of **13** event names. Both the daemon's capabilities
 list and the protocol enum agree on exactly these

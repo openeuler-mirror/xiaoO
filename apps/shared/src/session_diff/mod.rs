@@ -235,20 +235,24 @@ impl SessionDiffTracker {
         };
 
         let current_content = read_file_baseline(&baseline.absolute_path);
-        let call_delta = match &current_content {
-            FileReadOutcome::Unreadable => None,
-            FileReadOutcome::Absent if baseline.content.is_none() => None,
-            FileReadOutcome::Absent => Some(file_content_delta(
-                &baseline.file_path,
-                baseline.content.as_deref(),
-                None,
-            )),
-            // An absent-to-present transition counts even for an empty file.
-            FileReadOutcome::Present(current) => Some(file_content_delta(
-                &baseline.file_path,
-                baseline.content.as_deref(),
-                Some(current),
-            )),
+        let (call_delta, emit_change) = match &current_content {
+            FileReadOutcome::Unreadable => (fallback.clone(), true),
+            FileReadOutcome::Absent => (
+                Some(file_content_delta(
+                    &baseline.file_path,
+                    baseline.content.as_deref(),
+                    None,
+                )),
+                baseline.content.is_some(),
+            ),
+            FileReadOutcome::Present(current) => (
+                Some(file_content_delta(
+                    &baseline.file_path,
+                    baseline.content.as_deref(),
+                    Some(current),
+                )),
+                baseline.content.as_deref() != Some(current.as_str()),
+            ),
         };
         let initial_content = self.session_file_content_baselines.get(&baseline.file_path);
         let computed = match current_content {
@@ -286,7 +290,7 @@ impl SessionDiffTracker {
         };
         // The session panel keeps its net diff against the first baseline,
         // independently of the per-call delta returned to event consumers.
-        if let Some(delta) = computed.or_else(|| fallback.clone()) {
+        if let Some(delta) = computed.or(fallback) {
             self.session_file_changes.insert(
                 delta.file_path.clone(),
                 SessionFileChangeStats {
@@ -298,7 +302,7 @@ impl SessionDiffTracker {
                 self.session_file_changes.remove(&delta.file_path);
             }
         }
-        if let Some(delta) = call_delta.or(fallback) {
+        if let Some(delta) = call_delta {
             // Register the applied delta under this `call_id` so that a
             // duplicate terminal event is caught by the
             // `tool_file_changes.contains_key` guard above instead of
@@ -311,7 +315,10 @@ impl SessionDiffTracker {
             // `reconcile_tool_file_change`.
             self.tool_file_changes
                 .insert(call_id.to_string(), delta.clone());
-            Some(delta)
+            // A readable no-op must still be deduplicated, without falling
+            // back to args estimation. Byte/existence changes can have 0/0
+            // line counts (e.g. a final newline or empty-file removal).
+            emit_change.then_some(delta)
         } else {
             self.reconcile_tool_file_change(call_id, None)
         }

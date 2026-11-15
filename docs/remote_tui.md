@@ -269,7 +269,7 @@ SSE event types:
 | `thinking_delta` | Assistant reasoning text update (mirrors `text_delta` semantics) |
 | `tool_result` | Tool execution result summary; carries `agent_id`, `call_id`, `tool_name`, `output_preview`, `is_error`, and `args_preview` |
 | `tool_call` | Tool lifecycle transition (`running` / `completed` / `failed` / `denied`). Forwarded by the daemon so the remote TUI can drive the same tool-card state machine as local mode (running spinner, terminal state). `agent_id` routes the update to the root message list or a subagent lane |
-| `tool_file_change` | Per-call line changes for the `file_edit` / `file_write` target, precomputed by the daemon and accumulated by the remote TUI |
+| `tool_file_change` | Per-call changes for the `file_edit` / `file_write` target, precomputed by the daemon; panel handling is described below |
 | `plan_update` | Plan snapshot parsed by the daemon from the `todo_write` tool's args |
 | `subagent_spawn` | Subagent lane metadata parsed by the daemon from the `spawn_subagent` tool's args + output; lets the TUI create the subagent lane without re-parsing the daemon-only `args_preview` |
 | `loop_end` | Per-agent loop-end marker. The daemon emits one per `agent_id` (root or subagent) so the TUI can clear `is_running` on the matching subagent lane as its loop terminates, matching local-mode `ChannelLoopEventSink::on_loop_end` semantics. Carries the per-agent `LoopEndSummary` fields (`turn_count`, `total_tokens`, `stop_reason`) so the TUI can render per-agent token usage / stop reason with parity to local mode; older daemons that omit them default to zero / empty via `#[serde(default)]` |
@@ -279,12 +279,27 @@ SSE event types:
 | `cancelled` | Cancellation acknowledgement |
 
 `tool_file_change` counts only the target's line changes during that call,
-not its net changes since the session began. Empty-file creation emits 0/0.
+not its net changes since the session began. With readable content, identical
+rewrites emit nothing; existence or byte changes with no line-count difference
+(such as empty-file creation/removal or a final-newline change) emit 0/0.
 Counts fall back to tool-argument estimates if either content read fails;
 large text diffs use a common-prefix/suffix approximation. Changes made by
 other tools, including bash creation, deletion and rename, are not reported.
-The remote TUI accumulates the received deltas; the local session panel keeps
-its net comparison against each file's first captured content.
+The remote TUI first captures a baseline from its own local workspace on
+`ToolCall(Running)`. `apply_remote_delta` then adds nonzero SSE deltas, but the
+subsequent `ToolResult` calls `on_tool_completed`, which can overwrite
+`session_file_changes` with a diff read on the TUI machine or with tool-argument
+estimates. For example, `file_write` can show the new content's total line count
+when the local file is absent, or remove the panel entry if unchanged local
+content produces 0/0. The final panel totals therefore need not equal the sum
+of SSE deltas or the daemon's session net diff. Received 0/0 deltas are filtered
+by `apply_remote_delta` and do not create remote panel entries. The corrected
+per-call counting rule applies to SSE event numbers; this does not change the
+TUI's existing update path. The local session panel retains its comparison
+against each file's first captured content.
+
+Clients that retain only the last event per path within a user turn will omit
+earlier calls; accumulate per-call deltas to display cumulative operation counts.
 
 **Backward / forward compatibility.** The TUI's SSE parser deserializes
 each frame into the `RemoteSseEvent` enum, which carries an

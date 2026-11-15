@@ -86,7 +86,9 @@ pub enum RuntimeSseEvent {
     /// Per-call line changes for the target of `file_edit` or `file_write`,
     /// precomputed by the daemon from content before and after that call.
     /// If either content read fails, counts fall back to tool-argument
-    /// estimates. Creating an empty file emits 0 additions and 0 deletions.
+    /// estimates. With readable content, identical rewrites emit no event;
+    /// existence or byte changes emit even when line counts are 0/0 (e.g.
+    /// empty-file creation/removal or a final-newline change).
     /// Changes made by other tools (including bash creation, deletion and
     /// rename) are not reported. Mirrors `SseStreamEvent::ToolFileChange`.
     ToolFileChange {
