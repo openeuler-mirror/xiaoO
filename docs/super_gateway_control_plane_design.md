@@ -410,7 +410,7 @@ pub struct RuntimeExecResult {
 | `thinking_delta` | `agent_id`, `delta`, `snapshot` | provider reasoning/thinking 增量。 |
 | `tool_call` | `agent_id`, `call_id`, `tool_name`, 参数预览 | 工具调用发起。 |
 | `tool_result` | `agent_id`, `call_id`, `tool_name`, `output_preview`, `is_error` | 工具结果摘要。 |
-| `tool_file_change` | 变更文件信息 | 工具产生的文件变更。 |
+| `tool_file_change` | 变更文件信息 | 仅 `file_edit` / `file_write` 目标文件的逐调用增删行数；读取失败时按参数估算，空文件创建为 `+0/-0`，其他工具的创建、删除、重命名不上报。 |
 | `plan_update` | 计划条目 | 计划更新。 |
 | `subagent_spawn` | 子 agent 信息 | 派生子 agent。 |
 | `loop_end` | loop 终止原因 | agent loop 结束。 |

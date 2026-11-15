@@ -31,6 +31,7 @@ pub struct FileChangeDelta {
 struct ToolFileBaseline {
     file_path: String,
     absolute_path: PathBuf,
+    content: Option<String>,
 }
 
 /// Tracks per-file additions/deletions for a session, derived from tool
@@ -97,8 +98,9 @@ impl SessionDiffTracker {
     }
 
     /// High-level entry: tool transitioned to Completed. Returns the computed
-    /// delta so the daemon (remote mode) can forward it to the TUI; the local
-    /// caller may simply discard the return value.
+    /// per-call delta so the daemon (remote mode) can forward it to the TUI;
+    /// the local caller may simply discard the return value. Session totals
+    /// still use the first captured content for each file.
     pub fn on_tool_completed(
         &mut self,
         call_id: &str,
@@ -188,6 +190,7 @@ impl SessionDiffTracker {
             ToolFileBaseline {
                 file_path,
                 absolute_path,
+                content: baseline_content,
             },
         );
     }
@@ -214,6 +217,7 @@ impl SessionDiffTracker {
             ToolFileBaseline {
                 file_path: payload.file_path.clone(),
                 absolute_path: payload.absolute_path.clone(),
+                content: payload.content.clone(),
             },
         );
     }
@@ -231,6 +235,21 @@ impl SessionDiffTracker {
         };
 
         let current_content = read_file_baseline(&baseline.absolute_path);
+        let call_delta = match &current_content {
+            FileReadOutcome::Unreadable => None,
+            FileReadOutcome::Absent if baseline.content.is_none() => None,
+            FileReadOutcome::Absent => Some(file_content_delta(
+                &baseline.file_path,
+                baseline.content.as_deref(),
+                None,
+            )),
+            // An absent-to-present transition counts even for an empty file.
+            FileReadOutcome::Present(current) => Some(file_content_delta(
+                &baseline.file_path,
+                baseline.content.as_deref(),
+                Some(current),
+            )),
+        };
         let initial_content = self.session_file_content_baselines.get(&baseline.file_path);
         let computed = match current_content {
             // The baseline was captured successfully (the file existed and
@@ -265,11 +284,9 @@ impl SessionDiffTracker {
                 }
             }),
         };
-        if let Some(delta) = computed.or(fallback) {
-            // Diagnostic: this branch writes the delta straight into
-            // `session_file_changes` WITHOUT registering `tool_file_changes`,
-            // so a duplicate terminal event for the same call_id would be
-            // treated as a brand-new change and stacked on top of this.
+        // The session panel keeps its net diff against the first baseline,
+        // independently of the per-call delta returned to event consumers.
+        if let Some(delta) = computed.or_else(|| fallback.clone()) {
             self.session_file_changes.insert(
                 delta.file_path.clone(),
                 SessionFileChangeStats {
@@ -280,6 +297,8 @@ impl SessionDiffTracker {
             if delta.additions == 0 && delta.deletions == 0 {
                 self.session_file_changes.remove(&delta.file_path);
             }
+        }
+        if let Some(delta) = call_delta.or(fallback) {
             // Register the applied delta under this `call_id` so that a
             // duplicate terminal event is caught by the
             // `tool_file_changes.contains_key` guard above instead of

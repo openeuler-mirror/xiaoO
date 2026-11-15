@@ -83,8 +83,12 @@ pub enum RuntimeSseEvent {
         #[serde(default)]
         args_preview: String,
     },
-    /// Per-call file change delta (precomputed by the daemon; mirrors
-    /// `SseStreamEvent::ToolFileChange`).
+    /// Per-call line changes for the target of `file_edit` or `file_write`,
+    /// precomputed by the daemon from content before and after that call.
+    /// If either content read fails, counts fall back to tool-argument
+    /// estimates. Creating an empty file emits 0 additions and 0 deletions.
+    /// Changes made by other tools (including bash creation, deletion and
+    /// rename) are not reported. Mirrors `SseStreamEvent::ToolFileChange`.
     ToolFileChange {
         call_id: String,
         file_path: String,
