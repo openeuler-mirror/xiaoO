@@ -3361,6 +3361,7 @@ dependencies = [
  "agent-contracts",
  "agent-types",
  "dirs 6.0.0",
+ "glob",
  "hook",
  "regex-lite",
  "serde",
