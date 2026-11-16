@@ -50,6 +50,7 @@ pub fn parse_skill_md_content(
     Ok(Skill {
         name,
         description,
+        when_to_use: meta.when_to_use,
         version: meta.version,
         author: meta.author,
         tags: meta.tags,
@@ -94,6 +95,7 @@ fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
 struct FrontmatterMeta {
     name: Option<String>,
     description: Option<String>,
+    when_to_use: Option<String>,
     version: Option<String>,
     author: Option<String>,
     tags: Vec<String>,
@@ -127,6 +129,7 @@ fn parse_frontmatter(fm: Option<&str>, path: &Path) -> Result<FrontmatterMeta, S
     let mut meta = FrontmatterMeta {
         name: get_str(obj, "name"),
         description: get_str(obj, "description"),
+        when_to_use: get_str(obj, "when_to_use").or_else(|| get_str(obj, "when-to-use")),
         version: get_str(obj, "version"),
         author: get_str(obj, "author"),
         argument_hint: get_str(obj, "argument_hint").or_else(|| get_str(obj, "argument-hint")),

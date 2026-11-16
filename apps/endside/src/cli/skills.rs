@@ -154,8 +154,15 @@ pub(super) fn handle_skill_command(command: SkillCommands) {
             }
             println!("{:<20} DESCRIPTION", "NAME");
             println!("{:<20} -----------", "----");
-            for s in &skills {
-                println!("{:<20} {}", s.skill_id, s.description);
+            for s in skills.iter() {
+                // spec 访问器取全文：`max-listing-description-chars` 只截断
+                // prompt 清单视图，`skill list` 是管理视图，与 `skill show` /
+                // 管理 API 同口径输出全文（兜底用清单截断文本）
+                let description = registry
+                    .get_skill(&s.skill_id)
+                    .map(|spec| spec.description().to_string())
+                    .unwrap_or_else(|| s.description.clone());
+                println!("{:<20} {}", s.skill_id, description);
             }
             println!("\n{} skill(s) found.", skills.len());
         }

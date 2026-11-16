@@ -26,6 +26,7 @@ struct RemoteManifest {
 pub(crate) async fn finalize_e2b_runtime(
     resolved: &mut ResolvedSessionRuntime,
     backend: Arc<dyn OperationBackend>,
+    skills_listing_limit: usize,
 ) -> Result<(), SessionServiceError> {
     if resolved.e2b_finalized {
         return Ok(());
@@ -60,7 +61,10 @@ pub(crate) async fn finalize_e2b_runtime(
     }
 
     let parsed_skills = load_remote_skills(backend.as_ref(), &binding).await?;
-    resolved.skill_registry = Some(Arc::new(FileSkillRegistry::from_skills(parsed_skills)));
+    resolved.skill_registry = Some(Arc::new(FileSkillRegistry::from_skills_with_limit(
+        parsed_skills,
+        skills_listing_limit,
+    )));
     resolved.e2b_finalized = true;
     Ok(())
 }

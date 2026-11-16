@@ -63,7 +63,12 @@ fn generic_system_text_keeps_workspace_prompt_separate_and_skips_history_and_too
         skill_snippets: vec![SkillSummary {
             skill_id: "skill".to_string(),
             description: "do thing".to_string(),
-        }],
+            when_to_use: None,
+            paths: Vec::new(),
+            tags: Vec::new(),
+            disable_model_invocation: false,
+        }]
+        .into(),
         history: crate::context::CompressedHistory::from_messages(vec![ChatMessage::user("hello")]),
     };
     let stable = compose_system_sections(
@@ -118,7 +123,12 @@ fn repo_map_is_repositioned_after_available_skills() {
         skill_snippets: vec![SkillSummary {
             skill_id: "commit-clean-code".to_string(),
             description: "verify code quality".to_string(),
-        }],
+            when_to_use: None,
+            paths: Vec::new(),
+            tags: Vec::new(),
+            disable_model_invocation: false,
+        }]
+        .into(),
         history: crate::context::CompressedHistory::from_messages(vec![ChatMessage::user("hello")]),
     };
     let base_system = format!(

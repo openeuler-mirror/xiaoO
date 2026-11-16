@@ -8,7 +8,8 @@ pub struct PromptBuildInput {
     pub system_prompt: String,
     pub messages: Vec<ChatMessage>,
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
-    pub skill_summaries: Vec<SkillSummary>,
+    /// skill 清单快照（registry 共享形态，`Arc` 克隆零深拷贝）
+    pub skill_summaries: Arc<[SkillSummary]>,
     pub memory_snippets: Vec<MemorySnippet>,
     pub environment: EnvironmentInfo,
     pub feature_flags: FeatureFlags,

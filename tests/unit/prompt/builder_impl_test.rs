@@ -63,7 +63,12 @@ fn build_projects_tools_into_llm_request() {
         skill_summaries: vec![SkillSummary {
             skill_id: "skill".to_string(),
             description: "do thing".to_string(),
-        }],
+            when_to_use: None,
+            paths: Vec::new(),
+            tags: Vec::new(),
+            disable_model_invocation: false,
+        }]
+        .into(),
         memory_snippets: vec![MemorySnippet {
             source: "memory".to_string(),
             content: "remember this".to_string(),
@@ -113,7 +118,7 @@ fn build_appends_volatile_context_as_trailing_reminder_message() {
             ChatMessage::user("continue"),
         ],
         visible_tools: Vec::new(),
-        skill_summaries: Vec::new(),
+        skill_summaries: Vec::new().into(),
         memory_snippets: vec![
             MemorySnippet {
                 source: "horizon".to_string(),
@@ -184,7 +189,7 @@ fn build_fails_fast_when_budget_is_zero() {
         system_prompt: "You are a coding agent.".to_string(),
         messages: vec![ChatMessage::user("hello")],
         visible_tools: Vec::new(),
-        skill_summaries: Vec::new(),
+        skill_summaries: Vec::new().into(),
         memory_snippets: Vec::new(),
         environment: EnvironmentInfo {
             model: "gpt-test".to_string(),
@@ -223,7 +228,7 @@ fn build_filters_out_existing_system_messages() {
             ChatMessage::assistant("response", 0),
         ],
         visible_tools: Vec::new(),
-        skill_summaries: Vec::new(),
+        skill_summaries: Vec::new().into(),
         memory_snippets: Vec::new(),
         environment: EnvironmentInfo {
             model: "gpt-test".to_string(),

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use agent_types::context::prompt::SkillSummary;
 
@@ -12,7 +13,9 @@ pub enum SkillContext {
 }
 
 pub trait SkillRegistry: Send + Sync {
-    fn list_skills(&self) -> Vec<SkillSummary>;
+    /// 会话期不可变的清单快照（共享形态）：`Arc` 克隆零深拷贝，供
+    /// prompt 清单段等逐轮消费方复用，避免每轮全量 clone。
+    fn list_skills(&self) -> Arc<[SkillSummary]>;
     fn get_skill(&self, skill_id: &str) -> Option<&dyn SkillSpec>;
 }
 
@@ -21,6 +24,12 @@ pub trait SkillSpec: Send + Sync {
     fn skill_id(&self) -> &str;
     fn description(&self) -> &str;
     fn full_prompt(&self) -> &str;
+
+    /// 场景提示：什么情况下该用这个 skill（L2 发现提示文案用）。
+    /// 与 description（清单展示）职责不同，允许缺省
+    fn when_to_use(&self) -> Option<&str> {
+        None
+    }
 
     // --- 发现与匹配 ---
 

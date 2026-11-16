@@ -25,6 +25,10 @@ impl SkillSpec for SkillEntry {
         &self.skill.description
     }
 
+    fn when_to_use(&self) -> Option<&str> {
+        self.skill.when_to_use.as_deref()
+    }
+
     fn full_prompt(&self) -> &str {
         &self.skill.prompt
     }

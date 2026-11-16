@@ -22,7 +22,9 @@ impl PromptBuilderImpl {
         validate_input(&input)?;
 
         if !input.feature_flags.skill_matching {
-            input.skill_summaries.clear();
+            // L1 清单段以 skill_matching 关闭：清空快照（compose 据此省略
+            // 该节），不回退到 registry 重新取数
+            input.skill_summaries = Default::default();
         }
 
         let decision = decide_prompt(&input.messages, !input.visible_tools.is_empty())?;

@@ -7,7 +7,7 @@ fn collect_prompt_context_lifts_instruction_snippets_out_of_memory_section() {
         system_prompt: "system".to_string(),
         messages: vec![ChatMessage::user("hello")],
         visible_tools: Vec::new(),
-        skill_summaries: Vec::new(),
+        skill_summaries: Vec::new().into(),
         memory_snippets: vec![
             MemorySnippet {
                 source: "instruction:policy".to_string(),

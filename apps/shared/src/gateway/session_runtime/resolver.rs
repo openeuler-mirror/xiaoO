@@ -132,6 +132,14 @@ pub enum SessionRuntimeResolveError {
 pub trait SessionRuntimeResolver: Send + Sync {
     fn bind_subagent_control(&self, _control: Arc<dyn SubagentControl>) {}
 
+    /// L1 skill 清单描述截断上限。e2b finalize 用远端解析的 skill 重建
+    /// registry 时沿此值截断，保证与宿主侧 `FileSkillRegistry::new`
+    /// （同源于 `skills_config.max_listing_description_chars`）行为一致，
+    /// 用户配置不被隐式默认值覆盖
+    fn skills_listing_limit(&self) -> usize {
+        skill::DEFAULT_MAX_LISTING_DESCRIPTION_CHARS
+    }
+
     /// Exposes an opaque store for the bound control handle so `AppBootstrap`
     /// can inject the binding during startup (alternative to
     /// [`SessionRuntimeResolver::bind_subagent_control`]: return `None` when
