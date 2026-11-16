@@ -90,10 +90,9 @@ impl OpenAiFamilyProvider {
         let skip_tls_verify = crate::http::tls_verification_disabled();
         Self {
             // No total client timeout; request_policy owns every deadline.
-            client: reqwest::Client::builder()
+            client: crate::http::with_forced_http1(reqwest::Client::builder())
                 .connect_timeout(crate::request_policy::CONNECT_TIMEOUT)
                 .danger_accept_invalid_certs(skip_tls_verify)
-                .http1_only()
                 .build()
                 .unwrap_or_else(crate::http::client_build_failed),
             api_key: config.api_key,

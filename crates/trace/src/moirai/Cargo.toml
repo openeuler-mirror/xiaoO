@@ -30,7 +30,7 @@ tracing.workspace = true
 
 # CLI dependencies (optional)
 clap = { workspace = true, optional = true }
-axum = { workspace = true, optional = true }
+axum = { workspace = true, optional = true, features = ["http2"] }
 tower-http = { workspace = true, optional = true }
 rust-embed = { workspace = true, optional = true, features = ["debug-embed"] }
 mime_guess = { workspace = true, optional = true }

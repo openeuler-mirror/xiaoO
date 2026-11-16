@@ -32,7 +32,7 @@ impl AnthropicProvider {
             crate::provider_registry::ProtocolFamily::Anthropic.static_context_window();
         Self {
             // No total client timeout; request_policy owns every deadline.
-            client: reqwest::Client::builder()
+            client: crate::http::with_forced_http1(reqwest::Client::builder())
                 .connect_timeout(crate::request_policy::CONNECT_TIMEOUT)
                 .danger_accept_invalid_certs(crate::http::tls_verification_disabled())
                 .build()

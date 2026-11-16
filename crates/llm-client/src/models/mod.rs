@@ -299,11 +299,12 @@ fn key_looks_like_context_length(key: &str) -> bool {
 
 /// 模型目录客户端统一的 HTTP client。
 ///
-/// 是否放宽 TLS 校验由 [`crate::http::tls_verification_disabled`] 决定，与 chat
-/// provider 同源：若这里各自用严格的 `reqwest::Client::builder()`，自签名网关下
+/// 是否放宽 TLS 校验由 [`crate::http::tls_verification_disabled`] 决定、是否锁回
+/// HTTP/1.1 由 [`crate::http::with_forced_http1`] 决定，均与 chat provider
+/// 同源：若这里各自用严格的 `reqwest::Client::builder()`，自签名网关下
 /// 会出现 chat 能用、目录拉取却在握手阶段失败——表现为"列表一直是内置列表"。
 pub(crate) fn model_catalog_http_client(timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
+    crate::http::with_forced_http1(reqwest::Client::builder())
         .timeout(timeout)
         .danger_accept_invalid_certs(crate::http::tls_verification_disabled())
         .build()

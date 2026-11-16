@@ -261,6 +261,36 @@ export NODE_TLS_REJECT_UNAUTHORIZED=0   # daemon / CLI / TUI that talks to the g
   profile.
 - Implementation: `crates/llm-client/src/http.rs`.
 
+### Pinning Outbound HTTP Back to HTTP/1.1: `XIAOO_LLM_FORCE_HTTP1`
+
+The process negotiates HTTP/2 with upstreams that offer it over TLS (ALPN). A
+small number of self-hosted AI gateways advertise h2 but implement its
+streaming poorly — SSE turns that stall, truncate or never signal completion
+over h2 while working fine over HTTP/1.1. When that happens, pin the affected
+clients back to HTTP/1.1 with an environment variable instead of a rebuild:
+
+```bash
+export XIAOO_LLM_FORCE_HTTP1=1   # daemon / CLI / TUI that talks to the gateway
+```
+
+- Read when a client is constructed: set it before the process starts.
+  Flipping it at runtime has no effect on clients already built.
+- Judge: any value enables the pin **except** the empty string, `0` and
+  lowercase `false` (case-sensitive, surrounding whitespace tolerated). There
+  is no whitelist of "on" spellings — `off`, `no` and `False` count as
+  **enabled**; to release the pin use one of the three opt-out values or unset
+  the variable.
+- Scope: every LLM client the process builds — the chat providers of all
+  protocol families, the model catalogs, the OpenAI-compatible embedding
+  provider — **and** the daemon's outbound MCP transports (streamable HTTP and
+  the legacy HTTP+SSE transport), which stream SSE from MCP gateways of exactly
+  the same failure class. Other outbound HTTP (web fetch, daemon RPC) is not
+  covered and keeps protocol negotiation.
+- Implementations: `crates/llm-client/src/http.rs` (LLM clients) and
+  `crates/mcp/src/transport/mod.rs` (MCP transports). The judge is written
+  twice on purpose — `mcp` must not depend on `llm-client` for three lines of
+  env parsing; keep the two copies in sync.
+
 ### Request Admission Gate: `[llm.rate_limit]` (Daemon only)
 
 > ⚠️ **Daemon-only**: `[llm.rate_limit]` is parsed **only by the daemon**

@@ -462,16 +462,36 @@ fn stream_error_frame_classifies_openai_context_overflow() {
 
 #[test]
 fn stream_error_frame_keeps_legacy_and_normal_chunks() {
-    for body in [
-        r#"{"type":"error","error":{"code":"invalid_prompt","message":"bad prompt"}}"#,
-        r#"{"type":"error","error":{"code":"context_length_exceeded","message":"overflow"}}"#,
-        r#"{"type":"error","error":{"type":"rate_limit_error","message":"busy"}}"#,
+    // The legacy top-level `{"type":"error",...}` envelope must keep its
+    // historical classification through the production parser: only
+    // `context_length_exceeded` maps to the context-overflow variant, and
+    // everything else stays a plain API error — including
+    // `rate_limit_error`, which only the modern `error`-object envelope
+    // promotes to RateLimited.
+    for (body, expect_overflow) in [
+        (
+            r#"{"type":"error","error":{"code":"invalid_prompt","message":"bad prompt"}}"#,
+            false,
+        ),
+        (
+            r#"{"type":"error","error":{"code":"context_length_exceeded","message":"overflow"}}"#,
+            true,
+        ),
+        (
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"busy"}}"#,
+            false,
+        ),
     ] {
         let actual = parse_openai_family_stream_line(&format!("data: {body}")).unwrap_err();
-        assert_eq!(
-            actual.to_string(),
-            crate::error::parse_stream_error(body).unwrap().to_string()
-        );
+        match &actual {
+            LlmError::ContextLengthExceeded { .. } => {
+                assert!(expect_overflow, "body: {body}");
+            }
+            LlmError::ApiError(_) => {
+                assert!(!expect_overflow, "body: {body}");
+            }
+            other => panic!("unexpected classification for {body}: {other:?}"),
+        }
     }
     let parsed = parse_openai_family_stream_line(
         r#"data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"content":"hello","reasoning_content":"thinking"},"finish_reason":"stop"}],"error":null}"#,

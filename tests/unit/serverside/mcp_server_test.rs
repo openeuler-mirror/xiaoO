@@ -913,3 +913,87 @@ impl super::AgentOperationRegistry {
         Ok(record.output())
     }
 }
+
+/// The MCP endpoints ride the daemon's single listener, so they inherit the
+/// same dual-protocol serving: an h2c prior-knowledge caller must complete a
+/// full initialize + tools/list round trip, just like the HTTP/1.1 callers
+/// the oneshot tests below exercise in-process.
+#[tokio::test]
+async fn mcp_transport_serves_h2c_prior_knowledge() {
+    let workspace = TempDir::new().expect("workspace");
+    let router = test_router(workspace.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let address = listener.local_addr().expect("listener address");
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve mcp router");
+    });
+
+    let h2c = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .expect("h2c client");
+
+    let initialized = h2c
+        .post(format!("http://{address}/mcp/chatbot"))
+        .bearer_auth("chat-token")
+        .header("accept", "application/json, text/event-stream")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "h2c-test", "version": "1"}
+            }
+        }))
+        .send()
+        .await
+        .expect("h2c initialize");
+    assert_eq!(initialized.status(), reqwest::StatusCode::OK);
+    assert_eq!(initialized.version(), reqwest::Version::HTTP_2);
+    let mcp_session_id = initialized
+        .headers()
+        .get("mcp-session-id")
+        .expect("MCP session header")
+        .to_str()
+        .expect("session header UTF-8")
+        .to_string();
+    let body = initialized.bytes().await.expect("initialize body");
+    let value = parse_mcp_response(&body);
+    assert_eq!(
+        value["result"]["serverInfo"]["name"], "xiaoo-chatbot",
+        "initialize result: {value}"
+    );
+
+    let listed = h2c
+        .post(format!("http://{address}/mcp/chatbot"))
+        .bearer_auth("chat-token")
+        .header("mcp-session-id", &mcp_session_id)
+        .header("mcp-protocol-version", "2025-11-25")
+        .header("accept", "application/json, text/event-stream")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }))
+        .send()
+        .await
+        .expect("h2c tools/list");
+    assert_eq!(listed.status(), reqwest::StatusCode::OK);
+    assert_eq!(listed.version(), reqwest::Version::HTTP_2);
+    let body = listed.bytes().await.expect("tools/list body");
+    let value = parse_mcp_response(&body);
+    let tools = value["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list result: {value}"));
+    assert!(
+        tools.iter().any(|tool| tool["name"] == "chat"),
+        "tools/list result: {value}"
+    );
+}
