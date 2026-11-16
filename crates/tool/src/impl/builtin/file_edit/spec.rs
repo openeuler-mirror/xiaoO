@@ -3,6 +3,7 @@ use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContrac
 
 use agent_contracts::tool::spec::ToolSpecView;
 
+use super::super::FILE_PATH_INPUT_KEY;
 use super::constants::{FILE_EDIT_TOOL_ID, FILE_EDIT_TOOL_NAME};
 
 #[derive(Debug, Clone)]
@@ -20,12 +21,12 @@ impl FileEditToolSpec {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "The absolute path to the file to edit" },
+                FILE_PATH_INPUT_KEY: { "type": "string", "description": "The absolute path to the file to edit" },
                 "old_string": { "type": "string", "description": "The exact string to find in the file" },
                 "new_string": { "type": "string", "description": "The replacement string" },
                 "replace_all": { "type": "boolean", "description": "Replace all occurrences or just the first" }
             },
-            "required": ["file_path", "old_string", "new_string"]
+            "required": [FILE_PATH_INPUT_KEY, "old_string", "new_string"]
         });
 
         Self {

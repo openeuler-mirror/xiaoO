@@ -3,6 +3,9 @@ use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContrac
 
 use agent_contracts::tool::spec::ToolSpecView;
 
+use super::super::FILE_PATH_INPUT_KEY;
+use super::constants::{FILE_WRITE_TOOL_ID, FILE_WRITE_TOOL_NAME};
+
 #[derive(Debug, Clone)]
 pub struct FileWriteToolSpec {
     id: ToolId,
@@ -18,15 +21,15 @@ impl FileWriteToolSpec {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "The absolute path to the file to write" },
+                FILE_PATH_INPUT_KEY: { "type": "string", "description": "The absolute path to the file to write" },
                 "content": { "type": "string", "description": "The content to write to the file" }
             },
-            "required": ["file_path", "content"]
+            "required": [FILE_PATH_INPUT_KEY, "content"]
         });
 
         Self {
-            id: ToolId("builtin_file_write".to_string()),
-            name: ToolName("file_write".to_string()),
+            id: ToolId(FILE_WRITE_TOOL_ID.to_string()),
+            name: ToolName(FILE_WRITE_TOOL_NAME.to_string()),
             description: "Writes content to a file at the specified path".to_string(),
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {

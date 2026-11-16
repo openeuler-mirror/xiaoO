@@ -2,6 +2,8 @@ use agent_contracts::tool::ToolSpecView;
 use agent_types::common::ids::{ToolId, ToolName};
 use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
 
+use super::constants::{SKILL_TOOL_ID, SKILL_TOOL_NAME};
+
 #[derive(Debug, Clone)]
 pub struct SkillToolSpec {
     id: ToolId,
@@ -30,8 +32,8 @@ impl SkillToolSpec {
         });
 
         Self {
-            id: ToolId("builtin_skill".to_string()),
-            name: ToolName("skill".to_string()),
+            id: ToolId(SKILL_TOOL_ID.to_string()),
+            name: ToolName(SKILL_TOOL_NAME.to_string()),
             description: "Invoke a registered skill by name. Skills are prompt-based capabilities that guide the agent to perform specific tasks.".to_string(),
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {
