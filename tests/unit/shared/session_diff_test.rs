@@ -10,12 +10,13 @@ fn tracker_in_temp_workspace() -> (tempfile::TempDir, SessionDiffTracker) {
 
 #[test]
 fn running_then_completed_for_new_file_counts_addition() {
-    let (_temp, mut tracker) = tracker_in_temp_workspace();
+    let (temp, mut tracker) = tracker_in_temp_workspace();
     tracker.on_tool_running(
         "call-1",
         "file_write",
         r#"{"file_path":"aaa","content":"aaabbb"}"#,
     );
+    fs::write(temp.path().join("workspace/aaa"), "aaabbb").unwrap();
     let delta = tracker
         .on_tool_completed(
             "call-1",
@@ -177,4 +178,318 @@ fn injected_pre_execution_baseline_wins_over_delayed_capture() {
         .expect("delta");
     assert_eq!(delta.additions, 1);
     assert_eq!(delta.deletions, 1);
+}
+
+#[test]
+fn file_write_events_are_per_call_while_session_totals_remain_net() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let workspace = temp.path().join("workspace");
+    fs::write(workspace.join("a.txt"), "seed\n").unwrap();
+
+    let writes = [
+        ("a.txt", "seed\none\n", (1, 0), Some((1, 0)), false),
+        ("a.txt", "seed\none\ntwo\n", (1, 0), Some((2, 0)), false),
+        (
+            "a.txt",
+            "seed\none\ntwo\nthree\n",
+            (1, 0),
+            Some((3, 0)),
+            true,
+        ),
+        ("a.txt", "seed\n", (0, 3), None, true),
+        ("new.txt", "new\n", (1, 0), Some((1, 0)), true),
+        ("empty.txt", "", (0, 0), None, true),
+    ];
+    for (index, (path, content, expected, session, next_turn)) in writes.into_iter().enumerate() {
+        if next_turn {
+            tracker.clear_per_turn_state();
+        }
+        let call_id = format!("write-{index}");
+        let args = serde_json::json!({"file_path": path, "content": content}).to_string();
+        tracker.on_tool_running(&call_id, "file_write", &args);
+        fs::write(workspace.join(path), content).unwrap();
+        let delta = tracker
+            .on_tool_completed(&call_id, "file_write", &args, None)
+            .expect("successful write emits a delta, including empty creation");
+        assert_eq!(delta.file_path, path);
+        assert_eq!((delta.additions, delta.deletions), expected, "{call_id}");
+        assert_eq!(fs::read_to_string(workspace.join(path)).unwrap(), content);
+        assert_eq!(
+            tracker
+                .session_file_changes()
+                .get(path)
+                .map(|s| (s.additions, s.deletions)),
+            session,
+            "session net diff for {call_id}"
+        );
+        let totals = tracker.session_file_changes().clone();
+        assert!(tracker
+            .on_tool_completed(&call_id, "file_write", &args, None)
+            .is_none());
+        assert_eq!(tracker.session_file_changes(), &totals);
+    }
+}
+
+#[test]
+fn file_edit_events_use_each_calls_content_across_turns() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let file = temp.path().join("workspace/a.txt");
+    fs::write(&file, "seed\n").unwrap();
+    for (index, (before, after, expected)) in [
+        ("seed\n", "seed\none\n", (1, 0)),
+        ("seed\none\n", "seed\none\ntwo\n", (1, 0)),
+        ("seed\none\ntwo\n", "seed\n", (0, 2)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        tracker.clear_per_turn_state();
+        let call_id = format!("edit-{index}");
+        let args =
+            serde_json::json!({"file_path": "a.txt", "old_string": before, "new_string": after})
+                .to_string();
+        tracker.on_tool_running(&call_id, "file_edit", &args);
+        fs::write(&file, after).unwrap();
+        let delta = tracker
+            .on_tool_completed(&call_id, "file_edit", &args, None)
+            .unwrap();
+        assert_eq!((delta.additions, delta.deletions), expected);
+    }
+    assert!(tracker.session_file_changes().is_empty());
+}
+
+#[test]
+fn injected_baselines_keep_per_call_content_and_first_session_content() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let workspace = temp.path().join("workspace");
+    let file = workspace.join("a.txt");
+    fs::write(&file, "seed\n").unwrap();
+    for (index, content) in ["seed\none\n", "seed\none\ntwo\n"].into_iter().enumerate() {
+        let args = serde_json::json!({"file_path": "a.txt", "content": content}).to_string();
+        let call_id = format!("injected-{index}");
+        let payload = capture_file_baseline_payload(&workspace, "file_write", &args).unwrap();
+        fs::write(&file, content).unwrap();
+        tracker.inject_session_file_baseline(&call_id, &payload);
+        tracker.on_tool_running(&call_id, "file_write", &args);
+        let delta = tracker
+            .on_tool_completed(&call_id, "file_write", &args, None)
+            .unwrap();
+        assert_eq!((delta.additions, delta.deletions), (1, 0));
+        assert_eq!(
+            tracker.session_file_changes()["a.txt"].additions,
+            index as u32 + 1
+        );
+    }
+}
+
+#[test]
+fn unreadable_pre_execution_content_keeps_args_estimation() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let file = temp.path().join("workspace/a.txt");
+    fs::write(&file, [0xff]).unwrap();
+    let args = r#"{"file_path":"a.txt","content":"one\ntwo\n"}"#;
+    tracker.on_tool_running("write", "file_write", args);
+    fs::write(&file, "one\ntwo\n").unwrap();
+    let delta = tracker
+        .on_tool_completed("write", "file_write", args, None)
+        .unwrap();
+    assert_eq!((delta.additions, delta.deletions), (2, 0));
+}
+
+#[test]
+fn unreadable_post_execution_content_keeps_args_estimation() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let file = temp.path().join("workspace/a.txt");
+    fs::write(&file, "seed\n").unwrap();
+    let args = r#"{"file_path":"a.txt","old_string":"seed","new_string":"one\ntwo"}"#;
+    tracker.on_tool_running("edit", "file_edit", args);
+    fs::write(&file, [0xff]).unwrap();
+    let delta = tracker
+        .on_tool_completed("edit", "file_edit", args, None)
+        .unwrap();
+    assert_eq!((delta.additions, delta.deletions), (2, 1));
+}
+
+#[test]
+fn empty_file_creation_emits_a_zero_delta_once() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let args = r#"{"file_path":"empty.txt","content":""}"#;
+    tracker.on_tool_running("empty", "file_write", args);
+    fs::write(temp.path().join("workspace/empty.txt"), "").unwrap();
+    let delta = tracker
+        .on_tool_completed("empty", "file_write", args, None)
+        .expect("empty creation emits a delta");
+    assert_eq!(delta.file_path, "empty.txt");
+    assert_eq!((delta.additions, delta.deletions), (0, 0));
+    assert!(tracker
+        .on_tool_completed("empty", "file_write", args, None)
+        .is_none());
+    assert!(tracker.session_file_changes().is_empty());
+}
+
+#[test]
+fn empty_write_without_reliable_baseline_does_not_invent_creation() {
+    let (_temp, mut tracker) = tracker_in_temp_workspace();
+    let args = r#"{"file_path":"empty.txt","content":""}"#;
+    assert!(tracker
+        .on_tool_completed("write", "file_write", args, None)
+        .is_none());
+    assert!(tracker.session_file_changes().is_empty());
+}
+
+#[test]
+fn failed_and_other_tools_do_not_emit_file_changes() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let file = temp.path().join("workspace/a.txt");
+    fs::write(&file, "seed\n").unwrap();
+    let args = r#"{"file_path":"a.txt","content":"seed\none\n"}"#;
+    tracker.on_tool_running("write", "file_write", args);
+    assert!(tracker.on_tool_failed("write", None).is_none());
+    assert!(tracker.tool_file_baselines.is_empty());
+    tracker.on_tool_running("shell", "bash", r#"{"command":"rm a.txt"}"#);
+    fs::remove_file(&file).unwrap();
+    assert!(tracker
+        .on_tool_completed("shell", "bash", r#"{"command":"rm a.txt"}"#, None)
+        .is_none());
+    assert!(tracker.session_file_changes().is_empty());
+}
+
+#[test]
+fn identical_rewrites_preserve_session_totals_without_events() {
+    for tool in ["file_write", "file_edit"] {
+        let (temp, mut tracker) = tracker_in_temp_workspace();
+        let file = temp.path().join("workspace/a.txt");
+        fs::write(&file, "seed\n").unwrap();
+        let write_args = r#"{"file_path":"a.txt","content":"seed\none\n"}"#;
+        tracker.on_tool_running("append", "file_write", write_args);
+        fs::write(&file, "seed\none\n").unwrap();
+        let delta = tracker
+            .on_tool_completed("append", "file_write", write_args, None)
+            .unwrap();
+        assert_eq!((delta.additions, delta.deletions), (1, 0));
+        let totals = tracker.session_file_changes().clone();
+        let args = if tool == "file_write" {
+            write_args
+        } else {
+            r#"{"file_path":"a.txt","old_string":"one","new_string":"one"}"#
+        };
+        tracker.on_tool_running("rewrite", tool, args);
+        fs::write(&file, "seed\none\n").unwrap();
+        for _ in 0..2 {
+            assert!(tracker
+                .on_tool_completed("rewrite", tool, args, None)
+                .is_none());
+            assert_eq!(tracker.session_file_changes(), &totals);
+        }
+        assert!(tracker.tool_file_changes.contains_key("rewrite"));
+    }
+}
+
+#[test]
+fn existing_empty_file_rewrites_are_deduplicated_without_events() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let file = temp.path().join("workspace/empty.txt");
+    fs::write(&file, "").unwrap();
+    let args = r#"{"file_path":"empty.txt","content":""}"#;
+    tracker.on_tool_running("rewrite", "file_write", args);
+    fs::write(&file, "").unwrap();
+    for _ in 0..2 {
+        let fallback = Some(FileChangeDelta {
+            file_path: "empty.txt".into(),
+            additions: 1,
+            deletions: 0,
+        });
+        assert!(tracker
+            .on_tool_completed("rewrite", "file_write", args, fallback)
+            .is_none());
+        assert!(tracker.session_file_changes().is_empty());
+    }
+    assert!(tracker.tool_file_changes.contains_key("rewrite"));
+}
+
+#[test]
+fn final_newline_changes_emit_zero_deltas_once() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let file = temp.path().join("workspace/a.txt");
+    fs::write(&file, "hello").unwrap();
+    for (index, content) in ["hello\n", "hello"].into_iter().enumerate() {
+        let call_id = format!("newline-{index}");
+        let args = serde_json::json!({"file_path":"a.txt","content":content}).to_string();
+        tracker.on_tool_running(&call_id, "file_write", &args);
+        fs::write(&file, content).unwrap();
+        let delta = tracker
+            .on_tool_completed(&call_id, "file_write", &args, None)
+            .unwrap();
+        assert_eq!((delta.additions, delta.deletions), (0, 0));
+        assert_eq!(fs::read_to_string(&file).unwrap(), content);
+        assert!(tracker
+            .on_tool_completed(&call_id, "file_write", &args, None)
+            .is_none());
+        assert!(tracker.session_file_changes().is_empty());
+    }
+}
+
+#[test]
+fn empty_file_disappearance_emits_a_zero_delta_once() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let file = temp.path().join("workspace/empty.txt");
+    fs::write(&file, "").unwrap();
+    let args = r#"{"file_path":"empty.txt","content":"estimated\n"}"#;
+    tracker.on_tool_running("remove", "file_write", args);
+    fs::remove_file(&file).unwrap();
+    let delta = tracker
+        .on_tool_completed("remove", "file_write", args, None)
+        .unwrap();
+    assert_eq!(delta.file_path, "empty.txt");
+    assert_eq!((delta.additions, delta.deletions), (0, 0));
+    assert!(!file.exists());
+    assert!(tracker
+        .on_tool_completed("remove", "file_write", args, None)
+        .is_none());
+    assert!(tracker.session_file_changes().is_empty());
+}
+
+#[test]
+fn nonempty_file_disappearance_uses_call_content_and_preserves_session_net() {
+    let (temp, mut tracker) = tracker_in_temp_workspace();
+    let file = temp.path().join("workspace/a.txt");
+    fs::write(&file, "seed\n").unwrap();
+    let args = r#"{"file_path":"a.txt","content":"seed\none\n"}"#;
+    tracker.on_tool_running("append", "file_write", args);
+    fs::write(&file, "seed\none\n").unwrap();
+    tracker
+        .on_tool_completed("append", "file_write", args, None)
+        .unwrap();
+    tracker.on_tool_running("remove", "file_write", args);
+    fs::remove_file(&file).unwrap();
+    let delta = tracker
+        .on_tool_completed("remove", "file_write", args, None)
+        .unwrap();
+    assert_eq!((delta.additions, delta.deletions), (0, 2));
+    assert!(!file.exists());
+    let totals = tracker.session_file_changes().clone();
+    assert_eq!(
+        totals["a.txt"],
+        SessionFileChangeStats {
+            additions: 0,
+            deletions: 1
+        }
+    );
+    assert!(tracker
+        .on_tool_completed("remove", "file_write", args, None)
+        .is_none());
+    assert_eq!(tracker.session_file_changes(), &totals);
+}
+
+#[test]
+fn absent_target_remaining_absent_does_not_emit_args_estimates() {
+    let (_temp, mut tracker) = tracker_in_temp_workspace();
+    let args = r#"{"file_path":"absent.txt","content":"estimated\n"}"#;
+    tracker.on_tool_running("absent", "file_write", args);
+    for _ in 0..2 {
+        assert!(tracker
+            .on_tool_completed("absent", "file_write", args, None)
+            .is_none());
+    }
+    assert!(tracker.tool_file_changes.contains_key("absent"));
 }
