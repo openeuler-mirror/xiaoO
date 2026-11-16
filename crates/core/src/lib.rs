@@ -5,6 +5,7 @@ pub mod kvcache;
 pub mod loop_state;
 pub mod runtime;
 pub mod runtime_support;
+pub mod skill_discovery;
 pub mod snapshot;
 pub mod suspend;
 pub mod token_estimator;

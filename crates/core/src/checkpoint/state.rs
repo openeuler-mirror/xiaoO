@@ -78,6 +78,12 @@ impl ContextState {
         state.last_token_usage = self.loop_state.last_token_usage.clone();
         state.compression_meta = self.loop_state.compression_meta.clone();
         state.kv_cache_map = self.loop_state.kv_cache_map.clone();
+        // L2 发现账本随 LoopStateSnapshot 携带：restore 是历史回滚点，账本
+        // 必须与回滚后的消息历史一致（提示消息与账本记录同源于快照）
+        state.skill_hint_sent = self.loop_state.skill_hint_sent.clone();
+        // write pivot 待补偿信号同理随快照回滚（checkpoint 捕获于挂起前，
+        // 回滚后通常为空；非空时语义仍成立——信号晚于回滚点消费）
+        state.pending_write_pivot = self.loop_state.pending_write_pivot.clone();
         state.plan_nudged = self.plan_nudged;
         state.last_failure_sig = self.last_failure_sig;
         state.repeated_failure_count = self.repeated_failure_count;

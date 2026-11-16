@@ -16,6 +16,10 @@ pub struct FeatureFlags {
     /// local TUI overrides this from its config (default `false`).
     #[serde(default = "default_true")]
     pub redact_secrets_display: bool,
+    /// L2 动态发现层开关：write pivot / 用户输入信号触发 skill 提示注入。
+    /// 以 `skill_matching`（L1 清单层）开启为前提，两者同时开启才生效。
+    #[serde(default = "default_true")]
+    pub skill_discovery: bool,
 }
 
 fn default_false() -> bool {
@@ -36,6 +40,7 @@ impl Default for FeatureFlags {
             kvcache_enabled: false,
             kvcache_debug_enabled: false,
             redact_secrets_display: true,
+            skill_discovery: true,
         }
     }
 }

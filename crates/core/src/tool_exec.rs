@@ -6,6 +6,7 @@ use super::{
 };
 use crate::input::LoopStopRule;
 use crate::loop_state::LoopState;
+use crate::skill_discovery::{collect_batch_l2_signal, settle_batch_l2_signals, BatchL2Signals};
 use crate::suspend::SuspendedToolCall;
 use agent_contracts::tool::{ToolCall, ToolFilter};
 use agent_contracts::RuntimeView;
@@ -221,6 +222,9 @@ async fn record_tool_results(
     let mut streak_note: Option<String> = None;
     let mut suspended_calls: Vec<SuspendedToolCall> = Vec::new();
     let mut stop_after_batch = false;
+    // L2 发现采集（采集/结算逻辑见 skill_discovery 模块）：suspended 结果
+    // 已在上方 continue 跳过，不进入本批信号
+    let mut l2_signals = BatchL2Signals::default();
     for result in results {
         ctx.state.tool_executed = true;
         if should_stop_after_tool_result(ctx, &result) {
@@ -235,6 +239,8 @@ async fn record_tool_results(
             suspended_calls.push(suspended_call);
             continue;
         }
+
+        collect_batch_l2_signal(&mut l2_signals, &result);
 
         let mut tool_result_message = build_tool_result_message(&result);
         ctx.estimator.update_message_cache(&mut tool_result_message);
@@ -261,6 +267,11 @@ async fn record_tool_results(
             ctx.state.messages.write().push(msg);
         }
     }
+
+    // L2 批次结算：本批成功调用的 skill 记账 + write pivot 注入（工具
+    // 结果已全部入史；suspended 协议守卫与信号补偿见 skill_discovery
+    // 模块 doc）
+    settle_batch_l2_signals(ctx, l2_signals, &suspended_calls);
 
     suspended_calls
 }

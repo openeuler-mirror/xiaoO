@@ -3,6 +3,7 @@ use agent_types::outcome::TokenUsage;
 use agent_types::ChatMessage;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +26,16 @@ pub struct LoopState {
     pub last_success_sig: Option<u64>,
     pub repeated_success_count: u32,
     pub tool_executed: bool,
+    /// L2 skill 发现提示账本：记录"已提示过 / 已成功调用过（全文已在历史）"
+    /// 的 skill 名。账本作用域内同一 skill 的提示至多一次（缓存红线）；
+    /// 压缩时清空——历史已被重写，仍相关的 skill 可再次发现（Claude
+    /// 再发现语义）
+    pub skill_hint_sent: HashSet<String>,
+    /// L2 write pivot 待补偿信号：suspended 批次中已完成写操作的路径
+    /// （协议守卫推迟注入）。恢复 run 首轮（checkpoint restore 之后）
+    /// 补偿注入并清空——消费即清，不区分是否命中；restore 若回滚越过
+    /// 写操作，信号随快照一并复位（证据已不在历史）
+    pub pending_write_pivot: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,6 +50,14 @@ pub struct LoopStateSnapshot {
     pub last_token_usage: TokenUsage,
     pub compression_meta: CompressionMeta,
     pub kv_cache_map: KvCacheMap,
+    /// L2 skill 发现提示账本（`LoopState::skill_hint_sent` 的持久化形态），
+    /// `serde(default)` 兼容旧快照
+    #[serde(default)]
+    pub skill_hint_sent: HashSet<String>,
+    /// L2 write pivot 待补偿信号（`LoopState::pending_write_pivot` 的持久化
+    /// 形态），`serde(default)` 兼容旧快照
+    #[serde(default)]
+    pub pending_write_pivot: Vec<String>,
 }
 
 impl LoopState {
@@ -62,6 +81,8 @@ impl LoopState {
             last_success_sig: None,
             repeated_success_count: 0,
             tool_executed: false,
+            skill_hint_sent: HashSet::new(),
+            pending_write_pivot: Vec::new(),
         }
     }
 
@@ -74,6 +95,8 @@ impl LoopState {
             last_token_usage: self.last_token_usage.clone(),
             compression_meta: self.compression_meta.clone(),
             kv_cache_map: self.kv_cache_map.clone(),
+            skill_hint_sent: self.skill_hint_sent.clone(),
+            pending_write_pivot: self.pending_write_pivot.clone(),
         }
     }
 
@@ -93,6 +116,8 @@ impl LoopState {
             last_success_sig: None,
             repeated_success_count: 0,
             tool_executed: false,
+            skill_hint_sent: snapshot.skill_hint_sent,
+            pending_write_pivot: snapshot.pending_write_pivot,
         }
     }
 
