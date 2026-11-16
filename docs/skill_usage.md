@@ -65,36 +65,82 @@ Use grep and file_read to examine the code, then provide a structured report.
 |-------|------|---------|-------------|
 | `name` | string | Directory name | Skill name |
 | `description` | string | Auto-extracted from body | Brief description, displayed in the skill list |
+| `when-to-use` / `when_to_use` | string | — | Scenario hint: when this skill should be used. Shown in dynamic discovery hints (see [Skill Discovery Hints](#skill-discovery-hints-l2)); keep it disjoint from `description` |
 | `version` | string | — | Version number |
 | `author` | string | — | Skill author or owning team |
-| `tags` | list | `[]` | Free-form labels for grouping and search |
+| `tags` | list | `[]` | Free-form labels; also drive dynamic discovery hints — matched against user-message words (word-boundary, case-insensitive) and against edited file extensions (e.g. tag `rust` matches `.rs` files) |
 | `user-invocable` / `user_invocable` | bool | `true` | Whether the user can manually invoke the skill |
 | `disable-model-invocation` / `disable_model_invocation` | bool | `false` | Prevent the LLM from automatically invoking the skill |
 | `context` | string | `inline` | Execution mode: `inline` (expand into conversation) or `fork` (sub-agent) |
 | `arguments` | list | `[]` | Named parameter list; referenced in prompts as `$arg_name` |
 | `argument-hint` / `argument_hint` | string | — | Parameter hint text |
-| `paths` | list | `[]` | Conditional activation glob patterns |
+| `paths` | list | `[]` | Conditional activation glob patterns; also drive write-pivot discovery (see [Skill Discovery Hints](#skill-discovery-hints-l2)) |
 
 Frontmatter fields (including `author` and `tags`) are declared and parsed in
 `crates/skill/src/loading/md_parser.rs`. `name` falls back to the containing directory name when omitted
-(`md_parser.rs`). Note that `user-invocable`, `disable-model-invocation` and
-`argument-hint` each accept **both** the kebab-case and the snake_case spelling. An unrecognized
+(`md_parser.rs`). Note that `user-invocable`, `disable-model-invocation`,
+`when-to-use` and `argument-hint` each accept **both** the kebab-case and the snake_case spelling. An unrecognized
 `context` value is silently ignored (falls back to no explicit context) rather than being an
 error (`md_parser.rs`).
 
 > When `description` is left empty, the first non-heading paragraph is automatically extracted
 > from the markdown body (`crates/skill/src/loading/md_parser.rs`).
 
+### Skill Discovery Hints (L2)
+
+Besides the always-visible *Available Skills* listing in the system prompt
+(L1), the agent injects **dynamic discovery hints** into the conversation when
+a skill becomes relevant to the current activity
+(`crates/core/src/skill_discovery.rs`). A hint is a `<system-reminder>` user
+message listing skill name + `when_to_use` + the trigger reason — it never
+repeats `description` (that belongs to the L1 listing) or the skill body
+(that belongs to an actual `skill` invocation).
+
+Two signals trigger a hint (both local and synchronous; no semantic search):
+
+1. **User input signal** — a user message containing one of the skill's
+   `tags` as a whole word (case-insensitive; word boundaries are ASCII word
+   characters, so `parsers` does **not** match tag `rs`, while
+   `帮我看下rs文件` does).
+2. **Write pivot** — a completed `file_write` / `file_edit` whose target path
+   matches a `paths` glob, or whose file extension matches a `tags` entry
+   (bare extension or common language alias: `.rs` matches tags `rs`/`rust`;
+   `.py` matches `py`/`python`; `.md` matches `md`/`markdown`; likewise
+   `js`/`javascript`, `ts`/`typescript`, `go`/`golang`, `sh`/`bash`/`shell`,
+   `cpp`/`c++`, `yml`/`yaml`, `rb`/`ruby`, `kt`/`kotlin`).
+
+Lifecycle rules:
+
+- Each skill is hinted **at most once** per accounting period. A successful
+  `skill` tool invocation or a `/skill-name` expansion also counts as "already
+  visible" (the full text is in history).
+- Context compression clears the ledger: still-relevant skills may be
+  re-discovered afterwards.
+- Skills with `disable-model-invocation: true` are never hinted (the model
+  cannot invoke them).
+- Hints are gated by the internal `FeatureFlags` fields `skill_matching`
+  and `skill_discovery` (both default on, and L2 additionally requires L1).
+  **Known gap — neither flag is file-configurable.** No `[skills]` (or any
+  other) config key maps to them, and every shipped deployment constructs
+  `FeatureFlags` with `..Default::default()`
+  (`apps/serverside/src/daemon_runtime.rs`,
+  `apps/endside/src/gateway_api/runtime_request.rs`,
+  `apps/endside/src/cli/entry.rs`), so both layers are effectively always
+  on; `skill_discovery` can only be turned off programmatically by an
+  embedder that constructs its own `FeatureFlags` around the core runtime.
+
 ### Disabling And Audit Configuration
 
-`[skills]` accepts the following keys (`apps/serverside/src/daemon_config.rs`,
-`apps/endside/src/support/config.rs`):
+`[skills]` accepts the following keys (`apps/shared/src/skills_support.rs`;
+the shared `SkillsSection` schema is re-exported and parsed identically by the
+daemon, TUI, and CLI):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `dirs` | list | `[]` | Extra skill directories inserted at config level |
 | `allow_scripts` | bool | `false` | Allow script files in a skill without failing the audit |
 | `disabled` | list | `[]` | Skill names to skip at load time |
+| `max-listing-description-chars` | int | `250` | Truncation cap (Unicode scalars) for descriptions in the system prompt's *Available Skills* listing; management APIs / `skill list` / `skill show` keep serving full text |
 
 ```toml
 [skills]
@@ -112,23 +158,29 @@ Audit on load is controlled by the `audit_enabled` field on the internal `Skills
 directory failing the audit is skipped with a warning
 (`crates/skill/src/loading/loader.rs`).
 
-> **Known gap**: `audit_enabled`, `prompt_injection_mode`, `prompt_budget_ratio` and
-> `max_listing_description_chars` exist only on the internal `SkillsConfig`
+> **Known gap**: `audit_enabled`, `prompt_injection_mode` and `prompt_budget_ratio`
+> exist only on the internal `SkillsConfig`
 > (`crates/skill/src/types/config.rs`) and are **not** exposed in the config file schema:
-> `SkillsSection` declares only `dirs` / `allow_scripts` / `disabled`
-> (`apps/serverside/src/daemon_config.rs`), and every construction site fills the rest
+> `SkillsSection` declares only `dirs` / `allow_scripts` / `disabled` /
+> `max-listing-description-chars`
+> (`apps/shared/src/skills_support.rs`), and every construction site fills the rest
 > from `SkillsConfig::default()` (`apps/serverside/src/daemon_config.rs`,
 > `apps/endside/src/support/config.rs`, `apps/endside/src/cli/skills.rs`). Because
 > the config structs do not use `deny_unknown_fields`, writing these keys into `config.toml`
 > **passes validation silently but has no effect**. Enabling the load-time
 > audit requires an API consumer to set the field programmatically.
 >
-> **Known gap**: `prompt_injection_mode`, `prompt_budget_ratio` and
-> `max_listing_description_chars` have no reader anywhere in the workspace — a search finds only
-> their declarations and defaults in `crates/skill/src/types/config.rs` — so the
-> `full`/`compact` injection modes, the prompt budget ratio and the description-length cap are
-> inert. Skill listings reach the prompt through the skills *directory* table instead
-> (`apps/shared/src/gateway/prompt_utils.rs`).
+> `max_listing_description_chars` **is** file-configurable via
+> `[skills] max-listing-description-chars` (default `250`) and consumed by
+> `FileSkillRegistry::list_skills`, which truncates skill descriptions in the
+> system prompt's *Available Skills* listing to keep the section byte-stable
+> and bounded; management APIs, `skill list`, and `skill show` keep serving
+> full text via the spec accessors. `prompt_injection_mode` and
+> `prompt_budget_ratio` remain inert — the full/compact injection modes and the
+> prompt budget ratio have no reader anywhere in the workspace (the
+> *Available Skills* listing and the L2 discovery hints are the paths that
+> actually reach the prompt, see
+> [Skill Discovery Hints](#skill-discovery-hints-l2)).
 
 ### Management Commands
 

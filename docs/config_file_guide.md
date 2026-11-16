@@ -27,7 +27,7 @@ Configuration items covered in this guide:
 |--------|------|----------|
 | `[llm]` | LLM provider configuration | [View Details](#llm---llm-provider-configuration) |
 | `[subagent]` ⭐ | Predefined subagent roles (all modes) | [View Details](#subagent---predefined-subagent-roles-new) |
-| `[skills]` | Skills configuration (dirs/allow_scripts/disabled only) | [View Details](#skills---skills-configuration) |
+| `[skills]` | Skills configuration (dirs/allow_scripts/disabled/max-listing-description-chars) | [View Details](#skills---skills-configuration) |
 | `[compact]` | Context compression strategy (CLI/Daemon only; TUI ignores this section) | [View Details](#compact---context-compression-strategy) |
 | `[trace]` | Tracing/Observability | [View Details](#trace---tracingobservability) |
 | `[hooker]` | Hooker configuration | [View Details](#hooker---hooker-configuration) |
@@ -463,16 +463,23 @@ Main agent call example:
 dirs = ["~/.xiaoo/skills", "/path/to/custom/skills"]  # Skills directory list (optional)
 allow_scripts = true                                    # Allow script-type skills (optional)
 disabled = ["legacy-review"]                           # Installed Skill IDs not loaded at runtime (optional)
+max-listing-description-chars = 250                    # L1 listing description truncation cap, Unicode scalars (optional)
 ```
 
-The file-configurable surface of `[skills]` is exactly these three keys —
-`dirs`, `allow_scripts`, `disabled` (`apps/serverside/src/daemon_config.rs`;
-TUI `apps/endside/src/support/config.rs`).
+The file-configurable surface of `[skills]` is exactly these four keys —
+`dirs`, `allow_scripts`, `disabled`, `max-listing-description-chars`
+(`apps/shared/src/skills_support.rs`; the shared `SkillsSection` schema is
+re-exported and parsed identically by the daemon, TUI, and CLI).
+
+`max-listing-description-chars` (default `250`, Unicode scalar count) only
+truncates the skill descriptions rendered into the system prompt's
+*Available Skills* listing; management APIs, `skill list`, and `skill show`
+always serve the full text via the spec accessors.
 
 > ⚠️ **Known gap — security knobs are not file-configurable and are silently
 > dropped.** `SkillsConfig` in the code also has `audit_enabled`,
-> `prompt_injection_mode`, `prompt_budget_ratio`, and
-> `max_listing_description_chars` (`crates/skill/src/types/config.rs`), but
+> `prompt_injection_mode`, and `prompt_budget_ratio`
+> (`crates/skill/src/types/config.rs`), but
 > **no** file-config section maps to them: every construction site fills them
 > from `SkillsConfig::default()` via `..SkillsConfig::default()`
 > (`apps/serverside/src/daemon_config.rs`,

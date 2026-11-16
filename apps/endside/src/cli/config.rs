@@ -8,6 +8,7 @@ use xiaoo_api::chat::HookerRegistryConfig;
 use xiaoo_api::llm::RateLimitSection;
 use xiaoo_shared::gateway::MemoryAutomationConfig;
 use xiaoo_shared::mcp_support::{self, McpSection};
+pub use xiaoo_shared::skills_support::SkillsSection;
 
 const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 
@@ -28,17 +29,6 @@ pub struct FileConfig {
     pub mcp: McpSection,
     #[serde(default)]
     pub memory_automation: MemoryAutomationConfig,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct SkillsSection {
-    /// Additional skill directories to scan (besides the default ~/.xiaoo/skills/).
-    pub dirs: Option<Vec<String>>,
-    /// Allow skills to include script files (.sh, .bash, etc.).
-    pub allow_scripts: Option<bool>,
-    /// Skill IDs that should remain installed but not be loaded.
-    #[serde(default)]
-    pub disabled: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
