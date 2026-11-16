@@ -5,7 +5,7 @@
 #
 # 当前编排的检查（全部静态、不编译、秒级）：
 #   1. 门面纪律门禁    scripts/check-facade.sh
-#      — 应用只依赖 xiaoo-api/xiaoo-shared；底层 publish=false；xiaoo-api 对外 pub 面冻结。
+#      — 应用只依赖 xiaoo-api/xiaoo-shared；底层 publish=false；xiaoo-api 依赖边与模块结构冻结。
 #   2. 测试卫生门禁    tests-hygiene — scripts/check-tests-hygiene.sh
 #      — src 中无内联测试，test 门控仅剩指向仓库根 tests/ 的 #[path] 声明，
 #        tests/ 命名合规（规则见 tests/README.md）。

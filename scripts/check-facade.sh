@@ -11,7 +11,8 @@
 #   [APP-DEPS]   endside/serverside 直接依赖边不含底层 crate
 #   [APP-USE]    apps 源码零底层 use——不出现 `use <底层 crate>::`
 #   [PUBLISH]    底层 crate 必须 publish=false
-#   [API-FROZEN] xiaoo-api 对外 pub 面冻结——path 依赖集与 pub mod 列表不得扩充
+#   [API-FROZEN] xiaoo-api 依赖边与模块结构冻结——path 依赖集与 pub mod 列表
+#                必须与基线精确一致（新增/删除/改名均失败），基线版本头须同步
 #
 # 退出码：0 通过；1 有违反。违规项逐条打印到 stderr。
 
@@ -200,10 +201,20 @@ for c in "${BOTTOM_CRATES[@]}"; do
     fi
 done
 
-# ---- [API-FROZEN] xiaoo-api 对外 pub 面冻结 ----------------------------------
+# ---- [API-FROZEN] xiaoo-api 依赖边与模块结构冻结 ------------------------------
 # 冻结基线存于 scripts/baselines/*.txt（一处真相源，变更基线时改文件即可）。
+# 1) 当前 path 依赖集、pub mod 列表与基线做双向精确比对：新增、删除、改名都失败。
+# 2) 基线文件头记录 # workspace-version: <version>，必须与根 Cargo.toml 的
+#    [workspace.package].version 一致。
+# 3) 基线条目相对最近一次改动发生变化时，要求 workspace version 已 bump；
+#    git 不可用时跳过第 3 项（前两项仍然生效）。
 API_DEPS_BASELINE="$SCRIPT_DIR/baselines/api-deps.txt"
 API_MODS_BASELINE="$SCRIPT_DIR/baselines/api-mods.txt"
+# git 的 pathspec 与 `$ref:path` 需要仓库相对路径；由上面的绝对路径推导，
+# 避免同一路径维护两份（脚本开头已 cd 到仓库根）。
+REPO_ROOT="$(pwd)"
+API_DEPS_REL="${API_DEPS_BASELINE#"$REPO_ROOT"/}"
+API_MODS_REL="${API_MODS_BASELINE#"$REPO_ROOT"/}"
 for f in "$API_DEPS_BASELINE" "$API_MODS_BASELINE"; do
     if [ ! -s "$f" ]; then
         log "FAIL [META]: 缺失或空的基线文件 $f"
@@ -211,11 +222,99 @@ for f in "$API_DEPS_BASELINE" "$API_MODS_BASELINE"; do
     fi
 done
 
-# 1) 路径依赖集不得新增：当前 path 依赖必须是基线集的子集。
-#    只认 [dependencies] 表内的 path 依赖（dev/build 依赖不进对外 pub 面）。
+# 从 Cargo.toml 文本解析 [workspace.package].version；$1 可为文件或 /dev/stdin。
+workspace_version() {
+    awk '
+        /^\[workspace\.package\][[:space:]]*$/ { in_wp=1; next }
+        /^\[/ { in_wp=0; next }
+        in_wp && /^[[:space:]]*version[[:space:]]*=/ {
+            line=$0
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            gsub(/[[:space:]"]/, "", line)
+            print line
+            exit
+        }
+    ' "${1:-/dev/stdin}"
+}
+
+# 基线文件里的 workspace-version 头。
+baseline_version() {
+    sed -nE 's/^#[[:space:]]*workspace-version:[[:space:]]*([^[:space:]]+).*/\1/p' "$1" | head -n1
+}
+
+# 基线有效条目：去注释/空行，排序去重（与下方精确比对口径一致）。
+baseline_entries() {
+    grep -vE '^[[:space:]]*(#|$)' | sort -u || true
+}
+
+# version_bumped <old> <new>：new 必须按版本序严格大于 old。
+version_bumped() {
+    local old="$1" new="$2"
+    [ "$old" != "$new" ] || return 1
+    [ "$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -n1)" = "$new" ]
+}
+
+current_version="$(workspace_version Cargo.toml)"
+if [ -z "$current_version" ]; then
+    log "FAIL [META]: 无法从 Cargo.toml 解析 [workspace.package].version"
+    exit 1
+fi
+
+deps_baseline_version="$(baseline_version "$API_DEPS_BASELINE")"
+mods_baseline_version="$(baseline_version "$API_MODS_BASELINE")"
+if [ -z "$deps_baseline_version" ] || [ -z "$mods_baseline_version" ]; then
+    log "FAIL [META]: 基线文件缺少 '# workspace-version: <version>' 头"
+    exit 1
+fi
+if [ "$deps_baseline_version" != "$mods_baseline_version" ]; then
+    log "FAIL [API-FROZEN]: 两个基线的 workspace-version 头不一致（$deps_baseline_version vs $mods_baseline_version）"
+    fail=1
+fi
+if [ "$deps_baseline_version" != "$current_version" ] || [ "$mods_baseline_version" != "$current_version" ]; then
+    log "FAIL [API-FROZEN]: 基线 workspace-version ($deps_baseline_version/$mods_baseline_version) 与当前 [workspace.package].version ($current_version) 不一致；版本变化后请同步两个基线文件的头"
+    fail=1
+fi
+
+# 基线条目相对最近一次改动是否变化；变化则要求 workspace version 已 bump。
+version_ref=""
+if command -v git >/dev/null 2>&1 \
+        && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    if ! git diff --quiet HEAD -- "$API_DEPS_REL" "$API_MODS_REL" 2>/dev/null; then
+        version_ref="HEAD"
+    elif git rev-parse --verify HEAD^ >/dev/null 2>&1 \
+            && ! git diff --quiet HEAD^ HEAD -- "$API_DEPS_REL" "$API_MODS_REL" 2>/dev/null; then
+        version_ref="HEAD^"
+    fi
+else
+    log "WARN [API-FROZEN]: 未检测到可用 git，跳过 version bump 校验（集合一致性与版本头仍然校验）"
+fi
+
+if [ -n "$version_ref" ]; then
+    surface_changed=0
+    for pair in "$API_DEPS_BASELINE|$API_DEPS_REL" "$API_MODS_BASELINE|$API_MODS_REL"; do
+        file="${pair%%|*}"
+        rel="${pair#*|}"
+        old_entries="$({ git show "$version_ref:$rel" 2>/dev/null || true; } | baseline_entries)"
+        new_entries="$(baseline_entries <"$file")"
+        [ "$old_entries" = "$new_entries" ] || surface_changed=1
+    done
+    if [ "$surface_changed" -eq 1 ]; then
+        prev_version="$(workspace_version <(git show "$version_ref:Cargo.toml" 2>/dev/null || true))"
+        if [ -z "$prev_version" ]; then
+            log "WARN [API-FROZEN]: 无法从 $version_ref 读取 workspace version，跳过 version bump 校验"
+        elif ! version_bumped "$prev_version" "$current_version"; then
+            log "FAIL [API-FROZEN]: 基线条目已变化，但 workspace version 未 bump（$version_ref=$prev_version，当前=$current_version）；请 bump [workspace.package].version 并同步基线头"
+            fail=1
+        fi
+    fi
+fi
+
+# 1) path 依赖集必须与基线精确一致。
+#    只认 [dependencies] 表内的 path 依赖（dev/build 依赖不进依赖边冻结范围）。
 #    两步 grep：先选 inline-table 行（`= {`），再在其中找 path 键。
 #    这样 path 无论是否为 inline table 首键都能命中——例如 `{ version="1.0", path=".." }`
-#    （version 在前）也会被逮住，新增依赖无法绕过冻结；
+#    （version 在前）也会被逮住，删除/改名也无法绕过比对；
 #    正则 `[^[:alnum:]_-]path[[:space:]]*=` 用非标识符边界防止 `mypath` 之类子串误报。
 api_manifest="$(manifest_path_of xiaoo-api)"
 if [ -z "$api_manifest" ]; then
@@ -237,28 +336,48 @@ api_path_deps=$(awk '
 ' "$api_manifest" \
     | grep -E '=[[:space:]]*\{' \
     | grep -E '[^[:alnum:]_-]path[[:space:]]*=' \
-    | sed -E 's/^([a-z0-9_-]+)[[:space:]]*=.*/\1/' | sort -u)
-mapfile -t api_frozen_deps < <(grep -vE '^[[:space:]]*(#|$)' "$API_DEPS_BASELINE" | sort -u)
+    | sed -E 's/^([a-z0-9_-]+)[[:space:]]*=.*/\1/' | sort -u || true)
+mapfile -t api_frozen_deps < <(baseline_entries <"$API_DEPS_BASELINE")
 # comm 退码 1（输入无差异）属正常，|| true 防御性兜底。
 new_deps=$(comm -13 \
     <(printf '%s\n' "${api_frozen_deps[@]}") \
-    <(printf '%s\n' "$api_path_deps") || true)
-if [ -n "$new_deps" ]; then
-    log "FAIL [API-FROZEN]: xiaoo-api 新增了非基线的 path 依赖（对外 pub 面已冻结，不得扩充）："
-    printf '%s\n' "$new_deps" | sed "s/^/$LIST_PREFIX/"
+    <(printf '%s\n' "$api_path_deps" | sed '/^[[:space:]]*$/d') || true)
+missing_deps=$(comm -23 \
+    <(printf '%s\n' "${api_frozen_deps[@]}") \
+    <(printf '%s\n' "$api_path_deps" | sed '/^[[:space:]]*$/d') || true)
+if [ -n "$new_deps" ] || [ -n "$missing_deps" ]; then
+    log "FAIL [API-FROZEN]: xiaoo-api 的 path 依赖集与基线不一致（依赖边冻结；新增/缺失均失败）："
+    if [ -n "$new_deps" ]; then
+        log "        新增（当前不在基线）："
+        printf '%s\n' "$new_deps" | sed "s/^/$LIST_PREFIX/" >&2
+    fi
+    if [ -n "$missing_deps" ]; then
+        log "        缺失（基线有但当前没有）："
+        printf '%s\n' "$missing_deps" | sed "s/^/$LIST_PREFIX/" >&2
+    fi
     fail=1
 fi
 
-# 2) 对外模块固定：lib.rs 的 pub mod 列表不得扩充（含 `mod foo;` 文件模块与 `mod foo {` 内联块）。
-cur_mods=$(sed -nE 's/^(pub[[:space:]]+)?mod[[:space:]]+([a-z0-9_]+)[;{].*/\2/p' "$api_lib" | sort -u)
-mapfile -t api_frozen_mods < <(grep -vE '^[[:space:]]*(#|$)' "$API_MODS_BASELINE" | sort -u)
+# 2) 对外模块结构必须与基线精确一致（含 `mod foo;` 文件模块与 `mod foo {` 内联块）。
+cur_mods=$(sed -nE 's/^(pub[[:space:]]+)?mod[[:space:]]+([a-z0-9_]+)[;{].*/\2/p' "$api_lib" | sort -u || true)
+mapfile -t api_frozen_mods < <(baseline_entries <"$API_MODS_BASELINE")
 # comm 退码 1（输入无差异）属正常，|| true 防御性兜底。
 extra_mods=$(comm -13 \
     <(printf '%s\n' "${api_frozen_mods[@]}") \
-    <(printf '%s\n' "$cur_mods") || true)
-if [ -n "$extra_mods" ]; then
-    log "FAIL [API-FROZEN]: xiaoo-api 新增了对外 pub mod（对外 pub 面已冻结，不得扩充）："
-    printf '%s\n' "$extra_mods" | sed "s/^/$LIST_PREFIX/"
+    <(printf '%s\n' "$cur_mods" | sed '/^[[:space:]]*$/d') || true)
+missing_mods=$(comm -23 \
+    <(printf '%s\n' "${api_frozen_mods[@]}") \
+    <(printf '%s\n' "$cur_mods" | sed '/^[[:space:]]*$/d') || true)
+if [ -n "$extra_mods" ] || [ -n "$missing_mods" ]; then
+    log "FAIL [API-FROZEN]: xiaoo-api 的 pub mod 列表与基线不一致（模块结构冻结；新增/缺失均失败）："
+    if [ -n "$extra_mods" ]; then
+        log "        新增（当前不在基线）："
+        printf '%s\n' "$extra_mods" | sed "s/^/$LIST_PREFIX/" >&2
+    fi
+    if [ -n "$missing_mods" ]; then
+        log "        缺失（基线有但当前没有）："
+        printf '%s\n' "$missing_mods" | sed "s/^/$LIST_PREFIX/" >&2
+    fi
     fail=1
 fi
 
@@ -267,9 +386,10 @@ if [ "$fail" -ne 0 ]; then
     log ""
     log "门面纪律检查未通过。"
     log "修复方向：应用只依赖 xiaoo-api + xiaoo-shared；底层访问经 shared 粗粒度入口；"
-    log "新增 pub 项前确认有应用消费者，仅内部复用写 pub(crate)。"
+    log "新增 pub 项前确认有应用消费者，仅内部复用写 pub(crate)；"
+    log "确需调整依赖边/模块结构时，同步基线并 bump [workspace.package].version。"
     exit 1
 fi
 
-log "门面纪律检查通过：应用仅依赖 xiaoo-api + xiaoo-shared，底层 pub 面已锁定。"
+log "门面纪律检查通过：应用仅依赖 xiaoo-api + xiaoo-shared，依赖边与模块结构与基线精确一致。"
 exit 0
