@@ -210,6 +210,126 @@ async fn complete_surfaces_real_401_when_all_candidates_unauthorized() {
     assert!(error.to_string().contains("HTTP 401"));
 }
 
+// Regression test for the 5xx fallback path: a 5xx on one real
+// `/chat/completions` route means the route is likely correct but the
+// backend is temporarily unavailable, so the next real route must be tried
+// instead of aborting with the raw error.
+#[tokio::test]
+async fn complete_tries_next_real_path_after_first_route_5xx() {
+    let mut server = mockito::Server::new_async().await;
+    let _root = server
+        .mock("POST", "/")
+        .with_status(404)
+        .create_async()
+        .await;
+    let _v1 = server
+        .mock("POST", "/v1")
+        .with_status(404)
+        .create_async()
+        .await;
+    let _v4 = server
+        .mock("POST", "/v4")
+        .with_status(404)
+        .create_async()
+        .await;
+    let _first_path = server
+        .mock("POST", "/chat/completions")
+        .with_status(503)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":{"message":"backend unavailable"}}"#)
+        .create_async()
+        .await;
+    let _second_path = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"id":"x","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#,
+        )
+        .create_async()
+        .await;
+
+    let provider = OpenAiFamilyProvider::new(
+        "test-key".to_string(),
+        server.url(),
+        "gpt-5.4".to_string(),
+        OpenAiFamilyAuthStyle::Bearer,
+        vec![],
+    );
+
+    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
+    let response = provider.complete(&request).await.unwrap();
+
+    assert_eq!(response.message.text.as_deref(), Some("OK"));
+}
+
+// When every real completions route returns 5xx, the final error must be
+// the raw upstream error (status code + gateway error code), not the wrapped
+// "All N candidates failed" summary that hides the root cause.
+#[tokio::test]
+async fn complete_surfaces_raw_5xx_when_all_real_paths_fail() {
+    let mut server = mockito::Server::new_async().await;
+    let _root = server
+        .mock("POST", "/")
+        .with_status(404)
+        .create_async()
+        .await;
+    let _v1 = server
+        .mock("POST", "/v1")
+        .with_status(404)
+        .create_async()
+        .await;
+    let _v4 = server
+        .mock("POST", "/v4")
+        .with_status(404)
+        .create_async()
+        .await;
+    let upstream_body = r#"data: {"error":{"message":"Upstream error (503): {\"error_msg\":\"Service abc backend is not available\",\"error_code\":\"ModelArts.8903\"}","type":"upstream_error","code":502}}data: [DONE]"#;
+    let _completions = server
+        .mock("POST", "/chat/completions")
+        .with_status(502)
+        .with_header("content-type", "application/json")
+        .with_body(upstream_body)
+        .create_async()
+        .await;
+    let _v1_completions = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(502)
+        .with_header("content-type", "application/json")
+        .with_body(upstream_body)
+        .create_async()
+        .await;
+    let _v4_completions = server
+        .mock("POST", "/v4/chat/completions")
+        .with_status(502)
+        .with_header("content-type", "application/json")
+        .with_body(upstream_body)
+        .create_async()
+        .await;
+
+    let provider = OpenAiFamilyProvider::new(
+        "test-key".to_string(),
+        server.url(),
+        "gpt-5.4".to_string(),
+        OpenAiFamilyAuthStyle::Bearer,
+        vec![],
+    );
+
+    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
+    let error = provider.complete(&request).await.unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("HTTP 502"), "expected raw 502: {message}");
+    assert!(
+        message.contains("ModelArts.8903"),
+        "expected upstream error code: {message}"
+    );
+    assert!(
+        !message.contains("candidates failed"),
+        "should not be wrapped URL-fallback summary: {message}"
+    );
+}
+
 // Streaming counterpart of the regression above: `complete_stream` shares
 // the same fallback loop and must also surface the real HTTP 401 when
 // every candidate rejects the request, instead of the wrapped summary.

@@ -340,3 +340,35 @@ fn http_500_is_not_retryable() {
 
     assert!(!is_retryable_network_error(&error));
 }
+
+#[test]
+fn server_error_classification_covers_gateway_codes_only() {
+    for status in [
+        "502 Bad Gateway",
+        "503 Service Unavailable",
+        "504 Gateway Timeout",
+    ] {
+        let error = LlmError::ApiError(format!("HTTP {status}: upstream unavailable"));
+        assert!(is_gateway_error(&error), "expected {status} to qualify");
+    }
+
+    // 500 is intentional: treated as a persistent failure, not a route switch.
+    let api_500 = LlmError::ApiError("HTTP 500 Internal Server Error: boom".to_string());
+    assert!(!is_gateway_error(&api_500));
+
+    let api_404 = LlmError::ApiError("HTTP 404 Not Found: no body".to_string());
+    assert!(!is_gateway_error(&api_404));
+
+    // Keyword fallback for manually-built messages without an HTTP prefix.
+    assert!(is_gateway_error(&LlmError::ApiError(
+        "Bad Gateway".to_string()
+    )));
+    assert!(is_gateway_error(&LlmError::ApiError(
+        "Service Unavailable".to_string()
+    )));
+    assert!(is_gateway_error(&LlmError::ApiError(
+        "Gateway Timeout".to_string()
+    )));
+
+    assert!(!is_gateway_error(&LlmError::Timeout));
+}

@@ -69,7 +69,7 @@ pub fn build_final_candidates(base_candidates: &[String]) -> Vec<String> {
     final_urls
 }
 
-fn is_chat_completions_endpoint(base: &str) -> bool {
+pub(crate) fn is_chat_completions_endpoint(base: &str) -> bool {
     base.split(['?', '#'])
         .next()
         .unwrap_or(base)
@@ -239,6 +239,40 @@ pub fn is_configuration_error(error: &LlmError) -> bool {
     }
 }
 
+/// HTTP statuses that mean the route exists but the gateway/backend is
+/// temporarily unavailable.
+const GATEWAY_ERROR_STATUSES: [u16; 3] = [502, 503, 504];
+
+/// Keyword fallbacks for manually-built messages that do not start with an
+/// `HTTP <code>` prefix.
+const GATEWAY_ERROR_KEYWORDS: &[&str] = &["Bad Gateway", "Service Unavailable", "Gateway Timeout"];
+
+/// Shared gateway-error classification used by both the URL fallback and the
+/// retry policy, so the two paths cannot drift apart.
+fn is_gateway_error_message(msg: &str) -> bool {
+    match http_status_code(msg) {
+        Some(code) => GATEWAY_ERROR_STATUSES.contains(&code),
+        None => GATEWAY_ERROR_KEYWORDS
+            .iter()
+            .any(|keyword| msg.contains(keyword)),
+    }
+}
+
+/// True for an HTTP 502/503/504 response (or an equivalent manually-built
+/// message). A 5xx means the route is probably correct but the backend is
+/// temporarily unavailable, so the URL fallback should try the remaining
+/// real chat-completion paths instead of giving up.
+///
+/// HTTP 500 is deliberately excluded: it usually signals a persistent
+/// request-shape/server bug rather than an unhealthy route, and
+/// [`is_retryable_network_error`] does not retry it either.
+pub(crate) fn is_gateway_error(error: &LlmError) -> bool {
+    match error {
+        LlmError::ApiError(msg) => is_gateway_error_message(msg),
+        _ => false,
+    }
+}
+
 pub fn is_retryable_network_error(error: &LlmError) -> bool {
     match error {
         LlmError::Timeout
@@ -248,10 +282,7 @@ pub fn is_retryable_network_error(error: &LlmError) -> bool {
         LlmError::ApiError(msg) => {
             // Only retry for transient network/server errors
             // RateLimited (429/529) is quota/policy issue - should fail immediately
-            matches!(http_status_code(msg), Some(502) | Some(503) | Some(504))
-                || msg.contains("Bad Gateway")
-                || msg.contains("Service Unavailable")
-                || msg.contains("Gateway Timeout")
+            is_gateway_error_message(msg)
                 || msg.contains("timeout")
                 || msg.contains("network")
                 || msg.contains("connection")

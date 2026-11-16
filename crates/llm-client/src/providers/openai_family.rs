@@ -13,8 +13,8 @@ use crate::error::{
 use crate::providers::stream_utf8::StreamUtf8Decoder;
 use crate::url_fallback::{
     build_base_url_candidates, build_final_candidates, build_url_fallback_error_message,
-    is_configuration_error, is_http_unauthorized_error, should_try_next_candidate,
-    UrlAttemptRecord,
+    is_chat_completions_endpoint, is_configuration_error, is_gateway_error,
+    is_http_unauthorized_error, should_try_next_candidate, UrlAttemptRecord,
 };
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -426,14 +426,33 @@ impl OpenAiFamilyProvider {
                 .ok()
                 .and_then(|guard| guard.clone());
 
+            let mut failed_cached_url: Option<(String, LlmError)> = None;
+
             if let Some(url) = cached_url {
                 // The wrapper owns the retry budget, including cached endpoints.
-                return self.try_endpoint(&url, request, &call, &mut redactor).await;
+                // A gateway 5xx means the cached route's backend is temporarily
+                // unavailable, so drop the cache and let this attempt probe the
+                // remaining candidates instead of retrying the same route.
+                match self.try_endpoint(&url, request, &call, &mut redactor).await {
+                    Ok(response) => return Ok(response),
+                    Err(error) if is_gateway_error(&error) => {
+                        if let Ok(mut guard) = self.cached_endpoint_url.write() {
+                            *guard = None;
+                        }
+                        tracing::warn!(
+                            url = %redactor.url(&url),
+                            error = %redactor.error(error.clone()),
+                            "Cached endpoint returned 5xx - clearing cache and probing other candidates"
+                        );
+                        failed_cached_url = Some((url, error));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
 
             tracing::info!(
                 original_base = %redactor.url(&self.api_base),
-                "No cached URL available{} - starting URL fallback to find working endpoint",
+                "Starting URL fallback{} to find a working endpoint",
                 label
             );
 
@@ -443,6 +462,23 @@ impl OpenAiFamilyProvider {
             let mut attempts = Vec::new();
 
             for (idx, url) in final_urls.iter().enumerate() {
+                // The cached URL already returned a gateway 5xx in this attempt;
+                // do not probe it a second time. Surface its error directly when
+                // it was the only candidate.
+                if let Some((cached_url, cached_error)) = &failed_cached_url {
+                    if cached_url == url {
+                        attempts.push(UrlAttemptRecord {
+                            index: idx,
+                            url: url.clone(),
+                            error: cached_error.to_string(),
+                        });
+                        if idx + 1 == final_urls.len() {
+                            return Err(cached_error.clone());
+                        }
+                        continue;
+                    }
+                }
+
                 match self.try_endpoint(url, request, &call, &mut redactor).await {
                     Ok(response) => {
                         tracing::info!(
@@ -474,23 +510,36 @@ impl OpenAiFamilyProvider {
                             error: error.to_string(),
                         });
 
-                        let is_phase1 = idx < base_candidates.len();
                         let has_more_candidates = idx + 1 < final_urls.len();
 
-                        if has_more_candidates && should_try_next_candidate(&error) {
-                            if is_phase1 {
+                        // A gateway 5xx means the route is probably correct but
+                        // the backend is temporarily unavailable. Keep walking
+                        // the remaining candidates in their original order; only
+                        // stop early and surface the raw upstream error when no
+                        // real completion path is left. Non-completion candidates
+                        // may still be probed in between.
+                        if is_gateway_error(&error) {
+                            let has_remaining_completion_path = final_urls[(idx + 1)..]
+                                .iter()
+                                .any(|u| is_chat_completions_endpoint(u));
+
+                            if has_remaining_completion_path {
                                 tracing::warn!(
-                                    "Phase 1 candidate #{} failed: {} - trying next candidate",
-                                    idx + 1,
-                                    redactor.url(url)
+                                    url = %redactor.url(url),
+                                    error = %redactor.error(error.clone()),
+                                    "Gateway 5xx - continuing with remaining candidates"
                                 );
-                            } else {
-                                tracing::warn!(
-                                    "Phase 2 candidate #{} failed with endpoint error: {} - trying next",
-                                    idx + 1,
-                                    redactor.url(url)
-                                );
+                                continue;
                             }
+                            return Err(error);
+                        }
+
+                        if has_more_candidates && should_try_next_candidate(&error) {
+                            tracing::warn!(
+                                candidate = idx + 1,
+                                url = %redactor.url(url),
+                                "Candidate failed with endpoint error - trying next candidate"
+                            );
                             continue;
                         }
 
