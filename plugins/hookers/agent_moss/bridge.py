@@ -68,6 +68,29 @@ _HEALTH_TIMEOUT = float(os.getenv("AGENT_MOSS_HEALTH_TIMEOUT", "2"))
 _LOG_PATH = os.getenv("AGENT_MOSS_LOG_PATH", "")
 _CHECK_SOURCE = os.getenv("AGENT_MOSS_CHECK_SOURCE", "") == "1"
 
+# AgentMoss 0.16.14 起默认开启鉴权（auto 生成 token）：不带 Bearer 会 401，
+# 而 bridge 的失败分支是 fail-closed，等于所有工具调用都被拒。
+# 解析顺序：显式 env > env 指定的文件 > 约定路径（install.sh 生成到
+# ~/.config/agentmoss/xiaoo_token，0600；systemd 以 root 运行也能读，
+# nohup 以当前用户运行同样可读）。
+def _resolve_auth_token() -> str:
+    tok = os.getenv("AGENT_MOSS_AUTH_TOKEN", "").strip()
+    if tok:
+        return tok
+    for candidate in (
+        os.getenv("AGENT_MOSS_AUTH_TOKEN_FILE", "").strip(),
+        str(Path.home() / ".config" / "agentmoss" / "xiaoo_token"),
+    ):
+        if not candidate:
+            continue
+        try:
+            val = Path(candidate).read_text(encoding="utf-8").strip()
+            if val:
+                return val
+        except OSError:
+            continue
+    return ""
+
 # 归属实例标识：bridge 只认自己起的 agentmoss（instance 字段 == _EXPECT_INSTANCE），
 # 避免漂移到同机其他 agent（如 OpenDesk）spawn 的 agentmoss——后者会用错 agent 规则判定 xiaoo 请求。
 # 值来自 env AGENT_MOSS_INSTANCE（install.sh 注入=xiaoo），默认 xiaoo。
@@ -296,7 +319,30 @@ def _normalize_history_item(h: dict) -> dict:
     if raw_detail == "":
         raw_detail = h.get("input", "")
     action_detail = _extract_action_detail(tool_name, raw_detail)
-    return {"action_type": tool_name, "action_detail": action_detail}
+    item = {"action_type": tool_name, "action_detail": action_detail}
+    # 工具返回内容：ask_user_question 的 output 是用户回答，AgentMoss 的授权类
+    # 规则（改密码 / 删用户）靠它判断"用户是否已确认"。不传就会被判成未授权。
+    output = h.get("output", h.get("result", ""))
+    if output == "" or output is None:
+        output = h.get("tool_result", "")
+    if isinstance(output, (dict, list)):
+        try:
+            output = json.dumps(output, ensure_ascii=False)
+        except (TypeError, ValueError):
+            output = str(output)
+    item["output"] = str(output or "")
+    # called_at：该次调用发生的时刻。AgentMoss 的 L2 授权时效窗
+    # （CONSENT_TTL_SECONDS，默认 300s）拿它和 a_next.called_at 相减，判断
+    # 「用户确认后多久才执行」——一小时前的「是」不能给今天的删用户背书。
+    # 宿主 payload 里给的是毫秒时间戳（called_at_ms），这里转 ISO 8601；
+    # 缺了就跳过时间窗，由「最近 5 条」距离兜底（不伪造时刻）。
+    called_at_ms = h.get("called_at_ms")
+    if called_at_ms:
+        try:
+            item["called_at"] = datetime.fromtimestamp(float(called_at_ms) / 1000).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            pass
+    return item
 
 
 def _handle_hook_payload(data: dict) -> int:
@@ -326,7 +372,13 @@ def _handle_hook_payload(data: dict) -> int:
     tool_input = call.get("input", {})
 
     action_detail = _extract_action_detail(tool_name, tool_input)
-    a_next = {"action_type": tool_name, "action_detail": action_detail}
+    a_next = {
+        "action_type": tool_name,
+        "action_detail": action_detail,
+        # 当前动作就是此刻发生的：AgentMoss 拿它与历史里 ask_user_question 的
+        # called_at 相减，判断「用户刚才的确认是否仍在时效窗内」。
+        "called_at": datetime.now().isoformat(),
+    }
 
     session_id: str = data.get("session_id") or call.get("call_id", "unknown-session")
     prompt_session: str = data.get("prompt_session", "")
@@ -382,10 +434,14 @@ def _handle_hook_payload(data: dict) -> int:
     # === Step 2: POST /api/v1/analyze ===
     # 用解析出的服务 URL（含探测兜底，跟 health 同一 URL）。
     url = f"{_resolve_service_url()}/api/v1/analyze"
+    _headers = {"Content-Type": "application/json"}
+    _token = _resolve_auth_token()
+    if _token:
+        _headers["Authorization"] = f"Bearer {_token}"
     req = urllib.request.Request(
         url,
         data=json.dumps(request_body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=_headers,
         method="POST",
     )
     try:

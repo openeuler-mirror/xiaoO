@@ -199,6 +199,11 @@ impl PluginToolHookerAdaptor {
                         json!({
                             "action_type": tool_name,
                             "action_detail": input,
+                            // 调用发生时刻（毫秒）。bridge.py 转成 ISO 8601 填
+                            // called_at —— AgentMoss 的 L2 授权时效窗要比较
+                            // 「用户确认提问的时刻」与「本次执行的时刻」，缺了
+                            // 就只剩「最近 5 条」距离兜底（一小时前的授权也算数）。
+                            "called_at_ms": m.timestamp_ms,
                         }),
                     );
                 }
