@@ -104,6 +104,13 @@ impl ErrorRedactor {
 
     pub(crate) fn headers(&mut self, headers: &reqwest::header::HeaderMap) {
         for (name, value) in headers {
+            if value.is_sensitive() {
+                self.add(value.as_bytes());
+                if let Ok(text) = std::str::from_utf8(value.as_bytes()) {
+                    // HTTP parsers can discard leading and trailing optional whitespace.
+                    self.add(text.trim_matches([' ', '\t']).as_bytes());
+                }
+            }
             if Self::is_auth_header(name.as_str()) {
                 self.add(value.as_bytes());
                 if let Some(token) = value.as_bytes().strip_prefix(b"Bearer ") {

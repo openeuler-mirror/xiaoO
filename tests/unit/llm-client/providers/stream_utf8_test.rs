@@ -127,7 +127,7 @@ async fn provider_stream_preserves_text(provider_name: &str, body: &'static str)
                 server.url(),
                 "test-model".into(),
                 OpenAiFamilyAuthStyle::Bearer,
-                vec![],
+                Default::default(),
             )),
             "anthropic" => Box::new(AnthropicProvider::new(
                 "test-key".into(),

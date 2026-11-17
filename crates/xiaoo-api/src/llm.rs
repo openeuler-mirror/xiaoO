@@ -17,7 +17,9 @@
 
 // ---- Provider construction ----
 #[doc(inline)]
-pub use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper, RetryBudget};
+pub use llm_client::{
+    create_llm_provider, LlmProviderConfig, LlmProviderWrapper, RequestHeadersConfig, RetryBudget,
+};
 
 // ---- Request admission gate ----
 #[doc(inline)]

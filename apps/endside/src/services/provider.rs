@@ -111,6 +111,9 @@ fn persist_active_provider_selection_internal(
     api_base: String,
 ) {
     let mut cfg = Config::load_from(&state.config_path).unwrap_or_default();
+    if cfg.llm.provider != provider || cfg.llm.api_base.trim() != api_base.trim() {
+        cfg.llm.request_headers = Default::default();
+    }
     cfg.llm.provider = provider.clone();
     cfg.llm.model = model.clone();
     cfg.llm.api_key_env = api_key_env.clone();
@@ -128,6 +131,7 @@ fn persist_active_provider_selection_internal(
     }
 
     let agent_config = Arc::make_mut(&mut state.agent_config);
+    agent_config.llm.request_headers = cfg.llm.request_headers;
     agent_config.llm.provider = provider.clone();
     agent_config.llm.model = model.clone();
     agent_config.llm.api_key_env = api_key_env;
@@ -480,6 +484,7 @@ pub async fn fetch_provider_models(
         };
     }
     let result = list_llm_models(LlmAssemblyInput {
+        request_headers: Default::default(),
         provider: provider.clone(),
         model: String::new(),
         api_base: non_empty(api_base),

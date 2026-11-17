@@ -95,6 +95,7 @@ fn assembly_input(config_path: &Path, profile: &LlmProfileConfig) -> LlmAssembly
         xiaoo_shared::llm_secrets::get_llm_secret(config_path, environment).ok()
     });
     LlmAssemblyInput {
+        request_headers: profile.request_headers.clone(),
         provider: profile.provider.clone(),
         model: profile.model.clone(),
         api_base: profile.api_base.clone(),

@@ -53,6 +53,7 @@ pub struct HostedSessionRuntimeConfig {
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
     pub api_base: Option<String>,
+    pub request_headers: llm_client::RequestHeadersConfig,
     pub visible_tool_names: Option<Vec<String>>,
     pub compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     pub llm_provider: Option<Arc<LlmProviderWrapper>>,
@@ -219,11 +220,7 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             .clone()
             .unwrap_or_else(|| self.config.descriptor.agent_id.clone());
         let llm_provider = match self.config.llm_provider.clone() {
-            Some(provider) => Arc::new(LlmProviderWrapper::new(
-                provider.inner(),
-                Some(agent_id.0.clone()),
-                None,
-            )),
+            Some(provider) => Arc::new(provider.for_agent(agent_id.0.clone())),
             None => {
                 let api_key = self.resolve_api_key()?;
                 let llm_config = LlmProviderConfig {
@@ -231,6 +228,7 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
                     api_key,
                     api_base: self.config.api_base.clone(),
                     model: self.config.model.clone(),
+                    request_headers: self.config.request_headers.clone(),
                 };
                 Arc::new(
                     create_llm_provider(&llm_config, Some(agent_id.0.clone()), None).map_err(

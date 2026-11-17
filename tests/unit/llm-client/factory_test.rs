@@ -342,6 +342,7 @@ mod wrapper_tests {
     struct TestTraceRecorder {
         kinds: Mutex<Vec<agent_contracts::TraceSpanKind>>,
         outcomes: Mutex<Vec<agent_contracts::TraceOutcome>>,
+        final_fields: Mutex<Vec<serde_json::Value>>,
     }
 
     #[async_trait]
@@ -367,9 +368,10 @@ mod wrapper_tests {
             &self,
             _span: agent_contracts::TraceSpanHandle,
             outcome: agent_contracts::TraceOutcome,
-            _fields: serde_json::Value,
+            fields: serde_json::Value,
         ) {
             self.outcomes.lock().unwrap().push(outcome);
+            self.final_fields.lock().unwrap().push(fields);
         }
 
         async fn finalize_trace(
@@ -1257,5 +1259,137 @@ mod wrapper_tests {
         assert_eq!(*text.lock().unwrap(), "done");
         assert_eq!(resets.load(Ordering::SeqCst), 0);
         http.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn custom_headers_survive_url_fallback_and_retry_in_both_call_styles() {
+        const SECRET: &str = "request-header-value-trace-test";
+        for stream in [false, true] {
+            let mut server = mockito::Server::new_async().await;
+            let fallback = server
+                .mock("POST", "/v1")
+                .match_header("x-engine-task-type", "review")
+                .match_header("x-engine-task-id", SECRET)
+                .with_status(404)
+                .expect(2)
+                .create_async()
+                .await;
+            let retry = server
+                .mock("POST", "/v1/chat/completions")
+                .match_header("x-engine-task-type", "review")
+                .match_header("x-engine-task-id", SECRET)
+                .with_status(429)
+                .with_header("retry-after", "1ms")
+                .with_body(format!("busy: {SECRET}"))
+                .expect(1)
+                .create_async()
+                .await;
+            let mut success_body = serde_json::json!({
+                "id": "chatcmpl-test", "object": "chat.completion", "created": 0, "model": "test",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": SECRET},
+                    "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            });
+            let (content_type, body) = if stream {
+                success_body["object"] = serde_json::json!("chat.completion.chunk");
+                success_body["choices"] = serde_json::json!([{
+                    "index": 0, "delta": {"content": SECRET}, "finish_reason": "stop"
+                }]);
+                (
+                    "text/event-stream",
+                    format!("data: {success_body}\n\ndata: [DONE]\n\n"),
+                )
+            } else {
+                ("application/json", success_body.to_string())
+            };
+            let accepted = server
+                .mock("POST", "/v1/chat/completions")
+                .match_header("x-engine-task-type", "review")
+                .match_header("x-engine-task-id", SECRET)
+                .match_header("authorization", "Bearer test-key")
+                .match_header("content-type", "application/json")
+                .with_header("content-type", content_type)
+                .with_body(body)
+                .expect(1)
+                .create_async()
+                .await;
+            let config = super::LlmProviderConfig::new("openai-compatible", "test")
+                .with_api_key("test-key")
+                .with_api_base(format!("{}/v1", server.url()))
+                .with_request_headers(crate::RequestHeadersConfig {
+                    request_header: Some(
+                        [
+                            ("x-engine-task-type".into(), "review".into()),
+                            ("x-engine-task-id".into(), SECRET.into()),
+                        ]
+                        .into(),
+                    ),
+                    request_header_env: None,
+                });
+            let runtime = TestRuntimeView::new(MockHookerRegistry::with_hookers(vec![]));
+            let wrapper = super::create_llm_provider(&config, None, None)
+                .unwrap()
+                .for_agent("test-agent".into());
+            let result = if stream {
+                wrapper
+                    .complete_stream_scoped(Some(runtime.as_ref()), &make_request("hi"), &|_| {})
+                    .await
+            } else {
+                wrapper
+                    .complete_scoped(Some(runtime.as_ref()), &make_request("hi"))
+                    .await
+            };
+            assert_eq!(result.unwrap().message.text.as_deref(), Some(SECRET));
+            let fields = runtime
+                .trace_recorder
+                .final_fields
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .to_string();
+            assert!(fields.contains("[REDACTED]"));
+            assert!(!fields.contains(SECRET));
+            fallback.assert_async().await;
+            retry.assert_async().await;
+            accepted.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_headers_do_not_follow_cross_origin_redirects() {
+        let mut target = mockito::Server::new_async().await;
+        let mut gateway = mockito::Server::new_async().await;
+        let unexpected = target
+            .mock("POST", "/redirected")
+            .expect(0)
+            .create_async()
+            .await;
+        let redirect = gateway
+            .mock("POST", "/chat/completions")
+            .match_header("x-secret", "custom-header-redirect-secret")
+            .with_status(307)
+            .with_header("location", &format!("{}/redirected", target.url()))
+            .expect(1)
+            .create_async()
+            .await;
+        let config = super::LlmProviderConfig::new("openai-compatible", "test")
+            .with_api_key("test-key")
+            .with_api_base(format!("{}/chat/completions", gateway.url()))
+            .with_request_headers(crate::RequestHeadersConfig {
+                request_header: Some(
+                    [("x-secret".into(), "custom-header-redirect-secret".into())].into(),
+                ),
+                request_header_env: None,
+            });
+        let wrapper = super::create_llm_provider(&config, None, None).unwrap();
+        let error = wrapper
+            .complete(&make_request("hi"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("307"), "{error}");
+        redirect.assert_async().await;
+        unexpected.assert_async().await;
     }
 }

@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use xiaoo_api::chat::HookerRegistryConfig;
-use xiaoo_api::llm::RateLimitSection;
+use xiaoo_api::llm::{RateLimitSection, RequestHeadersConfig};
 use xiaoo_shared::gateway::MemoryAutomationConfig;
 use xiaoo_shared::mcp_support::{self, McpSection};
 pub use xiaoo_shared::skills_support::SkillsSection;
@@ -40,6 +40,8 @@ pub struct LlmSection {
     pub kvcache_enabled: Option<bool>,
     pub kvcache_debug_enabled: Option<bool>,
     pub rate_limit: Option<RateLimitSection>,
+    #[serde(flatten)]
+    pub request_headers: RequestHeadersConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -88,43 +90,43 @@ impl FileConfig {
     }
 
     pub fn load_from_path(path: &Path, debug: bool) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(content) => match toml::from_str::<toml::Value>(&content) {
-                Ok(root) => {
-                    if debug {
-                        eprintln!("[config] loaded {}", path.display());
-                    }
-                    Self {
-                        llm: parse_optional_section(&root, "llm", path, debug),
-                        compact: parse_optional_section(&root, "compact", path, debug),
-                        trace: parse_optional_section(&root, "trace", path, debug),
-                        skills: parse_optional_section(&root, "skills", path, debug),
-                        hooker: parse_optional_section(&root, "hooker", path, debug),
-                        operation_backend: parse_optional_section(
-                            &root,
-                            "operation_backend",
-                            path,
-                            debug,
-                        ),
-                        subagent: parse_optional_section(&root, "subagent", path, debug)
-                            .unwrap_or_default(),
-                        mcp: parse_optional_section(&root, "mcp", path, debug).unwrap_or_default(),
-                        memory_automation: parse_optional_section(
-                            &root,
-                            "memory_automation",
-                            path,
-                            debug,
-                        )
-                        .unwrap_or_default(),
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[config] parse error in {}: {}", path.display(), e);
-                    Self::default()
-                }
-            },
-            Err(_) => Self::default(),
+        Self::try_load_from_path(path, debug).unwrap_or_else(|error| {
+            eprintln!("[config] {error}");
+            Self::default()
+        })
+    }
+
+    pub fn try_load_from_path(path: &Path, debug: bool) -> Result<Self, String> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+        };
+        let root = toml::from_str::<toml::Value>(&content)
+            .map_err(|_| format!("invalid TOML in {}", path.display()))?;
+        let llm = root
+            .get("llm")
+            .cloned()
+            .map(toml::Value::try_into)
+            .transpose()
+            .map_err(|_| format!("invalid [llm] section in {}", path.display()))?;
+        if debug {
+            eprintln!("[config] loaded {}", path.display());
         }
+        Ok(Self {
+            llm,
+            compact: parse_optional_section(&root, "compact", path),
+            trace: parse_optional_section(&root, "trace", path),
+            skills: parse_optional_section(&root, "skills", path),
+            hooker: parse_optional_section(&root, "hooker", path),
+            operation_backend: parse_optional_section(&root, "operation_backend", path),
+            subagent: parse_optional_section(&root, "subagent", path).unwrap_or_default(),
+            mcp: parse_optional_section(&root, "mcp", path).unwrap_or_default(),
+            memory_automation: parse_optional_section(&root, "memory_automation", path)
+                .unwrap_or_default(),
+        })
     }
 
     pub fn resolve_mcp_servers(
@@ -152,12 +154,7 @@ impl FileConfig {
     }
 }
 
-fn parse_optional_section<T>(
-    root: &toml::Value,
-    key: &str,
-    path: &std::path::Path,
-    debug: bool,
-) -> Option<T>
+fn parse_optional_section<T>(root: &toml::Value, key: &str, path: &std::path::Path) -> Option<T>
 where
     T: DeserializeOwned,
 {
@@ -165,17 +162,8 @@ where
 
     match section.try_into() {
         Ok(value) => Some(value),
-        Err(error) => {
-            if debug {
-                eprintln!(
-                    "[config] parse error in {} [{}]: {}",
-                    path.display(),
-                    key,
-                    error
-                );
-            } else {
-                eprintln!("[config] parse error in {} [{}]", path.display(), key);
-            }
+        Err(_) => {
+            eprintln!("[config] parse error in {} [{}]", path.display(), key);
             None
         }
     }

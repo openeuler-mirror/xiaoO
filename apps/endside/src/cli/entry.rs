@@ -253,7 +253,9 @@ where
             }
             let file_cfg = config_path
                 .as_ref()
-                .map(|path| FileConfig::load_from_path(path, debug))
+                .map(|path| FileConfig::try_load_from_path(path, debug))
+                .transpose()
+                .unwrap_or_else(|error| exit_run_error(error, format == OutputFormat::Json))
                 .unwrap_or_default();
             let llm = file_cfg.llm.as_ref();
             // Admission-gate settings are process-global and must be fixed
@@ -295,6 +297,9 @@ where
                 api_key,
                 api_key_env,
                 api_base,
+                request_headers: llm
+                    .map(|section| section.request_headers.clone())
+                    .unwrap_or_default(),
                 trace: file_cfg
                     .trace
                     .clone()
@@ -507,6 +512,7 @@ async fn run_once(
         api_key: config.api_key.clone(),
         api_key_env: config.api_key_env.clone(),
         api_base: config.api_base.clone(),
+        request_headers: Default::default(),
         visible_tool_names: if !config.enable_tools {
             Some(Vec::new())
         } else {

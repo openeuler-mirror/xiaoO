@@ -4,6 +4,7 @@ use agent_contracts::runtime::RuntimeView;
 use agent_contracts::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
 use agent_types::llm::{LlmError, LlmRequest, LlmResponse, MessageRole, ResponseFormat};
 use serde_json::{json, Value};
+use crate::error::ErrorRedactor;
 
 /// Cap for the inline `input_preview` extra; mirrors moirai's
 /// `TASK_DESCRIPTION_MAX_CHARS` (keep in sync manually).
@@ -21,15 +22,20 @@ pub(super) async fn begin_trace_span(
     provider_model_name: &str,
     request: &LlmRequest,
     is_streaming: bool,
+    error_r: Option<&ErrorRedactor>,
 ) -> Option<TraceSpanHandle> {
     let runtime_view = runtime_view?;
+    let preview = |text: &str| match error_r {
+        Some(redactor) => single_line_preview(&redactor.text(text)),
+        None => single_line_preview(text),
+    };
     let input_preview = runtime_view
         .agent_context()
         .metadata()
         .task_label
         .as_deref()
-        .and_then(single_line_preview)
-        .or_else(|| user_input_preview(request));
+        .and_then(preview)
+        .or_else(|| last_user_text(request).and_then(preview));
     Some(
         runtime_view
             .trace_recorder()
@@ -215,8 +221,8 @@ pub(super) fn single_line_preview(text: &str) -> Option<String> {
 /// Single-line preview of the last user message, stored inline in span extras
 /// so trace lists need no request-blob decoding. Mirrors moirai's
 /// `task_preview_from_span`; keep in sync manually.
-pub(super) fn user_input_preview(request: &LlmRequest) -> Option<String> {
-    let text = request
+fn last_user_text(request: &LlmRequest) -> Option<&str> {
+    request
         .messages
         .iter()
         .rev()
@@ -226,8 +232,7 @@ pub(super) fn user_input_preview(request: &LlmRequest) -> Option<String> {
                 agent_types::llm::ContentBlock::Text { text } => Some(text.as_str()),
                 _ => None,
             })
-        })?;
-    single_line_preview(text)
+        })
 }
 
 fn request_trace_payload(request: &LlmRequest) -> Value {
@@ -237,4 +242,27 @@ fn request_trace_payload(request: &LlmRequest) -> Value {
 fn response_trace_payload(response: &LlmResponse) -> Value {
     serde_json::to_value(&response.message)
         .expect("AssistantMessage should serialize for trace payload")
+}
+
+// 脱敏
+pub(super) fn redact_trace_fields(redactor: &ErrorRedactor, fields: &mut Value) {
+    match fields {
+        Value::String(text) => {
+            if let Cow::Owned(sanitized) = redactor.text(text) {
+                *text = sanitized;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_trace_fields(redactor, value);
+            }
+        }
+        Value::Object(map) => {
+            for (key, mut value) in std::mem::take(map) {
+                redact_trace_fields(redactor, &mut value);
+                map.insert(redactor.text(&key).into_owned(), value);
+            }
+        }
+        _ => {}
+    }
 }

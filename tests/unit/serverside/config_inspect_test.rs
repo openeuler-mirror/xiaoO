@@ -81,3 +81,36 @@ api_key_env = "{env_name}"
     assert!(report.valid, "{:?}", report.errors);
     assert_eq!(report.profiles[0].api_key_status, "available");
 }
+
+#[test]
+fn hides_literal_model_request_headers_even_when_the_configuration_is_invalid() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("config.toml");
+    let secret = "model-request-header-inspection-secret";
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+[llm]
+active_profile = "local"
+request_header = "{secret}"
+
+[llm.profiles.local]
+provider = "local"
+model = "test"
+
+[llm.profiles.local.request_header]
+x-engine-task-id = "{secret}"
+"#
+        ),
+    )
+    .unwrap();
+    let report = inspect_config_file(&path, &ConfigInspectOverrides::default());
+    assert!(!report.valid);
+    assert_eq!(report.config["llm"]["request_header"], "<redacted>");
+    assert_eq!(
+        report.values["llm.profiles.local.request_header.x-engine-task-id"].value,
+        json!("<redacted>")
+    );
+    assert!(!serde_json::to_string(&report).unwrap().contains(secret));
+}

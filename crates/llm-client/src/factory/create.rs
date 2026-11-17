@@ -30,6 +30,9 @@ pub fn create_llm_provider(
         ))
     })?;
 
+    let headers = config
+        .request_headers
+        .resolve(Some(profile.protocol_family))?;
     let api_base = resolve_api_base(config, &profile)?;
     let api_key = resolve_api_key(config, &profile)?;
 
@@ -39,6 +42,7 @@ pub fn create_llm_provider(
         api_base,
         config.model.clone(),
         &profile,
+        headers,
         agent_id,
         runtime_view,
     )
@@ -61,6 +65,7 @@ pub fn create_llm_provider_from_resolved(
         config.base_url.clone(),
         model,
         &profile.unwrap_or_else(|| default_profile(config.protocol)),
+        config.request_headers.resolve(Some(config.protocol))?,
         agent_id,
         runtime_view,
     )
@@ -72,12 +77,20 @@ fn create_provider_by_protocol(
     api_base: String,
     model: String,
     profile: &ProviderProfile,
+    request_headers: reqwest::header::HeaderMap,
     agent_id: Option<String>,
     runtime_view: Option<Arc<dyn RuntimeView>>,
 ) -> Result<LlmProviderWrapper, LlmError> {
     // 注册表键先行克隆：各协议分支会消费原始 api_key，限流器则按
     // (api_base, api_key) 归一后共享（见下方 gate_provider 调用）。
     let registry_api_key = api_key.clone();
+    let trace_redactor = if request_headers.is_empty() {
+        None
+    } else {
+        let mut redactor = crate::error::ErrorRedactor::default();
+        redactor.headers(&request_headers);
+        Some(Arc::new(redactor))
+    };
     let raw: Arc<dyn LlmProvider> = match protocol {
         ProtocolFamily::OpenAiCompatible => {
             let api_key = if profile.api_key_required {
@@ -96,7 +109,7 @@ fn create_provider_by_protocol(
                     api_base.clone(),
                     model,
                     OpenAiFamilyAuthStyle::Bearer,
-                    vec![],
+                    request_headers,
                 )
                 .with_reasoning_dialect(profile.reasoning_dialect),
             )
@@ -130,7 +143,7 @@ fn create_provider_by_protocol(
         registry_api_key,
         protocol == ProtocolFamily::Ollama,
     );
-    Ok(LlmProviderWrapper::new(gated, agent_id, runtime_view))
+    Ok(LlmProviderWrapper::new(gated, agent_id, runtime_view).with_trace_redactor(trace_redactor))
 }
 
 fn resolve_api_base(

@@ -9,6 +9,8 @@ pub fn config_schema() -> Value {
         "sections": [
             section("llm", "模型", "object", &[
                 field("active_profile", "string", false),
+                field("request_header", "string_map", false),
+                field("request_header_env", "string_map", false),
             ]),
             section("llm.profiles.*", "模型 Profile", "map", &[
                 field_default("enabled", "boolean", false, json!(true)),
@@ -16,6 +18,8 @@ pub fn config_schema() -> Value {
                 field("model", "string", true),
                 field("api_base", "url", false),
                 secret_field("api_key_env"),
+                field("request_header", "string_map", false),
+                field("request_header_env", "string_map", false),
                 field("context_window", "integer", false),
                 field("max_tokens", "integer", false),
                 enum_field("reasoning_effort", &["default", "off", "high", "max"]),

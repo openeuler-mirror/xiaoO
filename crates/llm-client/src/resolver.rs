@@ -21,6 +21,7 @@ pub struct ResolvedConfig {
     pub api_key: Option<String>,
     pub base_url: String,
     pub supports_model_catalog: bool,
+    pub request_headers: crate::RequestHeadersConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +123,7 @@ pub fn resolve_config(input: ResolveInput) -> Result<ResolvedConfig, ResolveErro
         api_key,
         base_url,
         supports_model_catalog,
+        request_headers: Default::default(),
     })
 }
 

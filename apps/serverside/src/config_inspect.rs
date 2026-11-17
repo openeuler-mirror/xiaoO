@@ -100,6 +100,7 @@ fn inspect_profiles(config_path: &Path, config: &DaemonConfig) -> Vec<InspectedP
                 provider: config.app.llm.provider.clone(),
                 api_base: config.app.llm.api_base.clone(),
                 api_key_env: config.app.llm.api_key_env.clone(),
+                request_headers: config.app.llm.request_headers.clone(),
                 model: config.app.llm.model.clone(),
                 context_window: config.app.llm.context_window,
                 max_tokens: config.app.llm.max_tokens,
@@ -276,10 +277,12 @@ fn redact_object(object: &mut Map<String, Value>, path: &[String]) {
         let mut child_path = path.to_vec();
         child_path.push(key.clone());
         let normalized = key.to_ascii_lowercase();
-        let inside_headers = path
-            .last()
-            .is_some_and(|segment| segment.eq_ignore_ascii_case("headers"));
+        let inside_headers = path.last().is_some_and(|segment| {
+            segment.eq_ignore_ascii_case("headers")
+                || segment.eq_ignore_ascii_case("request_header")
+        });
         let sensitive = inside_headers
+            || (normalized == "request_header" && !value.is_object())
             || (!normalized.ends_with("_env")
                 && (normalized.contains("secret")
                     || normalized.contains("token")

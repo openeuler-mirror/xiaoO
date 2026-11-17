@@ -19,7 +19,7 @@ impl ZhipuProvider {
                 api_base,
                 model,
                 OpenAiFamilyAuthStyle::Bearer,
-                vec![],
+                Default::default(),
             )
             .with_reasoning_dialect(ReasoningDialect::Zhipu),
         }

@@ -13,6 +13,7 @@ fn test_config() -> CliConfig {
         model: "gpt-4.1".to_string(),
         api_key: None,
         api_key_env: None,
+        request_headers: Default::default(),
         api_base: None,
         trace: Value::Object(serde_json::Map::new()),
         system_prompt: "test".to_string(),

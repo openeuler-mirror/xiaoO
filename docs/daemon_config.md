@@ -567,6 +567,22 @@ parsed at `apps/serverside/src/daemon_config.rs`.
 
 > **Note**: Common configuration items (llm, subagent, trace, compact, etc.) are shown in the "Complete Daemon Configuration Example" below. For detailed descriptions, please refer to [Configuration File Guide](./config_file_guide.md).
 
+## Model request headers
+
+For OpenAI-compatible profiles, choose a single table per profile.
+For example, to read a task identifier from the daemon process environment:
+
+```toml
+[llm.profiles.main.request_header_env]
+x-engine-task-id = "ENGINE_TASK_ID"
+```
+
+Use `[llm.profiles.main.request_header]` for literal values stored in the config
+file. Profiles configure their headers independently. A daemon configured without
+profiles uses `[llm.request_header_env]` or `[llm.request_header]`. See the
+[CLI configuration guide](./cli_config.md#model-request-headers) for the shared
+validation rules.
+
 ## Complete Daemon Configuration Example
 
 Here is a complete example containing both common configuration and Daemon-specific configuration:

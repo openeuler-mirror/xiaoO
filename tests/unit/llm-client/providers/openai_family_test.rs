@@ -7,7 +7,7 @@ fn make_provider() -> OpenAiFamilyProvider {
         "https://api.openai.com/v1".to_string(),
         "gpt-5.4".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     )
 }
 
@@ -51,7 +51,7 @@ fn gpt_5_6_with_tools_sets_none_reasoning_effort_when_off() {
         "https://api.openai.com/v1".to_string(),
         "gpt-5.6-sol".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
         .with_reasoning_effort(ReasoningEffort::Off)
@@ -73,7 +73,7 @@ fn gpt_5_6_without_tools_sets_none_reasoning_effort_when_off() {
         "https://api.openai.com/v1".to_string(),
         "openai/gpt-5.6-terra".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
         .with_reasoning_effort(ReasoningEffort::Off);
@@ -90,7 +90,7 @@ fn gpt_5_6_default_omits_reasoning_effort() {
         "https://api.openai.com/v1".to_string(),
         "gpt-5.6-sol".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
         .with_reasoning_effort(ReasoningEffort::Default);
@@ -107,7 +107,7 @@ fn kimi_k3_maps_supported_reasoning_effort_values() {
         "https://api.moonshot.cn/v1".to_string(),
         "kimi-k3".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
         .with_reasoning_effort(ReasoningEffort::Max);
@@ -124,7 +124,7 @@ fn glm_5_2_disables_thinking_when_reasoning_is_off() {
         "https://open.bigmodel.cn/api/paas/v4".to_string(),
         "glm-5.2".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
         .with_reasoning_effort(ReasoningEffort::Off);
@@ -142,7 +142,7 @@ fn glm_5_2_default_omits_thinking_and_reasoning_effort() {
         "https://open.bigmodel.cn/api/paas/v4".to_string(),
         "glm-5.2".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
         .with_reasoning_effort(ReasoningEffort::Default);
@@ -160,7 +160,7 @@ fn glm_5_2_maps_max_reasoning_effort_to_max() {
         "https://open.bigmodel.cn/api/paas/v4".to_string(),
         "z-ai/glm-5.2".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
         .with_reasoning_effort(ReasoningEffort::Max);
@@ -193,7 +193,7 @@ async fn complete_surfaces_real_401_when_all_candidates_unauthorized() {
         server.url(),
         "gpt-5.4".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
 
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
@@ -254,7 +254,7 @@ async fn complete_tries_next_real_path_after_first_route_5xx() {
         server.url(),
         "gpt-5.4".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
 
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
@@ -312,7 +312,7 @@ async fn complete_surfaces_raw_5xx_when_all_real_paths_fail() {
         server.url(),
         "gpt-5.4".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
 
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
@@ -350,7 +350,7 @@ async fn complete_stream_surfaces_real_401_when_all_candidates_unauthorized() {
         server.url(),
         "gpt-5.4".to_string(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
 
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
@@ -512,23 +512,28 @@ fn stream_error_frame_keeps_legacy_and_normal_chunks() {
 async fn stream_error_frame_redacts_credentials_at_provider_boundary() {
     let mut server = mockito::Server::new_async().await;
     let body = serde_json::json!({"error":{
-        "message":"[model_service] upstream omitted a completion reason; credential-test-secret",
+        "message":"[model_service] upstream omitted a completion reason; credential-test-secret; custom-header-test-secret",
         "type":"model_error", "code":"invalid_upstream_response"
     }});
     let mock = server
         .mock("POST", mockito::Matcher::Any)
+        .match_header("x-task-id", "custom-header-test-secret")
         .with_status(200)
         .with_header("content-type", "text/event-stream")
         .with_body(format!("data: {body}\n\ndata: [DONE]\n\n"))
         .expect(1)
         .create_async()
         .await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    let mut value = reqwest::header::HeaderValue::from_static("custom-header-test-secret");
+    value.set_sensitive(true);
+    headers.insert("x-task-id", value);
     let provider = OpenAiFamilyProvider::new(
         "credential-test-secret".into(),
         server.url(),
         "test".into(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        headers,
     );
     let chunks = std::sync::atomic::AtomicUsize::new(0);
     let error = provider
@@ -546,6 +551,7 @@ async fn stream_error_frame_redacts_credentials_at_provider_boundary() {
     assert!(message.contains("model_error"));
     assert!(message.contains("invalid_upstream_response"));
     assert!(!message.contains("credential-test-secret"));
+    assert!(!message.contains("custom-header-test-secret"));
     assert_eq!(chunks.load(std::sync::atomic::Ordering::Relaxed), 0);
     mock.assert_async().await;
 }

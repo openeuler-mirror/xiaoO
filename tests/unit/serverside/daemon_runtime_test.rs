@@ -419,18 +419,29 @@ async fn resolve_selects_requested_llm_profile() {
 [llm]
 active_profile = "primary"
 
+[llm.request_header_env]
+x-profile = "XIAOO_TEST_TOP_LEVEL_HEADER_REFERENCE_UNUSED"
+
 [llm.profiles.primary]
-provider = "ollama"
+provider = "local"
 model = "llama3"
 api_base = "http://127.0.0.1:1"
+context_window = 32768
+
+[llm.profiles.primary.request_header]
+x-profile = "primary"
 
 [llm.profiles.alternate]
-provider = "ollama"
+provider = "local"
 model = "qwen2.5-coder"
 api_base = "http://127.0.0.1:1"
+context_window = 32768
 max_tokens = 4096
 kvcache_enabled = true
 reasoning_effort = "high"
+
+[llm.profiles.alternate.request_header]
+x-profile = "alternate"
 
 [[agents.list]]
 id = "main"
@@ -467,6 +478,31 @@ workspace = "{workspace_str}"
         workspace: None,
         skills: None,
     };
+
+    let default_request = SessionRuntimeBuildInput {
+        llm: None,
+        ..request.clone()
+    };
+    let primary = resolver
+        .effective_llm_config(&default_request, None)
+        .unwrap();
+    let alternate = resolver.effective_llm_config(&request, None).unwrap();
+    assert_eq!(
+        primary.request_headers.request_header.as_ref().unwrap()["x-profile"],
+        "primary"
+    );
+    assert_eq!(
+        alternate.request_headers.request_header.as_ref().unwrap()["x-profile"],
+        "alternate"
+    );
+    assert!(primary.request_headers.request_header_env.is_none());
+    assert!(alternate.request_headers.request_header_env.is_none());
+
+    let mut override_request = request.clone();
+    override_request.llm.as_mut().unwrap().provider = Some("openai".into());
+    assert!(resolver
+        .effective_llm_config(&override_request, None)
+        .is_err());
 
     let resolved = resolver
         .resolve(&request, None)

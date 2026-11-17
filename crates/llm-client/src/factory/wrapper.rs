@@ -16,8 +16,8 @@ use serde_json::json;
 
 use super::trace::{
     begin_trace_span, effective_request_trace_fields, end_trace_span, error_trace_fields,
-    llm_error_kind, merge_trace_fields, response_trace_fields, stream_trace_fields,
-    trace_outcome_for_error, update_trace_span, StreamTraceStats,
+    llm_error_kind, merge_trace_fields, redact_trace_fields, response_trace_fields,
+    stream_trace_fields, trace_outcome_for_error, update_trace_span, StreamTraceStats,
 };
 
 pub struct LlmProviderWrapper {
@@ -25,6 +25,7 @@ pub struct LlmProviderWrapper {
     /// Present only when hooks are enabled.
     agent_id: Option<String>,
     default_runtime_view: Option<Arc<dyn RuntimeView>>,
+    trace_redactor: Option<Arc<crate::error::ErrorRedactor>>,
 }
 
 /// Retry-budget profile for a non-streaming completion.
@@ -57,7 +58,22 @@ impl LlmProviderWrapper {
             inner,
             agent_id,
             default_runtime_view: runtime_view,
+            trace_redactor: None,
         }
+    }
+
+    pub(super) fn with_trace_redactor(
+        mut self,
+        redactor: Option<Arc<crate::error::ErrorRedactor>>,
+    ) -> Self {
+        self.trace_redactor = redactor;
+        self
+    }
+
+    /// Rebind a configured provider to another agent, keeping its trace redaction.
+    pub fn for_agent(&self, agent_id: String) -> Self {
+        Self::new(self.inner(), Some(agent_id), None)
+            .with_trace_redactor(self.trace_redactor.clone())
     }
 
     /// Returns the provider this wrapper delegates to. In the factory path
@@ -66,6 +82,13 @@ impl LlmProviderWrapper {
     /// see [`crate::rate_limit`].
     pub fn inner(&self) -> Arc<dyn LlmProvider> {
         self.inner.clone()
+    }
+
+    fn redact_trace_fields(&self, mut fields: serde_json::Value) -> serde_json::Value {
+        if let Some(redactor) = self.trace_redactor.as_deref() {
+            redact_trace_fields(redactor, &mut fields);
+        }
+        fields
     }
 
     fn build_llm_hook_point(&self, stage: &str) -> Option<HookPointId> {
@@ -124,7 +147,7 @@ impl LlmProviderWrapper {
                         "pre_hook_count": pre_hook_count,
                         "pre_hook_error": pre_hook_error,
                     }),
-                    effective_request_trace_fields(req),
+                    self.redact_trace_fields(effective_request_trace_fields(req)),
                 ),
             )
             .await;
@@ -683,6 +706,7 @@ impl LlmProviderWrapper {
             &self.capabilities().model_name,
             effective_request_ref,
             is_stream,
+            self.trace_redactor.as_deref(),
         )
         .await;
         let mut pre_hook_count = 0;
@@ -719,7 +743,7 @@ impl LlmProviderWrapper {
                         "pre_hook_count": pre_hook_count,
                         "pre_hook_error": pre_hook_error,
                     }),
-                    effective_request_trace_fields(effective_request_ref),
+                    self.redact_trace_fields(effective_request_trace_fields(effective_request_ref)),
                 ),
             )
             .await;
@@ -806,7 +830,7 @@ impl LlmProviderWrapper {
                             "error_hook_error": error_hook_error,
                             "recovered": false,
                         }),
-                        response_trace_fields(&response),
+                        self.redact_trace_fields(response_trace_fields(&response)),
                         stream_stats.as_ref(),
                     ),
                 )
@@ -872,7 +896,9 @@ impl LlmProviderWrapper {
                                                 "original_error_kind": llm_error_kind(&error),
                                                 "original_error_message": error.to_string(),
                                             }),
-                                            response_trace_fields(&response),
+                                            self.redact_trace_fields(response_trace_fields(
+                                                &response,
+                                            )),
                                             stream_stats.as_ref(),
                                         ),
                                     )
