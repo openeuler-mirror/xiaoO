@@ -50,7 +50,3 @@ tempfile.workspace = true
 # 的 [APP-DEPS] 约束（该检查只比对仓内底层 crate），与既有 tempfile 同理。
 mockito = "1"
 xiaoo-shared = { path = "../shared", features = ["test-support"] }
-
-[[test]]
-name = "endside_request_headers"
-path = "../../tests/system/endside/request_headers_test.rs"

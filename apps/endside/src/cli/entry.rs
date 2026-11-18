@@ -257,6 +257,9 @@ where
                 .transpose()
                 .unwrap_or_else(|error| exit_run_error(error, format == OutputFormat::Json))
                 .unwrap_or_default();
+            if let Some(error) = file_cfg.request_headers_error.as_ref() {
+                exit_run_error(error.clone(), format == OutputFormat::Json);
+            }
             let llm = file_cfg.llm.as_ref();
             // Admission-gate settings are process-global and must be fixed
             // before the first provider is created.

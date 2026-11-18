@@ -204,3 +204,85 @@ max_concurrent = 3
         xiaoo_api::llm::RateLimitSettings::default().requests_per_minute
     );
 }
+
+#[test]
+fn malformed_llm_fields_keep_other_cli_sections() {
+    let temp = NamedTempFile::new().unwrap();
+    std::fs::write(
+        temp.path(),
+        r#"
+[llm]
+provider = "openai"
+api_key_env = 42
+
+[compact]
+summary_max_tokens = 128
+
+[trace]
+enabled = true
+
+[skills]
+allow_scripts = true
+
+[hooker]
+default = "none"
+
+[operation_backend]
+kind = "local"
+
+[subagent.review]
+description = "Reviewer"
+
+[[mcp.servers]]
+name = "example"
+transport = "stdio"
+command = "example"
+
+[memory_automation]
+enabled = true
+"#,
+    )
+    .unwrap();
+
+    for config in [
+        FileConfig::load_from_path(temp.path(), false),
+        FileConfig::try_load_from_path(temp.path(), true).unwrap(),
+    ] {
+        assert!(config.llm.is_none());
+        assert!(config.request_headers_error.is_none());
+        assert_eq!(config.compact.unwrap().summary_max_tokens, Some(128));
+        assert_eq!(config.trace.unwrap()["enabled"], true);
+        assert!(config.skills.is_some());
+        assert!(config.hooker.is_some());
+        assert_eq!(config.operation_backend.unwrap().kind, "local");
+        assert!(config.subagent.contains_key("review"));
+        assert_eq!(config.mcp.servers[0].name, "example");
+        assert!(config.memory_automation.enabled);
+    }
+}
+
+#[test]
+fn malformed_request_header_tables_are_reported_without_exposing_values() {
+    let temp = NamedTempFile::new().unwrap();
+    for table in ["request_header", "request_header_env"] {
+        std::fs::write(
+            temp.path(),
+            format!(
+                r#"
+[llm.{table}]
+x-route = ["do-not-print-this-value"]
+
+[subagent.review]
+description = "Reviewer"
+"#,
+            ),
+        )
+        .unwrap();
+
+        let config = FileConfig::try_load_from_path(temp.path(), true).unwrap();
+        let error = config.request_headers_error.expect("invalid header table");
+        assert!(error.contains(&format!("llm.{table}")));
+        assert!(!error.contains("do-not-print-this-value"));
+        assert!(config.subagent.contains_key("review"));
+    }
+}

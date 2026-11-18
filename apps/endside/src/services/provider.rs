@@ -93,6 +93,18 @@ pub fn persisted_selection_settings(config: &Config, provider: &str) -> (Option<
     }
 }
 
+fn effective_api_base<'a>(provider: &str, api_base: &'a str) -> &'a str {
+    let api_base = api_base.trim();
+    let api_base = if api_base.is_empty() {
+        xiaoo_api::llm::resolve_provider_profile(provider)
+            .and_then(|profile| profile.default_base_url)
+            .unwrap_or_default()
+    } else {
+        api_base
+    };
+    api_base.trim_end_matches('/')
+}
+
 pub fn persist_active_provider_selection(
     state: &mut AppState,
     provider: String,
@@ -111,7 +123,10 @@ fn persist_active_provider_selection_internal(
     api_base: String,
 ) {
     let mut cfg = Config::load_from(&state.config_path).unwrap_or_default();
-    if cfg.llm.provider != provider || cfg.llm.api_base.trim() != api_base.trim() {
+    if !cfg.llm.provider.eq_ignore_ascii_case(&provider)
+        || effective_api_base(&cfg.llm.provider, &cfg.llm.api_base)
+            != effective_api_base(&provider, &api_base)
+    {
         cfg.llm.request_headers = Default::default();
     }
     cfg.llm.provider = provider.clone();
@@ -146,8 +161,8 @@ pub fn validate_and_connect_api_key(
     model: String,
     api_key: &str,
 ) -> Result<(), String> {
-    let env_var = api_key_env_for_provider(&provider).to_string();
-    let api_base = default_api_base_for_provider(&provider);
+    let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, &provider);
+    let env_var = api_key_env.unwrap_or_else(|| api_key_env_for_provider(&provider).to_string());
     std::env::set_var(&env_var, api_key);
 
     if let Err(error) = save_llm_secret(&state.config_path, &env_var, api_key) {

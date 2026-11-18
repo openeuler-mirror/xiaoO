@@ -16,6 +16,8 @@ const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 #[derive(Debug, Deserialize, Default)]
 pub struct FileConfig {
     pub llm: Option<LlmSection>,
+    #[serde(skip)]
+    pub request_headers_error: Option<String>,
     pub compact: Option<CompactSection>,
     pub skills: Option<SkillsSection>,
     #[serde(default)]
@@ -106,17 +108,29 @@ impl FileConfig {
         };
         let root = toml::from_str::<toml::Value>(&content)
             .map_err(|_| format!("invalid TOML in {}", path.display()))?;
-        let llm = root
-            .get("llm")
-            .cloned()
-            .map(toml::Value::try_into)
-            .transpose()
-            .map_err(|_| format!("invalid [llm] section in {}", path.display()))?;
+        let llm = parse_optional_section(&root, "llm", path);
+        // A malformed model header table must fail a model run without
+        // discarding the unrelated sections used by other CLI commands.
+        let request_headers_error = if llm.is_none() {
+            root.get("llm")
+                .filter(|section| section.is_table())
+                .cloned()
+                .and_then(|section| section.try_into::<RequestHeadersConfig>().err())
+                .map(|_| {
+                    format!(
+                        "invalid [llm.request_header] or [llm.request_header_env] table in {}",
+                        path.display()
+                    )
+                })
+        } else {
+            None
+        };
         if debug {
             eprintln!("[config] loaded {}", path.display());
         }
         Ok(Self {
             llm,
+            request_headers_error,
             compact: parse_optional_section(&root, "compact", path),
             trace: parse_optional_section(&root, "trace", path),
             skills: parse_optional_section(&root, "skills", path),
