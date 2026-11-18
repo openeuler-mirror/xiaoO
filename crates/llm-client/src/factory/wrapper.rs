@@ -1001,7 +1001,7 @@ impl LlmProviderWrapper {
                             "error_hook_error": error_hook_error,
                             "recovered": false,
                         }),
-                        error_trace_fields(&error),
+                        self.redact_trace_fields(error_trace_fields(&error)),
                         stream_stats.as_ref(),
                     ),
                 )
