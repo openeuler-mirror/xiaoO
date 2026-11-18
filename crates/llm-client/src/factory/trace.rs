@@ -82,13 +82,17 @@ pub(super) async fn update_trace_span(
 pub(super) async fn end_trace_span(
     runtime_view: Option<&dyn RuntimeView>,
     span: &mut Option<TraceSpanHandle>,
+    redactor: Option<&ErrorRedactor>,
     outcome: TraceOutcome,
-    fields: Value,
+    mut fields: Value,
 ) {
     let (Some(runtime_view), Some(span)) = (runtime_view, span.take()) else {
         return;
     };
 
+    if let Some(redactor) = redactor {
+        redact_trace_fields(redactor, &mut fields);
+    }
     runtime_view
         .trace_recorder()
         .end_span(span, outcome, fields)

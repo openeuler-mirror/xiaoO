@@ -818,6 +818,7 @@ impl LlmProviderWrapper {
                 end_trace_span(
                     runtime_view,
                     &mut trace_span,
+                    self.trace_redactor.as_deref(),
                     agent_contracts::TraceOutcome::Ok,
                     finish_trace_fields(
                         json!({
@@ -830,7 +831,7 @@ impl LlmProviderWrapper {
                             "error_hook_error": error_hook_error,
                             "recovered": false,
                         }),
-                        self.redact_trace_fields(response_trace_fields(&response)),
+                        response_trace_fields(&response),
                         stream_stats.as_ref(),
                     ),
                 )
@@ -847,6 +848,7 @@ impl LlmProviderWrapper {
                 end_trace_span(
                     runtime_view,
                     &mut trace_span,
+                    self.trace_redactor.as_deref(),
                     TraceOutcome::Cancelled,
                     merge_trace_fields(
                         json!({
@@ -882,6 +884,7 @@ impl LlmProviderWrapper {
                                     end_trace_span(
                                         runtime_view,
                                         &mut trace_span,
+                                        self.trace_redactor.as_deref(),
                                         agent_contracts::TraceOutcome::Ok,
                                         finish_trace_fields(
                                             json!({
@@ -896,9 +899,7 @@ impl LlmProviderWrapper {
                                                 "original_error_kind": llm_error_kind(&error),
                                                 "original_error_message": error.to_string(),
                                             }),
-                                            self.redact_trace_fields(response_trace_fields(
-                                                &response,
-                                            )),
+                                            response_trace_fields(&response),
                                             stream_stats.as_ref(),
                                         ),
                                     )
@@ -921,6 +922,7 @@ impl LlmProviderWrapper {
                 end_trace_span(
                     runtime_view,
                     &mut trace_span,
+                    self.trace_redactor.as_deref(),
                     trace_outcome_for_error(&error),
                     finish_trace_fields(
                         json!({
