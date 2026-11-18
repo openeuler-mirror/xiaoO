@@ -85,6 +85,8 @@ pub struct LlmConfig {
     pub api_base: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
+    #[serde(flatten)]
+    pub request_headers: xiaoo_api::llm::RequestHeadersConfig,
     #[serde(default)]
     pub model: String,
     #[serde(default)]
@@ -113,6 +115,8 @@ pub struct LlmProfileConfig {
     pub api_base: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
+    #[serde(flatten)]
+    pub request_headers: xiaoo_api::llm::RequestHeadersConfig,
     pub model: String,
     #[serde(default)]
     pub context_window: Option<usize>,
@@ -480,8 +484,9 @@ impl DaemonConfig {
         let config_path = path.as_ref().to_path_buf();
         let content = fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read config {}", config_path.display()))?;
-        let mut app: AppConfig = toml::from_str(&content)
-            .with_context(|| format!("failed to parse config {}", config_path.display()))?;
+        let mut app: AppConfig = toml::from_str(&content).map_err(|_| {
+            anyhow::anyhow!("invalid TOML or config fields in {}", config_path.display())
+        })?;
         app.llm
             .activate_profile(None)
             .with_context(|| format!("invalid llm config {}", config_path.display()))?;

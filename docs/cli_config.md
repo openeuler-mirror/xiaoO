@@ -76,7 +76,35 @@ default = "all"
 > (`crates/agent-types/src/hook/config/boot_configs.rs`); any other value
 > is rejected by `config validate`.
 
-> **Note**: The CLI's `[llm]` section only reads `provider`, `model`, `api_key_env`, `api_base`, `kvcache_enabled`, and `kvcache_debug_enabled`. Fields like `max_tokens` and `reasoning_effort` are not read from the config file in CLI mode — use `--reasoning-effort` as a CLI argument instead. The context window is resolved dynamically (no `context_window` config field). `llm.profiles`, `llm.active_profile`, and `llm.context_window` are **daemon-only** and are silently ignored by the CLI.
+> **Note**: The CLI's `[llm]` section only reads `provider`, `model`, `api_key_env`, `api_base`, `request_header`, `request_header_env`, `kvcache_enabled`, and `kvcache_debug_enabled`. Fields like `max_tokens` and `reasoning_effort` are not read from the config file in CLI mode — use `--reasoning-effort` as a CLI argument instead. The context window is resolved dynamically (no `context_window` config field). `llm.profiles`, `llm.active_profile`, and `llm.context_window` are **daemon-only** and are silently ignored by the CLI.
+
+### Model request headers
+
+For an OpenAI-compatible provider, use one of the following tables. Use environment
+references for secrets and launch each one-shot process with its own task values.
+
+```toml
+[llm.request_header_env]
+x-engine-task-type = "ENGINE_TASK_TYPE"
+x-engine-task-id = "ENGINE_TASK_ID"
+```
+
+For values you want to store directly in `config.toml`:
+
+```toml
+[llm.request_header]
+x-engine-task-type = "review"
+```
+
+The tables are mutually exclusive, including empty tables. Missing environment
+variables, blank values, invalid headers and case-insensitive duplicate names
+fail before model calls. Client-controlled names such as `Authorization`,
+`Content-Type`, `Host` and `Content-Length` are reserved. Values are read when
+the model client is created and reused for streaming, non-streaming and retries.
+Cross-origin redirects are blocked for clients with custom headers. Model
+metadata requests and MCP use their own configuration. Changing the provider
+or API base through the TUI clears the previous endpoint's configured headers.
+
 
 ---
 

@@ -164,7 +164,7 @@ async fn encoded_response(name: &str, stream: bool, percent: bool, upper: bool) 
         server.url.clone(),
         "m".into(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     let error = call(&p, stream).await.unwrap_err();
     assert!(matches!(error, LlmError::ApiError(_)));
@@ -282,7 +282,7 @@ async fn fallback_overlap(key: &str, status: u16, body: &str, name: &str) {
         server.url.clone(),
         "m".into(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     let error = call(&p, false).await.unwrap_err();
     let paths = server.paths.lock().unwrap().clone();
@@ -353,7 +353,7 @@ async fn cached_retry(key: &str, status: usize, body: &str, name: &str, trace_ch
         base,
         "m".into(),
         OpenAiFamilyAuthStyle::Bearer,
-        vec![],
+        Default::default(),
     );
     call(&p, false).await.unwrap();
     good.assert_async().await;
@@ -443,7 +443,7 @@ async fn request_authentication_values_independent() {
     let server = Endpoint::new(400, "application/json", body, false, "", false);
     let headers = authentication_headers()
         .iter()
-        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .map(|(name, value)| (name.parse().unwrap(), value.parse().unwrap()))
         .collect();
     let p = OpenAiFamilyProvider::new(
         "SENTINEL-KEY".into(),

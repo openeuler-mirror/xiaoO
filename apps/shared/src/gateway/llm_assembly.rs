@@ -40,6 +40,7 @@ pub struct LlmAssemblyInput {
     pub api_base: Option<String>,
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
+    pub request_headers: llm_client::RequestHeadersConfig,
     /// Explicit context-window override; `None` or `0` falls back to dynamic
     /// probing + static capabilities.
     pub context_window_override: Option<u32>,
@@ -135,7 +136,7 @@ pub async fn build_llm_provider(
 ) -> Result<(Arc<LlmProviderWrapper>, u32), LlmAssemblyError> {
     let api_key = resolve_api_key(&input)?;
 
-    let resolved = resolve_config(ResolveInput {
+    let mut resolved = resolve_config(ResolveInput {
         provider: Some(input.provider.clone()),
         protocol: None,
         api_key,
@@ -143,6 +144,8 @@ pub async fn build_llm_provider(
         base_url: input.api_base.clone(),
     })
     .map_err(|e| LlmAssemblyError::Resolve(e.to_string()))?;
+
+    resolved.request_headers = input.request_headers;
 
     let agent_id = input.agent_id.as_ref().map(|id| id.0.clone());
     let created = create_llm_provider_from_resolved(&resolved, input.model.clone(), agent_id, None)
@@ -174,7 +177,7 @@ pub async fn build_llm_provider(
 /// facade.
 pub async fn probe_llm_provider(input: LlmAssemblyInput) -> Result<(), LlmAssemblyError> {
     let api_key = resolve_api_key(&input)?;
-    let resolved = resolve_config(ResolveInput {
+    let mut resolved = resolve_config(ResolveInput {
         provider: Some(input.provider),
         protocol: None,
         api_key,
@@ -182,6 +185,7 @@ pub async fn probe_llm_provider(input: LlmAssemblyInput) -> Result<(), LlmAssemb
         base_url: input.api_base,
     })
     .map_err(|error| LlmAssemblyError::Resolve(error.to_string()))?;
+    resolved.request_headers = input.request_headers;
     let provider = create_llm_provider_from_resolved(&resolved, input.model, None, None)
         .map_err(|error| LlmAssemblyError::Create(error.to_string()))?;
     let request = LlmRequest {

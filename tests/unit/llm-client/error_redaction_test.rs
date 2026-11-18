@@ -345,7 +345,7 @@ fn provider(kind: &str, base: String) -> Box<dyn LlmProvider> {
             base,
             model,
             OpenAiFamilyAuthStyle::Bearer,
-            vec![],
+            Default::default(),
         )),
     }
 }

@@ -52,6 +52,7 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
                 provider: config.app.llm.provider.clone(),
                 api_base: config.app.llm.api_base.clone(),
                 api_key_env: config.app.llm.api_key_env.clone(),
+                request_headers: config.app.llm.request_headers.clone(),
                 model: config.app.llm.model.clone(),
                 context_window: config.app.llm.context_window,
                 max_tokens: config.app.llm.max_tokens,
@@ -316,6 +317,23 @@ fn validate_profile(
         );
         return;
     };
+
+    if let Err(error) = profile
+        .request_headers
+        .validate_for_provider(&profile.provider)
+    {
+        let field = if profile.request_headers.request_header.is_some() {
+            "request_header"
+        } else {
+            "request_header_env"
+        };
+        push_error(
+            errors,
+            format!("{path}.{field}"),
+            "invalid_request_headers",
+            error.to_string(),
+        );
+    }
 
     let api_base = profile
         .api_base

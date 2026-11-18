@@ -75,6 +75,7 @@ struct EffectiveLlmConfig {
     api_base: Option<String>,
     api_key_env: Option<String>,
     api_key: Option<String>,
+    request_headers: xiaoo_api::llm::RequestHeadersConfig,
     context_window: Option<usize>,
     max_output_tokens: usize,
     kvcache_enabled: bool,
@@ -89,6 +90,7 @@ struct ProviderConfigSig {
     api_base: Option<String>,
     api_key_env: Option<String>,
     api_key: Option<String>,
+    request_headers: xiaoo_api::llm::RequestHeadersConfig,
 }
 
 struct CachedProvider {
@@ -116,6 +118,7 @@ impl EffectiveLlmConfig {
             api_base: self.api_base.clone(),
             api_key_env: self.api_key_env.clone(),
             api_key: self.api_key.clone(),
+            request_headers: self.request_headers.clone(),
         }
     }
 
@@ -132,6 +135,7 @@ impl EffectiveLlmConfig {
             model: self.model.clone(),
             api_base: self.api_base.clone(),
             api_key: self.api_key.clone(),
+            request_headers: self.request_headers.clone(),
             api_key_env: self.api_key_env.clone(),
             context_window_override: context_window_override.and_then(|w| u32::try_from(w).ok()),
             agent_id,
@@ -161,6 +165,7 @@ pub struct ConfiguredRuntimeResolver {
     /// (`default_api_key_env`) stay allowed: they are static per-provider
     /// names reached only when the daemon's own config picked the provider.
     allowed_api_key_env: HashSet<String>,
+    startup_request_headers: xiaoo_api::llm::RequestHeadersConfig,
     config_path: PathBuf,
     effective_context_window: usize,
     llm_provider: Arc<LlmProviderWrapper>,
@@ -210,6 +215,10 @@ impl ConfiguredRuntimeResolver {
 
         let startup_llm = EffectiveLlmConfig {
             profile_id: agent.profile_id.clone(),
+            request_headers: startup_profile
+                .map(|profile| &profile.request_headers)
+                .unwrap_or(&config.app.llm.request_headers)
+                .clone(),
             provider: startup_profile
                 .map(|profile| profile.provider.clone())
                 .unwrap_or_else(|| config.app.llm.provider.clone()),
@@ -294,6 +303,7 @@ impl ConfiguredRuntimeResolver {
             agent,
             llm: config.app.llm.clone(),
             allowed_api_key_env,
+            startup_request_headers: startup_llm.request_headers,
             config_path: config.config_path().to_path_buf(),
             effective_context_window,
             llm_provider,
@@ -368,6 +378,7 @@ impl ConfiguredRuntimeResolver {
             && effective.model == self.agent.model
             && effective.api_base == optional_non_empty(self.llm.api_base.as_ref())
             && effective.api_key_env == optional_non_empty(self.llm.api_key_env.as_ref())
+            && effective.request_headers == self.startup_request_headers
             && effective.context_window == self.llm.context_window
             && effective.api_key.is_none()
     }
@@ -476,12 +487,23 @@ impl ConfiguredRuntimeResolver {
                 });
             }
         }
+        let request_headers = profile
+            .map(|profile| &profile.request_headers)
+            .unwrap_or(&self.llm.request_headers);
+        let configured_provider = profile.map_or(&self.llm.provider, |item| &item.provider);
+        let provider = optional_non_empty(override_llm.and_then(|llm| llm.provider.as_ref()))
+            .or_else(|| existing_value(existing_llm.and_then(|llm| llm.provider.as_ref())))
+            .unwrap_or_else(|| configured_provider.clone());
+        if !request_headers.is_empty() && !provider.eq_ignore_ascii_case(configured_provider.trim())
+        {
+            return Err(SessionRuntimeResolveError::ResolveFailed {
+                message: "provider overrides are unavailable for configurations with custom request headers".into(),
+            });
+        }
         Ok(EffectiveLlmConfig {
             profile_id,
-            provider: optional_non_empty(override_llm.and_then(|llm| llm.provider.as_ref()))
-                .or_else(|| existing_value(existing_llm.and_then(|llm| llm.provider.as_ref())))
-                .or_else(|| profile.map(|item| item.provider.clone()))
-                .unwrap_or_else(|| self.llm.provider.clone()),
+            provider,
+            request_headers: request_headers.clone(),
             model: optional_non_empty(override_llm.and_then(|llm| llm.model.as_ref()))
                 .or_else(|| existing_value(existing_llm.and_then(|llm| llm.model.as_ref())))
                 .or_else(|| profile.map(|item| item.model.clone()))

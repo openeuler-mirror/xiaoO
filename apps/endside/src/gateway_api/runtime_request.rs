@@ -372,6 +372,12 @@ async fn build_runtime_config_from_inputs(
                 .trim_end_matches(['\r', '\n'])
                 .to_string()
         });
+    inputs
+        .agent_config
+        .llm
+        .request_headers
+        .validate_for_provider(&inputs.agent_config.llm.provider)
+        .map_err(|error| error.to_string())?;
     let total_budget = resolve_window_for_turn(&inputs.agent_config)
         .await
         .ok_or_else(|| {
@@ -436,6 +442,7 @@ async fn build_runtime_config_from_inputs(
         model: inputs.agent_config.llm.model.clone(),
         api_key: None,
         api_key_env: inputs.agent_config.llm.api_key_env.clone(),
+        request_headers: inputs.agent_config.llm.request_headers.clone(),
         api_base: if inputs.agent_config.llm.api_base.trim().is_empty() {
             None
         } else {

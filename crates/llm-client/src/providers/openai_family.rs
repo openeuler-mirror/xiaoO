@@ -34,7 +34,7 @@ pub(crate) struct OpenAiFamilyProvider {
     api_key: String,
     api_base: String,
     auth_style: OpenAiFamilyAuthStyle,
-    default_headers: Vec<(String, String)>,
+    default_headers: reqwest::header::HeaderMap,
     reasoning_dialect: ReasoningDialect,
     capabilities: ProviderCapabilities,
     cached_endpoint_url: Arc<RwLock<Option<String>>>,
@@ -65,7 +65,7 @@ impl OpenAiFamilyProvider {
         api_base: String,
         model: String,
         auth_style: OpenAiFamilyAuthStyle,
-        default_headers: Vec<(String, String)>,
+        default_headers: reqwest::header::HeaderMap,
     ) -> Self {
         let capabilities = ProviderCapabilities {
             supports_streaming: true,
@@ -85,14 +85,28 @@ impl OpenAiFamilyProvider {
     fn from_config(
         config: OpenAiCompatibleProviderConfig,
         auth_style: OpenAiFamilyAuthStyle,
-        default_headers: Vec<(String, String)>,
+        default_headers: reqwest::header::HeaderMap,
     ) -> Self {
         let skip_tls_verify = crate::http::tls_verification_disabled();
+        // No total client timeout; request_policy owns every deadline.
+        let mut client = crate::http::with_forced_http1(reqwest::Client::builder())
+            .connect_timeout(crate::request_policy::CONNECT_TIMEOUT)
+            .danger_accept_invalid_certs(skip_tls_verify);
+        if !default_headers.is_empty() {
+            client = client.redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt
+                    .previous()
+                    .first()
+                    .is_some_and(|url| url.origin() == attempt.url().origin())
+                {
+                    reqwest::redirect::Policy::default().redirect(attempt)
+                } else {
+                    attempt.stop()
+                }
+            }));
+        }
         Self {
-            // No total client timeout; request_policy owns every deadline.
-            client: crate::http::with_forced_http1(reqwest::Client::builder())
-                .connect_timeout(crate::request_policy::CONNECT_TIMEOUT)
-                .danger_accept_invalid_certs(skip_tls_verify)
+            client: client
                 .build()
                 .unwrap_or_else(crate::http::client_build_failed),
             api_key: config.api_key,
@@ -142,10 +156,7 @@ impl OpenAiFamilyProvider {
                 req.header("Authorization", format!("Bearer {}", self.api_key))
             }
         };
-        for (name, value) in &self.default_headers {
-            req = req.header(name.as_str(), value);
-        }
-        req
+        req.headers(self.default_headers.clone())
     }
 
     async fn try_single_endpoint(
@@ -192,7 +203,11 @@ impl OpenAiFamilyProvider {
             return Err(LlmError::ApiError(format!(
                 "unexpected content type: {content_type}; expected application/json. \
                  Response body preview: {}",
-                resp_body.chars().take(200).collect::<String>(),
+                redactor
+                    .diagnostic(&resp_body)
+                    .chars()
+                    .take(200)
+                    .collect::<String>(),
             )));
         }
 
@@ -413,6 +428,7 @@ impl OpenAiFamilyProvider {
         call: EndpointCall<'_>,
     ) -> Result<LlmResponse, LlmError> {
         let mut redactor = ErrorRedactor::new(&self.api_base, &self.api_key);
+        redactor.headers(&self.default_headers);
         let result = async {
             let label = match &call {
                 EndpointCall::Complete => "",
@@ -787,8 +803,11 @@ impl OpenAiCompatibleProvider {
                 "api_key must not be empty".to_string(),
             ));
         }
-        let inner =
-            OpenAiFamilyProvider::from_config(config, OpenAiFamilyAuthStyle::Bearer, Vec::new());
+        let inner = OpenAiFamilyProvider::from_config(
+            config,
+            OpenAiFamilyAuthStyle::Bearer,
+            Default::default(),
+        );
         Ok(Self { inner })
     }
 }

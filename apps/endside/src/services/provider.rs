@@ -93,6 +93,18 @@ pub fn persisted_selection_settings(config: &Config, provider: &str) -> (Option<
     }
 }
 
+fn effective_api_base<'a>(provider: &str, api_base: &'a str) -> &'a str {
+    let api_base = api_base.trim();
+    let api_base = if api_base.is_empty() {
+        xiaoo_api::llm::resolve_provider_profile(provider)
+            .and_then(|profile| profile.default_base_url)
+            .unwrap_or_default()
+    } else {
+        api_base
+    };
+    api_base.trim_end_matches('/')
+}
+
 pub fn persist_active_provider_selection(
     state: &mut AppState,
     provider: String,
@@ -111,6 +123,12 @@ fn persist_active_provider_selection_internal(
     api_base: String,
 ) {
     let mut cfg = Config::load_from(&state.config_path).unwrap_or_default();
+    if !cfg.llm.provider.eq_ignore_ascii_case(&provider)
+        || effective_api_base(&cfg.llm.provider, &cfg.llm.api_base)
+            != effective_api_base(&provider, &api_base)
+    {
+        cfg.llm.request_headers = Default::default();
+    }
     cfg.llm.provider = provider.clone();
     cfg.llm.model = model.clone();
     cfg.llm.api_key_env = api_key_env.clone();
@@ -128,6 +146,7 @@ fn persist_active_provider_selection_internal(
     }
 
     let agent_config = Arc::make_mut(&mut state.agent_config);
+    agent_config.llm.request_headers = cfg.llm.request_headers;
     agent_config.llm.provider = provider.clone();
     agent_config.llm.model = model.clone();
     agent_config.llm.api_key_env = api_key_env;
@@ -142,8 +161,8 @@ pub fn validate_and_connect_api_key(
     model: String,
     api_key: &str,
 ) -> Result<(), String> {
-    let env_var = api_key_env_for_provider(&provider).to_string();
-    let api_base = default_api_base_for_provider(&provider);
+    let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, &provider);
+    let env_var = api_key_env.unwrap_or_else(|| api_key_env_for_provider(&provider).to_string());
     std::env::set_var(&env_var, api_key);
 
     if let Err(error) = save_llm_secret(&state.config_path, &env_var, api_key) {
@@ -480,6 +499,7 @@ pub async fn fetch_provider_models(
         };
     }
     let result = list_llm_models(LlmAssemblyInput {
+        request_headers: Default::default(),
         provider: provider.clone(),
         model: String::new(),
         api_base: non_empty(api_base),

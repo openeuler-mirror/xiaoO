@@ -138,6 +138,8 @@ pub struct LlmConfig {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub api_base: String,
+    #[serde(flatten)]
+    pub request_headers: xiaoo_api::llm::RequestHeadersConfig,
     #[serde(default = "default_llm_max_tokens")]
     pub max_tokens: u32,
     #[serde(default)]
@@ -159,6 +161,7 @@ impl Default for LlmConfig {
             model: String::new(),
             api_key_env: None,
             api_base: String::new(),
+            request_headers: Default::default(),
             max_tokens: default_llm_max_tokens(),
             reasoning_effort: ReasoningEffort::Default,
             kvcache_enabled: false,
@@ -225,7 +228,7 @@ impl Config {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
         let config = toml::from_str(&content)
-            .with_context(|| format!("failed to parse config file {}", path.display()))?;
+            .map_err(|_| anyhow::anyhow!("invalid TOML or config fields in {}", path.display()))?;
         Ok((config, content))
     }
 
@@ -452,6 +455,11 @@ pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) 
             config_path.display()
         );
     }
+
+    config
+        .llm
+        .request_headers
+        .validate_for_provider(&config.llm.provider)?;
 
     config.validate_default_agent_id().with_context(|| {
         format!(

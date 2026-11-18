@@ -115,6 +115,7 @@ pub struct CliConfig {
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
     pub api_base: Option<String>,
+    pub request_headers: xiaoo_api::llm::RequestHeadersConfig,
     pub trace: Value,
     pub system_prompt: String,
     pub max_turns: u32,
@@ -141,7 +142,8 @@ pub fn build_llm_provider(
     agent_id: Option<String>,
 ) -> Result<Arc<LlmProviderWrapper>, Box<dyn std::error::Error>> {
     let llm_config: LlmProviderConfig = {
-        let mut c = LlmProviderConfig::new(&config.provider, &config.model);
+        let mut c = LlmProviderConfig::new(&config.provider, &config.model)
+            .with_request_headers(config.request_headers.clone());
         if let Some(ref key) = config.api_key {
             c = c.with_api_key(key);
         }
