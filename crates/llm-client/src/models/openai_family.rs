@@ -58,9 +58,13 @@ impl ModelCatalog for OpenAiFamilyModelCatalog {
                 .iter()
                 .filter_map(|model| {
                     model["id"].as_str().map(|id| {
-                        ModelSummary::new(id)
+                        let summary = ModelSummary::new(id)
                             .with_display_name(id)
-                            .with_raw(model.clone())
+                            .with_raw(model.clone());
+                        match model["max_output_tokens"].as_u64() {
+                            Some(limit) => summary.with_max_output_tokens(limit),
+                            None => summary,
+                        }
                     })
                 })
                 .collect())

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::cli::config::FileConfig;
 use crate::cli::{
-    build_compression_pipeline, build_llm_provider, resolve_effective_context_window, CliConfig,
-    CliEventSink,
+    build_compression_pipeline, build_llm_provider, resolve_effective_context_window,
+    validate_model_output_limit, CliConfig, CliEventSink,
 };
 
 use super::attach::run_with_attach;
@@ -97,6 +97,14 @@ enum Command {
         /// Max turns per agent loop invocation
         #[arg(long, default_value_t = 10)]
         max_turns: u32,
+
+        /// Context window for this local task in tokens (default: resolve from the model)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "attach")]
+        context_limit_tokens: Option<u32>,
+
+        /// Maximum tokens per model completion (default: one tenth of the context window)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "attach")]
+        max_output_tokens: Option<u32>,
 
         /// Overall task deadline in seconds, including startup, tools, and all turns
         #[arg(long = "timeout", default_value_t = DEFAULT_TASK_TIMEOUT_SECS, value_parser = clap::value_parser!(u64).range(1..))]
@@ -217,6 +225,8 @@ where
             api_base,
             system,
             max_turns,
+            context_limit_tokens,
+            max_output_tokens,
             timeout_secs,
             no_tools,
             tools,
@@ -309,6 +319,8 @@ where
                     .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
                 system_prompt: system,
                 max_turns,
+                context_limit_tokens,
+                max_output_tokens,
                 enable_tools: !no_tools,
                 visible_tools: tools.filter(|t| !t.is_empty()),
                 reasoning_effort,
@@ -458,11 +470,39 @@ async fn run_once(
 
     // 3. Session runtime config
     let total_budget = deadline
-        .run(resolve_effective_context_window(&config, &llm_provider))
+        .run(async {
+            tokio::try_join!(
+                resolve_effective_context_window(&config, &llm_provider),
+                validate_model_output_limit(&config),
+            )
+            .map(|(window, ())| window)
+        })
         .await
+        .and_then(|result| result)
         .unwrap_or_else(|error| exit_run_error(error, format == OutputFormat::Json));
-    let reserved_for_output = total_budget / 10;
+    let reserved_for_output = config.max_output_tokens.map_or_else(
+        || {
+            let default = total_budget / 10;
+            if config.context_limit_tokens.is_some() {
+                default.max(1)
+            } else {
+                default
+            }
+        },
+        |limit| limit as usize,
+    );
     let reserved_for_system = total_budget / 20;
+    if (config.context_limit_tokens.is_some() || config.max_output_tokens.is_some())
+        && reserved_for_output >= total_budget.saturating_sub(reserved_for_system)
+    {
+        exit_run_error(
+            format!(
+                "Context window of {total_budget} tokens leaves no input budget after reserving \
+                 {reserved_for_output} output tokens and {reserved_for_system} system tokens"
+            ),
+            format == OutputFormat::Json,
+        );
+    }
 
     let runtime_config = HostedSessionRuntimeConfig {
         descriptor: SessionRuntimeDescriptor {
@@ -653,6 +693,10 @@ async fn run_once(
             "session_id": session_id,
             "title": title,
             "agent": agent,
+            "token_limits": {
+                "context_limit_tokens": total_budget,
+                "max_output_tokens": reserved_for_output,
+            },
         });
         if format == OutputFormat::Json {
             println!(

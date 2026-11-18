@@ -76,7 +76,7 @@ default = "all"
 > (`crates/agent-types/src/hook/config/boot_configs.rs`); any other value
 > is rejected by `config validate`.
 
-> **Note**: The CLI's `[llm]` section only reads `provider`, `model`, `api_key_env`, `api_base`, `request_header`, `request_header_env`, `kvcache_enabled`, and `kvcache_debug_enabled`. Fields like `max_tokens` and `reasoning_effort` are not read from the config file in CLI mode — use `--reasoning-effort` as a CLI argument instead. The context window is resolved dynamically (no `context_window` config field). `llm.profiles`, `llm.active_profile`, and `llm.context_window` are **daemon-only** and are silently ignored by the CLI.
+> Use `--context-limit-tokens`, `--max-output-tokens`, and `--reasoning-effort` to configure a local CLI run. The CLI reads these settings from arguments. The daemon supports `llm.profiles`, `llm.active_profile`, and `llm.context_window` in TOML.
 
 ### Model request headers
 
@@ -152,6 +152,8 @@ limits without an additional flag.
 | `--api-base` | Override API base URL in configuration file | - |
 | `--system` | Override default system prompt | built-in `cli_default_system_prompt.txt` |
 | `--max-turns` | Maximum number of turns | 10 |
+| `--context-limit-tokens` | Effective context window for a local run | Dynamically resolved model window, with a static provider fallback |
+| `--max-output-tokens` | Output ceiling per model completion for a local run | One tenth of the effective context window for agent turns |
 | `--no-tools` | Disable tool execution | false |
 | `--tools` | Comma-separated allowlist of tool names; empty/unset = all tools | - |
 | `--reasoning-effort` | Reasoning effort: default, off, high, max | default |
@@ -177,6 +179,31 @@ limits without an additional flag.
 > list, embeddings — fails the TLS handshake until the CLI is run with
 > `NODE_TLS_REJECT_UNAUTHORIZED=0`. Scope and caveats:
 > [Self-signed gateways](./config_file_guide.md#self-signed-gateways-node_tls_reject_unauthorized).
+
+### Task token limits
+
+```bash
+xiaoo --cli run --prompt "Review this change" \
+  --context-limit-tokens 32768 --max-output-tokens 4096
+```
+
+The context window drives input budgeting and compaction for the root agent and
+its subagents. Compaction uses an input token estimate. If the estimate still
+exceeds the input budget after compaction, the current pre-check allows the
+provider to decide whether to accept the request. The explicit output ceiling
+applies across tool rounds, streaming, non-streaming, and retries. A compact
+summary can request fewer tokens if its own budget is smaller. The ceiling
+applies per request, so cumulative output across a task can be higher.
+
+Both flags take positive integers. Startup rejects a limit above a known model
+maximum, an output reservation that leaves no input budget, and an output
+ceiling the adapter cannot honor. Ollama's adapter does not support an explicit
+output ceiling. Daemon-attached runs use daemon settings and reject both flags.
+When model metadata is unavailable, the static provider window supplies the
+default. The provider still enforces its own hard limits.
+
+For local JSON runs, `session_start.data.token_limits` reports the effective
+`context_limit_tokens` and agent-turn `max_output_tokens` without credentials.
 
 ### Subcommands
 

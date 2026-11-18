@@ -61,3 +61,54 @@ fn task_timeout_defaults_to_ten_minutes_and_accepts_override() {
     }
     assert!(Args::try_parse_from(["xiaoo", "run", "--prompt", "hello", "--timeout", "0"]).is_err());
 }
+
+#[test]
+fn run_parses_positive_token_limits() {
+    let defaults = Args::try_parse_from(["xiaoo", "run", "--prompt", "hello"]).unwrap();
+    assert!(matches!(
+        defaults.command,
+        Some(Command::Run {
+            context_limit_tokens: None,
+            max_output_tokens: None,
+            ..
+        })
+    ));
+    let explicit = Args::try_parse_from([
+        "xiaoo",
+        "run",
+        "--prompt",
+        "hello",
+        "--context-limit-tokens",
+        "32768",
+        "--max-output-tokens",
+        "4096",
+    ])
+    .unwrap();
+    assert!(matches!(
+        explicit.command,
+        Some(Command::Run {
+            context_limit_tokens: Some(32768),
+            max_output_tokens: Some(4096),
+            ..
+        })
+    ));
+
+    for flag in ["--context-limit-tokens", "--max-output-tokens"] {
+        for value in ["0", "-1", "1.5", "4294967296"] {
+            assert!(
+                Args::try_parse_from(["xiaoo", "run", "--prompt", "hello", flag, value]).is_err()
+            );
+        }
+        assert!(Args::try_parse_from([
+            "xiaoo",
+            "run",
+            "--prompt",
+            "hello",
+            flag,
+            "16",
+            "--attach",
+            "http://localhost",
+        ])
+        .is_err());
+    }
+}

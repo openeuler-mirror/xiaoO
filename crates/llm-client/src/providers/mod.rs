@@ -1,4 +1,4 @@
-mod anthropic;
+pub(crate) mod anthropic;
 mod gemini;
 mod ollama;
 mod openai_family;

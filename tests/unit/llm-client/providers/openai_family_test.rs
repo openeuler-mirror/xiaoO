@@ -598,3 +598,71 @@ async fn stream_error_frame_retry_policy_matches_http_errors() {
         }
     }
 }
+
+#[tokio::test]
+async fn explicit_output_ceiling_reaches_streaming_and_background_completion_retries() {
+    use mockito::Matcher;
+    use serde_json::json;
+
+    for streaming in [false, true] {
+        let mut server = mockito::Server::new_async().await;
+        let config = crate::LlmProviderConfig::new("openai", "token-budget-test")
+            .with_api_key("loopback-key")
+            .with_api_base(format!("{}/chat/completions", server.url()));
+        let provider = crate::create_llm_provider(&config, None, None)
+            .unwrap()
+            .with_max_output_tokens(512, ReasoningEffort::Default)
+            .unwrap()
+            .for_agent("child".into());
+        let request_body = Matcher::PartialJson(if streaming {
+            json!({"max_tokens":512,"stream":true})
+        } else {
+            json!({"max_tokens":512})
+        });
+        let retry = server
+            .mock("POST", "/chat/completions")
+            .match_body(request_body.clone())
+            .with_status(429)
+            .with_header("retry-after", "1ms")
+            .with_body("rate limited")
+            .create_async()
+            .await;
+        let (content_type, body) = if streaming {
+            let chunk = json!({
+                "id": "test", "object": "chat.completion.chunk", "created": 0,
+                "model": "token-budget-test",
+                "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]
+            });
+            (
+                "text/event-stream",
+                format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+            )
+        } else {
+            ("application/json", json!({
+                "id": "test", "model": "token-budget-test",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+            }).to_string())
+        };
+        let accepted = server
+            .mock("POST", "/chat/completions")
+            .match_body(request_body)
+            .with_header("content-type", content_type)
+            .with_body(body)
+            .create_async()
+            .await;
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.max_tokens = Some(4096);
+        let response = if streaming {
+            provider.complete_stream(&request, &|_| {}).await
+        } else {
+            provider
+                .complete_with_budget(&request, crate::RetryBudget::Background)
+                .await
+        };
+        assert_eq!(response.unwrap().message.text.as_deref(), Some("ok"));
+
+        retry.assert_async().await;
+        accepted.assert_async().await;
+    }
+}

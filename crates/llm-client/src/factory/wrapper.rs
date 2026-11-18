@@ -1,11 +1,13 @@
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
+use crate::provider_registry::ProtocolFamily;
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::hook::HookPointId;
 use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokePrimary};
+use agent_types::llm::ReasoningEffort;
 use agent_types::llm::{
     ErrorLlmHookInput, ErrorLlmHookResult, LlmError, LlmRequest, LlmResponse, PostLlmHookInput,
     PostLlmHookResult, PreLlmHookInput, PreLlmHookResult, StreamChunk,
@@ -26,6 +28,8 @@ pub struct LlmProviderWrapper {
     agent_id: Option<String>,
     default_runtime_view: Option<Arc<dyn RuntimeView>>,
     trace_redactor: Option<Arc<crate::error::ErrorRedactor>>,
+    protocol: Option<ProtocolFamily>,
+    output_limit: Option<usize>,
 }
 
 /// Retry-budget profile for a non-streaming completion.
@@ -59,6 +63,8 @@ impl LlmProviderWrapper {
             agent_id,
             default_runtime_view: runtime_view,
             trace_redactor: None,
+            protocol: None,
+            output_limit: None,
         }
     }
 
@@ -70,10 +76,59 @@ impl LlmProviderWrapper {
         self
     }
 
+    pub(super) fn with_protocol(mut self, protocol: ProtocolFamily) -> Self {
+        self.protocol = Some(protocol);
+        self
+    }
+
     /// Rebind a configured provider to another agent, keeping its trace redaction.
     pub fn for_agent(&self, agent_id: String) -> Self {
-        Self::new(self.inner(), Some(agent_id), None)
-            .with_trace_redactor(self.trace_redactor.clone())
+        Self {
+            inner: self.inner(),
+            agent_id: Some(agent_id),
+            default_runtime_view: None,
+            trace_redactor: self.trace_redactor.clone(),
+            protocol: self.protocol,
+            output_limit: self.output_limit,
+        }
+    }
+
+    /// Apply a per-completion ceiling after request hooks and before transport retries.
+    pub fn with_max_output_tokens(
+        mut self,
+        limit: u32,
+        effort: ReasoningEffort,
+    ) -> Result<Self, LlmError> {
+        let limit = limit as usize;
+        self.validate_output_limit(limit, effort)?;
+        self.output_limit = Some(limit);
+        Ok(self)
+    }
+
+    fn validate_output_limit(&self, limit: usize, effort: ReasoningEffort) -> Result<(), LlmError> {
+        if limit == 0 {
+            return Err(LlmError::ConfigError(
+                "max output tokens must be positive".into(),
+            ));
+        }
+        if matches!(self.protocol, None | Some(ProtocolFamily::Ollama)) {
+            return Err(LlmError::ConfigError(
+                "--max-output-tokens is unsupported by this provider adapter".into(),
+            ));
+        }
+        if self.protocol == Some(ProtocolFamily::Anthropic) {
+            let (required, _, _) = crate::providers::anthropic::anthropic_reasoning_config(
+                &self.capabilities().model_name,
+                effort,
+                limit,
+            );
+            if required > limit {
+                return Err(LlmError::ConfigError(format!(
+                    "Anthropic reasoning effort requires at least {required} output tokens, got {limit}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Returns the provider this wrapper delegates to. In the factory path
@@ -727,6 +782,18 @@ impl LlmProviderWrapper {
             }
         }
 
+        let output_validation = self.output_limit.map_or(Ok(()), |limit| {
+            let current = effective_request.as_ref().unwrap_or(request);
+            let capped = current.max_tokens.unwrap_or(limit).min(limit);
+            self.validate_output_limit(capped, current.reasoning_effort)?;
+            if current.max_tokens != Some(capped) {
+                effective_request
+                    .get_or_insert_with(|| request.clone())
+                    .max_tokens = Some(capped);
+            }
+            Ok(())
+        });
+
         // Re-borrow the (possibly pre-hook-transformed) request; falls back
         // to the original `request` when no pre-hooks ran.
         let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
@@ -749,12 +816,13 @@ impl LlmProviderWrapper {
             .await;
         }
 
-        let outcome = match call {
-            ScopedCall::Complete { budget } => ScopedCallOutcome::Response(
+        let outcome = match (output_validation, call) {
+            (Err(error), _) => ScopedCallOutcome::Response(Err(error)),
+            (Ok(()), ScopedCall::Complete { budget }) => ScopedCallOutcome::Response(
                 self.complete_with_retry(effective_request_ref, budget)
                     .await,
             ),
-            ScopedCall::StreamWithCancel { on_chunk, cancel } => {
+            (Ok(()), ScopedCall::StreamWithCancel { on_chunk, cancel }) => {
                 let traced_on_chunk = |chunk: StreamChunk| {
                     if let Some(stats) = stream_stats.as_ref() {
                         if let Ok(mut stats) = stats.lock() {

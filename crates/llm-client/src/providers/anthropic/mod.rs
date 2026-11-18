@@ -138,7 +138,7 @@ impl AnthropicProvider {
     }
 }
 
-fn anthropic_reasoning_config(
+pub(crate) fn anthropic_reasoning_config(
     model: &str,
     effort: ReasoningEffort,
     requested_max_tokens: usize,
