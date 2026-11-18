@@ -143,7 +143,9 @@ fn create_provider_by_protocol(
         registry_api_key,
         protocol == ProtocolFamily::Ollama,
     );
-    Ok(LlmProviderWrapper::new(gated, agent_id, runtime_view).with_trace_redactor(trace_redactor))
+    Ok(LlmProviderWrapper::new(gated, agent_id, runtime_view)
+        .with_protocol(protocol)
+        .with_trace_redactor(trace_redactor))
 }
 
 fn resolve_api_base(

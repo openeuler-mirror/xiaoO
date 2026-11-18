@@ -16,6 +16,7 @@ use xiaoo_api::llm::{
     build_context_manager, create_llm_provider, CompactOverrides, LlmProviderConfig,
     LlmProviderWrapper,
 };
+use xiaoo_shared::gateway::llm_assembly::{list_llm_models, LlmAssemblyInput};
 // ---------------------------------------------------------------------------
 // CliEventSink
 // ---------------------------------------------------------------------------
@@ -119,6 +120,8 @@ pub struct CliConfig {
     pub trace: Value,
     pub system_prompt: String,
     pub max_turns: u32,
+    pub context_limit_tokens: Option<u32>,
+    pub max_output_tokens: Option<u32>,
     pub enable_tools: bool,
     pub visible_tools: Option<Vec<String>>,
     pub reasoning_effort: ReasoningEffort,
@@ -152,7 +155,11 @@ pub fn build_llm_provider(
         }
         c
     };
-    Ok(Arc::new(create_llm_provider(&llm_config, agent_id, None)?))
+    let mut provider = create_llm_provider(&llm_config, agent_id, None)?;
+    if let Some(limit) = config.max_output_tokens {
+        provider = provider.with_max_output_tokens(limit, config.reasoning_effort)?;
+    }
+    Ok(Arc::new(provider))
 }
 
 pub fn build_compression_pipeline(
@@ -178,13 +185,11 @@ pub fn build_compression_pipeline(
 
 /// CLI context-window resolution: same shared entry point as the TUI turn
 /// path (single-flight cache, bounded probe chain), so a cold invocation
-/// returns within a bounded wait even when endpoints are slow or
-/// unreachable, with the provider's static capability as fallback and
-/// floor.
+/// returns within a bounded wait even when endpoints are slow or unreachable.
 pub async fn resolve_effective_context_window(
     config: &CliConfig,
     llm_provider: &Arc<LlmProviderWrapper>,
-) -> usize {
+) -> Result<usize, String> {
     let static_window = llm_provider.capabilities().max_context_window.max(1);
     let llm = crate::config::LlmConfig {
         provider: config.provider.clone(),
@@ -193,14 +198,60 @@ pub async fn resolve_effective_context_window(
         api_base: config.api_base.clone().unwrap_or_default(),
         ..Default::default()
     };
-    crate::gateway_api::runtime_request::resolve_window_with_shared_cache(
+    let window = crate::gateway_api::runtime_request::resolve_window_with_shared_cache(
         &llm,
         config.api_key.clone(),
-        Some(static_window),
+        config
+            .context_limit_tokens
+            .is_none()
+            .then_some(static_window),
         crate::gateway_api::runtime_request::PROBE_TOTAL_BUDGET,
     )
-    .await
-    .unwrap_or(static_window)
+    .await;
+    if let Some(limit) = config.context_limit_tokens.map(|value| value as usize) {
+        if let Some(maximum) = window.filter(|maximum| limit > *maximum) {
+            return Err(format!(
+                "--context-window {limit} exceeds the model context limit of {maximum}"
+            ));
+        }
+        return Ok(limit);
+    }
+    Ok(window.unwrap_or(static_window))
+}
+
+pub async fn validate_model_output_limit(config: &CliConfig) -> Result<(), String> {
+    let Some(limit) = config.max_output_tokens else {
+        return Ok(());
+    };
+    let input = LlmAssemblyInput {
+        provider: config.provider.clone(),
+        model: config.model.clone(),
+        api_base: config.api_base.clone(),
+        api_key: config.api_key.clone(),
+        api_key_env: config.api_key_env.clone(),
+        request_headers: config.request_headers.clone(),
+        context_window_override: None,
+        agent_id: None,
+    };
+    // Catalog metadata is optional. Bound this lookup independently so
+    // custom endpoints without a catalog can still run.
+    let models =
+        tokio::time::timeout(std::time::Duration::from_secs(2), list_llm_models(input)).await;
+    if let Ok(Ok(models)) = models {
+        let model_id = config.model.trim();
+        let model_id = model_id.strip_prefix("models/").unwrap_or(model_id);
+        let maximum = models
+            .iter()
+            .find(|model| model.id.eq_ignore_ascii_case(model_id))
+            .and_then(|model| model.max_output_tokens)
+            .filter(|maximum| *maximum > 0 && u64::from(limit) > *maximum);
+        if let Some(maximum) = maximum {
+            return Err(format!(
+                "--max-tokens {limit} exceeds the model output limit of {maximum}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

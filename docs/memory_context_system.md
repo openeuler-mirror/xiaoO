@@ -156,7 +156,11 @@ summary_llm_max_tokens = 4096
 
 ### Enable adaptive compression
 
-If you only need the built-in context-management path, configure `[compact]`. The context window is resolved dynamically; the daemon additionally accepts an explicit `[llm].context_window` override (`apps/serverside/src/daemon_config.rs`; schema `apps/serverside/src/config_schema.rs`), while the CLI exposes no such field. This is wired into:
+Configure `[compact]` to tune built-in compaction. Local CLI runs accept
+`--context-window` to set the effective context window for a task. The daemon
+accepts `[llm].context_window` (`apps/serverside/src/daemon_config.rs`, schema
+`apps/serverside/src/config_schema.rs`). With neither override, the window is
+resolved dynamically. The context window feeds the following paths.
 
 - `apps/serverside/src/daemon_runtime.rs`
 - `apps/endside/src/cli/mod.rs`
