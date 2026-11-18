@@ -211,7 +211,7 @@ pub async fn resolve_effective_context_window(
     if let Some(limit) = config.context_limit_tokens.map(|value| value as usize) {
         if let Some(maximum) = window.filter(|maximum| limit > *maximum) {
             return Err(format!(
-                "--context-limit-tokens {limit} exceeds the model context limit of {maximum}"
+                "--context-window {limit} exceeds the model context limit of {maximum}"
             ));
         }
         return Ok(limit);
@@ -247,7 +247,7 @@ pub async fn validate_model_output_limit(config: &CliConfig) -> Result<(), Strin
             .filter(|maximum| *maximum > 0 && u64::from(limit) > *maximum);
         if let Some(maximum) = maximum {
             return Err(format!(
-                "--max-output-tokens {limit} exceeds the model output limit of {maximum}"
+                "--max-tokens {limit} exceeds the model output limit of {maximum}"
             ));
         }
     }

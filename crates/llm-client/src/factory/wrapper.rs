@@ -113,7 +113,7 @@ impl LlmProviderWrapper {
         }
         if matches!(self.protocol, None | Some(ProtocolFamily::Ollama)) {
             return Err(LlmError::ConfigError(
-                "--max-output-tokens is unsupported by this provider adapter".into(),
+                "--max-tokens is unsupported by this provider adapter".into(),
             ));
         }
         if self.protocol == Some(ProtocolFamily::Anthropic) {

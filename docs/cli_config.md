@@ -76,7 +76,7 @@ default = "all"
 > (`crates/agent-types/src/hook/config/boot_configs.rs`); any other value
 > is rejected by `config validate`.
 
-> Use `--context-limit-tokens`, `--max-output-tokens`, and `--reasoning-effort` to configure a local CLI run. The CLI reads these settings from arguments. The daemon supports `llm.profiles`, `llm.active_profile`, and `llm.context_window` in TOML.
+> Use `--context-window`, `--max-tokens`, and `--reasoning-effort` to configure a local CLI run. The CLI reads these settings from arguments. The daemon supports `llm.profiles`, `llm.active_profile`, and `llm.context_window` in TOML.
 
 ### Model request headers
 
@@ -152,8 +152,8 @@ limits without an additional flag.
 | `--api-base` | Override API base URL in configuration file | - |
 | `--system` | Override default system prompt | built-in `cli_default_system_prompt.txt` |
 | `--max-turns` | Maximum number of turns | 10 |
-| `--context-limit-tokens` | Effective context window for a local run | Dynamically resolved model window, with a static provider fallback |
-| `--max-output-tokens` | Output ceiling per model completion for a local run | One tenth of the effective context window for agent turns |
+| `--context-window` | Effective context window for a local run | Dynamically resolved model window, with a static provider fallback |
+| `--max-tokens` | Output ceiling per model completion for a local run | One tenth of the effective context window for agent turns |
 | `--no-tools` | Disable tool execution | false |
 | `--tools` | Comma-separated allowlist of tool names; empty/unset = all tools | - |
 | `--reasoning-effort` | Reasoning effort: default, off, high, max | default |
@@ -184,7 +184,7 @@ limits without an additional flag.
 
 ```bash
 xiaoo --cli run --prompt "Review this change" \
-  --context-limit-tokens 32768 --max-output-tokens 4096
+  --context-window 32768 --max-tokens 4096
 ```
 
 The context window drives input budgeting and compaction for the root agent and
@@ -201,6 +201,10 @@ ceiling the adapter cannot honor. Ollama's adapter does not support an explicit
 output ceiling. Daemon-attached runs use daemon settings and reject both flags.
 When model metadata is unavailable, the static provider window supplies the
 default. The provider still enforces its own hard limits.
+
+`--max-tokens` matches the TUI's `[llm].max_tokens` setting, and
+`--context-window` matches the daemon's `[llm].context_window` setting.
+Existing callers can still pass `--max-output-tokens` and `--context-limit-tokens` as aliases.
 
 For local JSON runs, `session_start.data.token_limits` reports the effective
 `context_limit_tokens` and agent-turn `max_output_tokens` without credentials.

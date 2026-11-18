@@ -99,12 +99,12 @@ enum Command {
         max_turns: u32,
 
         /// Context window for this local task in tokens (default: resolve from the model)
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "attach")]
-        context_limit_tokens: Option<u32>,
+        #[arg(long, alias = "context-limit-tokens", value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "attach")]
+        context_window: Option<u32>,
 
         /// Maximum tokens per model completion (default: one tenth of the context window)
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "attach")]
-        max_output_tokens: Option<u32>,
+        #[arg(long, alias = "max-output-tokens", value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "attach")]
+        max_tokens: Option<u32>,
 
         /// Overall task deadline in seconds, including startup, tools, and all turns
         #[arg(long = "timeout", default_value_t = DEFAULT_TASK_TIMEOUT_SECS, value_parser = clap::value_parser!(u64).range(1..))]
@@ -225,8 +225,8 @@ where
             api_base,
             system,
             max_turns,
-            context_limit_tokens,
-            max_output_tokens,
+            context_window,
+            max_tokens,
             timeout_secs,
             no_tools,
             tools,
@@ -319,8 +319,8 @@ where
                     .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
                 system_prompt: system,
                 max_turns,
-                context_limit_tokens,
-                max_output_tokens,
+                context_limit_tokens: context_window,
+                max_output_tokens: max_tokens,
                 enable_tools: !no_tools,
                 visible_tools: tools.filter(|t| !t.is_empty()),
                 reasoning_effort,

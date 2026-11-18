@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 
+use crate::error::ErrorRedactor;
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
 use agent_types::llm::{LlmError, LlmRequest, LlmResponse, MessageRole, ResponseFormat};
 use serde_json::{json, Value};
-use crate::error::ErrorRedactor;
 
 /// Cap for the inline `input_preview` extra; mirrors moirai's
 /// `TASK_DESCRIPTION_MAX_CHARS` (keep in sync manually).

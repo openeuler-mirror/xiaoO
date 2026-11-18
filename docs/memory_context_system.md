@@ -157,7 +157,7 @@ summary_llm_max_tokens = 4096
 ### Enable adaptive compression
 
 Configure `[compact]` to tune built-in compaction. Local CLI runs accept
-`--context-limit-tokens` to set the effective context window for a task. The daemon
+`--context-window` to set the effective context window for a task. The daemon
 accepts `[llm].context_window` (`apps/serverside/src/daemon_config.rs`, schema
 `apps/serverside/src/config_schema.rs`). With neither override, the window is
 resolved dynamically. The context window feeds the following paths.
