@@ -270,6 +270,24 @@ fn page_scroll_respects_short_transcript_without_overflow() {
     assert!(chat.stick_to_bottom);
 }
 
+/// ChatMessage fixture for the `messages_from_chat_messages` tests: the
+/// mapping only reads role / blocks / reasoning_content, so the rest
+/// defaults.
+fn llm_chat_message(
+    role: xiaoo_api::chat::MessageRole,
+    blocks: Vec<xiaoo_api::chat::ContentBlock>,
+) -> xiaoo_api::chat::ChatMessage {
+    xiaoo_api::chat::ChatMessage {
+        role,
+        blocks,
+        message_id: None,
+        timestamp_ms: 0,
+        api_usage_tokens: None,
+        reasoning_content: None,
+        estimated_tokens: None,
+    }
+}
+
 #[test]
 fn messages_from_chat_messages_drops_system_role_and_maps_user_assistant_text() {
     use super::messages_from_chat_messages;
@@ -278,43 +296,31 @@ fn messages_from_chat_messages_drops_system_role_and_maps_user_assistant_text() 
     use xiaoo_api::chat::{ContentBlock, MessageRole as LlmRole};
 
     let messages = vec![
-        ChatMessage {
-            role: LlmRole::System,
-            blocks: vec![ContentBlock::Text {
+        llm_chat_message(
+            LlmRole::System,
+            vec![ContentBlock::Text {
                 text: "you are helpful".to_string(),
             }],
-            message_id: None,
-            timestamp_ms: 0,
-            api_usage_tokens: None,
-            reasoning_content: None,
-            estimated_tokens: None,
-        },
-        ChatMessage {
-            role: LlmRole::User,
-            blocks: vec![ContentBlock::Text {
+        ),
+        llm_chat_message(
+            LlmRole::User,
+            vec![ContentBlock::Text {
                 text: "hello there".to_string(),
             }],
-            message_id: None,
-            timestamp_ms: 1,
-            api_usage_tokens: None,
-            reasoning_content: None,
-            estimated_tokens: None,
-        },
+        ),
         ChatMessage {
-            role: LlmRole::Assistant,
-            blocks: vec![
-                ContentBlock::Text {
-                    text: "thinking...".to_string(),
-                },
-                ContentBlock::Text {
-                    text: "answer".to_string(),
-                },
-            ],
-            message_id: None,
-            timestamp_ms: 2,
-            api_usage_tokens: None,
             reasoning_content: Some("reasoning here".to_string()),
-            estimated_tokens: None,
+            ..llm_chat_message(
+                LlmRole::Assistant,
+                vec![
+                    ContentBlock::Text {
+                        text: "thinking...".to_string(),
+                    },
+                    ContentBlock::Text {
+                        text: "answer".to_string(),
+                    },
+                ],
+            )
         },
     ];
 
@@ -335,37 +341,26 @@ fn messages_from_chat_messages_drops_system_role_and_maps_user_assistant_text() 
 fn messages_from_chat_messages_merges_tool_use_and_tool_result_into_one_card() {
     use super::messages_from_chat_messages;
     use super::{MessageRole, ToolExecutionStatus};
-    use xiaoo_api::chat::ChatMessage;
     use xiaoo_api::chat::{ContentBlock, MessageRole as LlmRole};
 
     let messages = vec![
-        ChatMessage {
-            role: LlmRole::Assistant,
-            blocks: vec![ContentBlock::ToolUse {
+        llm_chat_message(
+            LlmRole::Assistant,
+            vec![ContentBlock::ToolUse {
                 call_id: "call-1".to_string(),
                 tool_name: "shell".to_string(),
                 input: serde_json::json!({ "command": "ls" }),
             }],
-            message_id: None,
-            timestamp_ms: 0,
-            api_usage_tokens: None,
-            reasoning_content: None,
-            estimated_tokens: None,
-        },
-        ChatMessage {
-            role: LlmRole::Tool,
-            blocks: vec![ContentBlock::ToolResult {
+        ),
+        llm_chat_message(
+            LlmRole::Tool,
+            vec![ContentBlock::ToolResult {
                 call_id: "call-1".to_string(),
                 tool_name: "shell".to_string(),
                 output: "file.txt".to_string(),
                 is_error: false,
             }],
-            message_id: None,
-            timestamp_ms: 1,
-            api_usage_tokens: None,
-            reasoning_content: None,
-            estimated_tokens: None,
-        },
+        ),
     ];
 
     let tui = messages_from_chat_messages(messages);
@@ -389,23 +384,17 @@ fn messages_from_chat_messages_merges_tool_use_and_tool_result_into_one_card() {
 fn messages_from_chat_messages_marks_failed_tool_results() {
     use super::messages_from_chat_messages;
     use super::ToolExecutionStatus;
-    use xiaoo_api::chat::ChatMessage;
     use xiaoo_api::chat::{ContentBlock, MessageRole as LlmRole};
 
-    let messages = vec![ChatMessage {
-        role: LlmRole::Tool,
-        blocks: vec![ContentBlock::ToolResult {
+    let messages = vec![llm_chat_message(
+        LlmRole::Tool,
+        vec![ContentBlock::ToolResult {
             call_id: "call-9".to_string(),
             tool_name: "file_edit".to_string(),
             output: "permission denied".to_string(),
             is_error: true,
         }],
-        message_id: None,
-        timestamp_ms: 0,
-        api_usage_tokens: None,
-        reasoning_content: None,
-        estimated_tokens: None,
-    }];
+    )];
 
     let tui = messages_from_chat_messages(messages);
     assert_eq!(tui.len(), 1);

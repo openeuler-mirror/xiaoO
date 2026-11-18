@@ -1,6 +1,13 @@
 use super::{resolve_config_path, AppConfig, DaemonConfig};
 use tempfile::TempDir;
 
+fn daemon_from_toml(content: &str) -> DaemonConfig {
+    DaemonConfig {
+        app: toml::from_str(content).expect("config should parse"),
+        config_path: "config.toml".into(),
+    }
+}
+
 #[test]
 fn loads_native_active_llm_profile() {
     let temp = TempDir::new().expect("tempdir");
@@ -177,11 +184,7 @@ fn parses_feishu_channel_config() {
             verification_token = "verify-token"
         "#;
 
-    let config: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app: config,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
     let feishu = daemon
         .feishu_config()
         .expect("feishu config should validate")
@@ -205,11 +208,7 @@ fn parses_feishu_websocket_config_without_webhook_runtime() {
             app_secret_env = "FEISHU_APP_SECRET"
         "#;
 
-    let config: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app: config,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
     let feishu = daemon
         .feishu_config()
         .expect("feishu websocket config should validate")
@@ -242,11 +241,7 @@ fn parses_telegram_channel_config() {
             bot_username = "@xiaoO_bot"
         "#;
 
-    let config: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app: config,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
     let telegram = daemon
         .telegram_config()
         .expect("telegram config should validate")
@@ -281,11 +276,7 @@ fn parses_telegram_polling_channel_config() {
             polling_limit = 25
         "#;
 
-    let config: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app: config,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
     let telegram = daemon
         .telegram_config()
         .expect("telegram config should validate")
@@ -318,11 +309,7 @@ fn resolves_server_operation_backend_from_server_namespace() {
             template_id = "base"
         "#;
 
-    let config: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app: config,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
     let backend = daemon
         .server_operation_backend()
         .expect("server backend should resolve");
@@ -346,11 +333,7 @@ fn daemon_ignores_top_level_operation_backend() {
             api_key = "test-key"
         "#;
 
-    let config: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app: config,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
 
     assert!(daemon.server_operation_backend().is_none());
 }
@@ -421,11 +404,7 @@ fn resolves_http_bearer_token_from_env() {
     let previous = std::env::var_os("XIAOO_HTTP_BEARER_TOKEN_TEST");
     std::env::set_var("XIAOO_HTTP_BEARER_TOKEN_TEST", "test-token");
 
-    let config: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app: config,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
     let token = daemon
         .http_bearer_token()
         .expect("http auth should resolve")
@@ -452,11 +431,7 @@ fn rejects_conflicting_http_bearer_token_sources() {
             bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN_TEST"
         "#;
 
-    let config: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app: config,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
 
     let error = daemon.http_bearer_token().expect_err("config should fail");
     assert!(error
@@ -536,11 +511,7 @@ fn resolves_enabled_mcp_server_and_creates_empty_workspace() {
             "#,
         workspace.display()
     );
-    let app: AppConfig = toml::from_str(&content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(&content);
 
     let resolved = daemon
         .resolve_mcp_server_config()
@@ -574,11 +545,7 @@ fn rejects_unknown_mcp_agent_role() {
             [mcp_server.agent]
             agent_role = "missing-role"
         "#;
-    let app: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
 
     let error = daemon
         .resolve_mcp_server_config()
@@ -602,11 +569,7 @@ fn rejects_mcp_agent_when_daemon_backend_is_not_local() {
             [server.operation_backend]
             kind = "e2b"
         "#;
-    let app: AppConfig = toml::from_str(content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(content);
     let error = daemon
         .resolve_mcp_server_config()
         .expect_err("E2B must be rejected");
@@ -641,11 +604,7 @@ fn rejects_equal_mcp_tokens() {
             "#,
         temp.path().join("chatbot-empty").display()
     );
-    let app: AppConfig = toml::from_str(&content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(&content);
     let error = daemon
         .resolve_mcp_server_config()
         .expect_err("equal MCP tokens must be rejected");
@@ -684,11 +643,7 @@ fn refuses_to_reuse_nonempty_chatbot_workspace() {
             "#,
         workspace.display()
     );
-    let app: AppConfig = toml::from_str(&content).expect("config should parse");
-    let daemon = DaemonConfig {
-        app,
-        config_path: "config.toml".into(),
-    };
+    let daemon = daemon_from_toml(&content);
     let error = daemon
         .resolve_mcp_server_config()
         .expect_err("nonempty chatbot workspace must be rejected");

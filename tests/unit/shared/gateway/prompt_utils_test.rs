@@ -18,18 +18,17 @@ fn empty_roles_returns_none() {
 }
 
 #[test]
-fn single_role_renders_bullet_entry_and_delegation_tools() {
+fn single_role_renders_header_roles_and_delegation_tools() {
     let mut roles = BTreeMap::new();
     roles.insert(
         "code_reviewer".to_string(),
         create_test_role("code_reviewer", "Reviews code quality"),
     );
 
-    let result = compose_subagent_delegation_rules(&roles);
-    assert!(result.is_some());
+    let rules = compose_subagent_delegation_rules(&roles).expect("rules should render");
 
-    let rules = result.unwrap();
     assert!(rules.contains("## Subagent Delegation"));
+    assert!(rules.contains("**Available Roles**"));
     assert!(rules.contains("- \"code_reviewer\": Reviews code quality"));
     assert!(rules.contains("spawn_subagent"));
     assert!(rules.contains("join_subagent"));
@@ -52,19 +51,6 @@ fn every_role_gets_its_own_bullet_entry() {
 
     assert!(rules.contains("- \"reviewer\": Code reviewer"));
     assert!(rules.contains("- \"tester\": Test writer"));
-}
-
-#[test]
-fn rules_include_header_available_roles_and_join_tools() {
-    let mut roles = BTreeMap::new();
-    roles.insert("agent1".to_string(), create_test_role("agent1", "desc1"));
-
-    let rules = compose_subagent_delegation_rules(&roles).unwrap();
-
-    assert!(rules.contains("## Subagent Delegation"));
-    assert!(rules.contains("spawn_subagent"));
-    assert!(rules.contains("join_subagent"));
-    assert!(rules.contains("**Available Roles**"));
 }
 
 #[test]

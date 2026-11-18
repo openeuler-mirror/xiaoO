@@ -218,45 +218,30 @@ async fn invoke(
     (output, runtime.interaction.captured_requests())
 }
 
+/// Confirmed answers surface as an explicit "yes"/"no" string — never a
+/// boolean `allowed` field (the model reads a plain answer).
 #[tokio::test]
-async fn confirm_denial_is_reported_as_explicit_no() {
-    let prompt = "是否恢复该历史任务，从「需求分析」步骤继续？";
-    let (output, requests) = invoke(
-        json!({ "questions": [ { "kind": "confirm", "prompt": prompt } ] }),
-        vec![InteractionResponse::Confirmed { allowed: false }],
-    )
-    .await;
+async fn confirm_answers_are_reported_as_explicit_yes_no() {
+    for (allowed, answer) in [(true, "yes"), (false, "no")] {
+        let prompt = "是否恢复该历史任务，从「需求分析」步骤继续？";
+        let (output, requests) = invoke(
+            json!({ "questions": [ { "kind": "confirm", "prompt": prompt } ] }),
+            vec![InteractionResponse::Confirmed { allowed }],
+        )
+        .await;
 
-    assert_eq!(requests.len(), 1);
-    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(
-        parsed,
-        json!({
-            "answers": [
-                { "kind": "confirm", "prompt": prompt, "answer": "no" }
-            ]
-        })
-    );
-    assert!(parsed["answers"][0].get("allowed").is_none());
-}
-
-#[tokio::test]
-async fn confirm_acceptance_is_reported_as_explicit_yes() {
-    let (output, _) = invoke(
-        json!({ "questions": [ { "kind": "confirm", "prompt": "继续吗？" } ] }),
-        vec![InteractionResponse::Confirmed { allowed: true }],
-    )
-    .await;
-
-    let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(
-        parsed,
-        json!({
-            "answers": [
-                { "kind": "confirm", "prompt": "继续吗？", "answer": "yes" }
-            ]
-        })
-    );
+        assert_eq!(requests.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            parsed,
+            json!({
+                "answers": [
+                    { "kind": "confirm", "prompt": prompt, "answer": answer }
+                ]
+            })
+        );
+        assert!(parsed["answers"][0].get("allowed").is_none());
+    }
 }
 
 #[tokio::test]

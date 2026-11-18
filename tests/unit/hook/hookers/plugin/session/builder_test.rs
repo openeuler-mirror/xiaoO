@@ -24,25 +24,14 @@ fn build_for_stage(hook_point: &str) -> Result<Box<dyn Hooker>, BuildError> {
 }
 
 #[test]
-fn session_builder_accepts_created_stage() {
-    let hooker =
-        build_for_stage("*.Session.lifecycle.created").expect("created stage must be registrable");
-    assert_eq!(hooker.id().0, "plugin_session_test");
-    assert_eq!(hooker.hook_point().0, "*.Session.lifecycle.created");
-}
-
-#[test]
-fn session_builder_accepts_closed_stage() {
-    let hooker =
-        build_for_stage("*.Session.lifecycle.closed").expect("closed stage must be registrable");
-    assert_eq!(hooker.hook_point().0, "*.Session.lifecycle.closed");
-}
-
-#[test]
-fn session_builder_accepts_state_stage() {
-    let hooker =
-        build_for_stage("*.Session.lifecycle.state").expect("state stage must be registrable");
-    assert_eq!(hooker.hook_point().0, "*.Session.lifecycle.state");
+fn session_builder_accepts_created_closed_and_state_stages() {
+    for stage in ["created", "closed", "state"] {
+        let hook_point = format!("*.Session.lifecycle.{stage}");
+        let hooker = build_for_stage(&hook_point)
+            .unwrap_or_else(|_| panic!("{stage} stage must be registrable"));
+        assert_eq!(hooker.id().0, "plugin_session_test");
+        assert_eq!(hooker.hook_point().0, hook_point);
+    }
 }
 
 #[test]

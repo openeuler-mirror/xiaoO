@@ -67,107 +67,60 @@ fn make_spill(dir: &Path, name: &str, size: u64, mtime: SystemTime) -> PathBuf {
     path
 }
 
-#[test]
-fn budget_evicts_oldest_first_keeping_freshest() {
+/// Runs `enforce_session_budget` over spills created with the given
+/// `(age_secs, size_bytes)` pairs (index 0 = oldest) and returns the
+/// indexes that survived eviction. `keep` is the spill index that must
+/// never be evicted.
+fn survivors_after_budget(spills: &[(u64, u64)], keep: usize, budget: u64) -> Vec<usize> {
     let dir = tempfile::tempdir().expect("tempdir");
     let now = SystemTime::now();
-    make_spill(
-        dir.path(),
-        ".xiaoo-bash-output-s-1.txt",
-        60,
-        now - Duration::from_secs(30),
-    );
-    make_spill(
-        dir.path(),
-        ".xiaoo-bash-output-s-2.txt",
-        60,
-        now - Duration::from_secs(20),
-    );
-    let fresh = make_spill(
-        dir.path(),
-        ".xiaoo-bash-output-s-3.txt",
-        60,
-        now - Duration::from_secs(10),
-    );
-
+    for (index, (age, size)) in spills.iter().enumerate() {
+        make_spill(
+            dir.path(),
+            &format!(".xiaoo-bash-output-s-{}.txt", index + 1),
+            *size,
+            now - Duration::from_secs(*age),
+        );
+    }
     enforce_session_budget(
         dir.path(),
         ".xiaoo-bash-output-s-",
-        std::ffi::OsStr::new(".xiaoo-bash-output-s-3.txt"),
-        100,
+        std::ffi::OsStr::new(&format!(".xiaoo-bash-output-s-{}.txt", keep + 1)),
+        budget,
     );
-
-    assert!(
-        !dir.path().join(".xiaoo-bash-output-s-1.txt").exists(),
-        "oldest spill should be evicted"
-    );
-    assert!(
-        !dir.path().join(".xiaoo-bash-output-s-2.txt").exists(),
-        "next-oldest spill should be evicted"
-    );
-    assert!(fresh.exists(), "freshest spill must survive");
+    (0..spills.len())
+        .filter(|index| {
+            dir.path()
+                .join(format!(".xiaoo-bash-output-s-{}.txt", index + 1))
+                .exists()
+        })
+        .collect()
 }
 
+/// The budget evicts the oldest spills first, never the kept file (even
+/// when it is the oldest), and is a no-op under the limit.
 #[test]
-fn budget_never_evicts_kept_file_even_when_oldest() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let now = SystemTime::now();
-    let keep = make_spill(
-        dir.path(),
-        ".xiaoo-bash-output-s-1.txt",
-        60,
-        now - Duration::from_secs(30),
+fn budget_evicts_oldest_spills_but_never_the_kept_one() {
+    // Three 60-byte spills, budget 100 fits one: the two oldest are evicted,
+    // the freshest (also the kept one) survives.
+    assert_eq!(
+        survivors_after_budget(&[(30, 60), (20, 60), (10, 60)], 2, 100),
+        vec![2],
+        "oldest spills should be evicted, freshest kept"
     );
-    make_spill(
-        dir.path(),
-        ".xiaoo-bash-output-s-2.txt",
-        60,
-        now - Duration::from_secs(20),
+    // The kept file is the oldest: it must survive anyway, and the younger
+    // non-kept spills are evicted to honour the budget.
+    assert_eq!(
+        survivors_after_budget(&[(30, 60), (20, 60), (10, 60)], 0, 100),
+        vec![0],
+        "kept file must never be evicted"
     );
-    make_spill(
-        dir.path(),
-        ".xiaoo-bash-output-s-3.txt",
-        60,
-        now - Duration::from_secs(10),
+    // Under the budget nothing is evicted.
+    assert_eq!(
+        survivors_after_budget(&[(20, 30)], 0, 100),
+        vec![0],
+        "no files should be evicted under budget"
     );
-
-    enforce_session_budget(
-        dir.path(),
-        ".xiaoo-bash-output-s-",
-        std::ffi::OsStr::new(".xiaoo-bash-output-s-1.txt"),
-        100,
-    );
-
-    assert!(keep.exists(), "kept file must never be evicted");
-    assert!(
-        !dir.path().join(".xiaoo-bash-output-s-2.txt").exists(),
-        "non-kept spill should be evicted to honour budget"
-    );
-    assert!(
-        !dir.path().join(".xiaoo-bash-output-s-3.txt").exists(),
-        "non-kept spill should be evicted to honour budget"
-    );
-}
-
-#[test]
-fn budget_under_limit_is_noop() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let now = SystemTime::now();
-    let spill = make_spill(
-        dir.path(),
-        ".xiaoo-bash-output-s-1.txt",
-        30,
-        now - Duration::from_secs(20),
-    );
-
-    enforce_session_budget(
-        dir.path(),
-        ".xiaoo-bash-output-s-",
-        std::ffi::OsStr::new(".xiaoo-bash-output-s-1.txt"),
-        100,
-    );
-
-    assert!(spill.exists(), "no files should be evicted under budget");
 }
 
 #[test]

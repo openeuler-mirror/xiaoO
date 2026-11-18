@@ -313,6 +313,12 @@ fn test_runtime_with_registry(
         .expect("test runtime should build")
 }
 
+/// Wraps a raw provider without hooks — the default shape used by the
+/// loop-level tests in this module.
+fn wrapped(provider: Arc<dyn LlmProvider>) -> Arc<LlmProviderWrapper> {
+    Arc::new(LlmProviderWrapper::new(provider, None, None))
+}
+
 #[derive(Default)]
 struct RecordingLoopEventSink {
     assistant_messages: Mutex<Vec<String>>,
@@ -344,11 +350,7 @@ impl LoopEventSink for RecordingLoopEventSink {
 
 #[tokio::test]
 async fn run_agent_loop_emits_streaming_assistant_snapshots() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(StreamingTestProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(StreamingTestProvider::new()));
     let runtime = test_runtime(provider);
     let sink = Arc::new(RecordingLoopEventSink::default());
     let input = AgentLoopInput::new("hello")
@@ -386,11 +388,7 @@ async fn run_agent_loop_emits_streaming_assistant_snapshots() {
 
 #[tokio::test]
 async fn run_agent_loop_applies_max_turns_per_run_not_session_total() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(StreamingTestProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(StreamingTestProvider::new()));
     let runtime = test_runtime_with_max_turns(provider, 2);
     let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
     loop_state.turn_count = 10;
@@ -419,11 +417,7 @@ async fn run_agent_loop_surfaces_max_turns_when_final_turn_yields_text() {
     // `outcome = "max_turns_reached"`. Previously the `MaxTurnsReached`
     // branch was only reachable when the assistant emitted tool calls,
     // which the no-tools final turn makes impossible.
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(StreamingTestProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(StreamingTestProvider::new()));
     let runtime = test_runtime_with_max_turns(provider, 1);
     let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
 
@@ -442,32 +436,19 @@ async fn run_agent_loop_surfaces_max_turns_when_final_turn_yields_text() {
 
 #[test]
 fn loop_stop_rule_matches_only_configured_successful_tool() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(StreamingTestProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(StreamingTestProvider::new()));
     let runtime = test_runtime(provider);
     let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
     let input = AgentLoopInput::new("plan").with_stop_rules([LoopStopRule::AfterSuccessfulTool {
         tool_name: "todo_write".to_string(),
     }]);
     let estimator = TokenEstimator::new();
-    // 关闭形态视图：该测试不触发 L2 发现（门控失败即对匹配器零调用）
-    let ctx = LoopContext {
-        snapshot: runtime.snapshot(),
-        state: &mut loop_state,
+    let ctx = loop_context(
+        runtime.snapshot(),
+        &mut loop_state,
         input,
-        turn: TurnState::new(1),
-        estimator: &estimator,
-        skill_discovery: SkillDiscoveryView::new(
-            &FeatureFlags {
-                skill_discovery: false,
-                ..FeatureFlags::default()
-            },
-            agent_contracts::skill::matching::empty_skill_matcher(),
-        ),
-    };
+        &estimator,
+    );
     let result = ToolExecutionResult::Completed {
         final_call: agent_types::tool::FinalToolCall {
             call_id: "call_1".to_string(),
@@ -502,11 +483,7 @@ fn loop_stop_rule_matches_only_configured_successful_tool() {
 #[tokio::test]
 async fn run_agent_loop_resets_usage_for_new_user_task() {
     let call_count = Arc::new(StdMutex::new(0));
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(SequentialUsageProvider::new(call_count)),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(SequentialUsageProvider::new(call_count)));
     let runtime = test_runtime(provider);
     let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
 
@@ -608,7 +585,7 @@ impl LlmProvider for PendingStreamProvider {
 async fn cancel_mid_stream_persists_partial_assistant_message() {
     let provider = Arc::new(PendingStreamProvider::new());
     let streamed = Arc::clone(&provider.streamed);
-    let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(provider, None, None)));
+    let runtime = test_runtime(wrapped(provider));
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut loop_state =
         LoopState::new_with_cancel(uuid::Uuid::new_v4().to_string(), cancel.clone());
@@ -667,11 +644,7 @@ async fn cancel_mid_stream_persists_partial_assistant_message() {
 /// unchanged.
 #[tokio::test]
 async fn cancel_before_stream_starts_yields_cancelled_without_partial() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(StreamingTestProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(StreamingTestProvider::new()));
     let runtime = test_runtime(provider);
     let cancel = tokio_util::sync::CancellationToken::new();
     cancel.cancel();
@@ -720,7 +693,7 @@ async fn retry_exhaustion_ends_turn_until_new_user_input() {
     let raw = Arc::new(FailingThenHealthyProvider {
         calls: std::sync::atomic::AtomicUsize::new(0), healthy: StreamingTestProvider::new(),
     });
-    let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(raw.clone(), None, None)));
+    let runtime = test_runtime(wrapped(raw.clone()));
     let mut state = LoopState::new(uuid::Uuid::new_v4().to_string());
     let error = run_agent_loop(&runtime, &mut state, AgentLoopInput::new("first"))
         .await.err().expect("turn must fail");
@@ -751,13 +724,54 @@ fn long_tool_history(estimator: &TokenEstimator) -> Vec<ChatMessage> {
         .collect()
 }
 
+/// Builds the `LoopContext` shape shared by the budget/compression tests
+/// (turn 1 plus the given input).
+/// 关闭形态视图：这些测试不触发 L2 发现（门控失败即对匹配器零调用）。
+fn loop_context<'a>(
+    snapshot: RuntimeSnapshot,
+    state: &'a mut LoopState,
+    input: AgentLoopInput,
+    estimator: &'a TokenEstimator,
+) -> LoopContext<'a> {
+    LoopContext {
+        snapshot,
+        state,
+        input,
+        turn: TurnState::new(1),
+        estimator,
+        skill_discovery: SkillDiscoveryView::new(
+            &FeatureFlags {
+                skill_discovery: false,
+                ..FeatureFlags::default()
+            },
+            agent_contracts::skill::matching::empty_skill_matcher(),
+        ),
+    }
+}
+
+#[test]
+fn compression_trigger_as_str() {
+    assert_eq!(CompressionTrigger::Automatic.as_str(), "automatic");
+    assert_eq!(
+        CompressionTrigger::ContextLimitRetry.as_str(),
+        "context_limit_retry"
+    );
+    assert_eq!(
+        CompressionTrigger::PreCheckExceeded.as_str(),
+        "pre_check_exceeded"
+    );
+}
+
+#[test]
+fn compression_trigger_is_forced() {
+    assert!(!CompressionTrigger::Automatic.is_forced());
+    assert!(CompressionTrigger::ContextLimitRetry.is_forced());
+    assert!(CompressionTrigger::PreCheckExceeded.is_forced());
+}
+
 #[tokio::test]
 async fn repeated_forced_precheck_preserves_history_when_pipeline_is_noop() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(StreamingTestProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(StreamingTestProvider::new()));
     let runtime = test_runtime(provider.clone());
     let mut snapshot = runtime.snapshot();
     snapshot.compression_pipeline = compact::build_context_manager(None, provider).unwrap();
@@ -780,20 +794,12 @@ async fn repeated_forced_precheck_preserves_history_when_pipeline_is_noop() {
         .compression_pipeline
         .analyze(&original, &*snapshot.token_budget_policy)
         .needs_compression());
-    let mut ctx = LoopContext {
+    let mut ctx = loop_context(
         snapshot,
-        state: &mut state,
-        input: AgentLoopInput::new("task"),
-        turn: TurnState::new(1),
-        estimator: &estimator,
-        skill_discovery: SkillDiscoveryView::new(
-            &FeatureFlags {
-                skill_discovery: false,
-                ..FeatureFlags::default()
-            },
-            agent_contracts::skill::matching::empty_skill_matcher(),
-        ),
-    };
+        &mut state,
+        AgentLoopInput::new("task"),
+        &estimator,
+    );
     for turn in 1..=3 {
         ctx.turn = TurnState::new(turn);
         assert!(
@@ -874,17 +880,13 @@ impl LlmProvider for CompactSummaryProvider {
 
 #[tokio::test]
 async fn real_summary_compaction_keeps_format_and_refreshes_retained_caches() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(CompactSummaryProvider(ProviderCapabilities {
-            supports_streaming: false,
-            supports_tool_calls: true,
-            supports_json_mode: true,
-            max_context_window: 20_000,
-            model_name: "summary-model".into(),
-        })),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(CompactSummaryProvider(ProviderCapabilities {
+        supports_streaming: false,
+        supports_tool_calls: true,
+        supports_json_mode: true,
+        max_context_window: 20_000,
+        model_name: "summary-model".into(),
+    })));
     let runtime = test_runtime(provider.clone());
     let mut snapshot = runtime.snapshot();
     snapshot.compression_pipeline = compact::build_context_manager(None, provider).unwrap();
@@ -907,20 +909,12 @@ async fn real_summary_compaction_keeps_format_and_refreshes_retained_caches() {
     }
     messages.extend(long_tool_history(&estimator));
     *state.messages.write() = messages;
-    let mut ctx = LoopContext {
+    let mut ctx = loop_context(
         snapshot,
-        state: &mut state,
-        input: AgentLoopInput::new("task"),
-        turn: TurnState::new(1),
-        estimator: &estimator,
-        skill_discovery: SkillDiscoveryView::new(
-            &FeatureFlags {
-                skill_discovery: false,
-                ..FeatureFlags::default()
-            },
-            agent_contracts::skill::matching::empty_skill_matcher(),
-        ),
-    };
+        &mut state,
+        AgentLoopInput::new("task"),
+        &estimator,
+    );
     compress(&mut ctx, CompressionTrigger::Automatic)
         .await
         .unwrap();
@@ -1016,11 +1010,7 @@ impl CompressionPipeline for BookkeepingOnlyPipeline {
 
 #[tokio::test]
 async fn forced_compression_preserves_tool_output_after_bookkeeping_changes() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(StreamingTestProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(StreamingTestProvider::new()));
     let runtime = test_runtime(provider);
     let mut snapshot = runtime.snapshot();
     snapshot.compression_pipeline = Arc::new(BookkeepingOnlyPipeline);
@@ -1028,20 +1018,12 @@ async fn forced_compression_preserves_tool_output_after_bookkeeping_changes() {
     let original = long_tool_history(&estimator);
     let mut state = LoopState::new("bookkeeping-session".into());
     *state.messages.write() = original.clone();
-    let mut ctx = LoopContext {
+    let mut ctx = loop_context(
         snapshot,
-        state: &mut state,
-        input: AgentLoopInput::new("task"),
-        turn: TurnState::new(1),
-        estimator: &estimator,
-        skill_discovery: SkillDiscoveryView::new(
-            &FeatureFlags {
-                skill_discovery: false,
-                ..FeatureFlags::default()
-            },
-            agent_contracts::skill::matching::empty_skill_matcher(),
-        ),
-    };
+        &mut state,
+        AgentLoopInput::new("task"),
+        &estimator,
+    );
     compress(&mut ctx, CompressionTrigger::PreCheckExceeded)
         .await
         .unwrap();

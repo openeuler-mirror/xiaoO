@@ -30,34 +30,40 @@ fn persist_active_provider_selection_writes_llm_to_app_config_path() {
     assert_eq!(saved.llm.api_base, "https://api.openai.com/v1");
 }
 
+/// `persisted_selection_settings` decision table: switching to another
+/// provider adopts that provider's defaults; staying on the active
+/// provider preserves the configured key/base (private-gateway setups).
 #[test]
-fn persisted_selection_settings_switching_provider_uses_new_provider_defaults() {
-    let (_temp_dir, mut state) = temp_state();
-    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
-    agent_config.llm.provider = "openai".to_string();
-    agent_config.llm.model = "gpt-4o".to_string();
-    agent_config.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
-    agent_config.llm.api_base = "https://api.openai.com/v1".to_string();
+fn persisted_selection_settings_switch_defaults_or_keep_active_config() {
+    // (configured key env, configured base, target, expected key, expected base)
+    for (configured_key, configured_base, target, expected_key, expected_base) in [
+        (
+            "OPENAI_API_KEY",
+            "https://api.openai.com/v1",
+            "deepseek",
+            "DEEPSEEK_API_KEY",
+            "https://api.deepseek.com/v1",
+        ),
+        (
+            "CUSTOM_OPENAI_KEY",
+            "https://proxy.example/v1",
+            "openai",
+            "CUSTOM_OPENAI_KEY",
+            "https://proxy.example/v1",
+        ),
+    ] {
+        let (_temp_dir, mut state) = temp_state();
+        let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
+        agent_config.llm.provider = "openai".to_string();
+        agent_config.llm.model = "gpt-4o".to_string();
+        agent_config.llm.api_key_env = Some(configured_key.to_string());
+        agent_config.llm.api_base = configured_base.to_string();
 
-    let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, "deepseek");
+        let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, target);
 
-    assert_eq!(api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
-    assert_eq!(api_base, "https://api.deepseek.com/v1");
-}
-
-#[test]
-fn persisted_selection_settings_same_provider_preserves_existing_config() {
-    let (_temp_dir, mut state) = temp_state();
-    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
-    agent_config.llm.provider = "openai".to_string();
-    agent_config.llm.model = "gpt-4o".to_string();
-    agent_config.llm.api_key_env = Some("CUSTOM_OPENAI_KEY".to_string());
-    agent_config.llm.api_base = "https://proxy.example/v1".to_string();
-
-    let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, "openai");
-
-    assert_eq!(api_key_env.as_deref(), Some("CUSTOM_OPENAI_KEY"));
-    assert_eq!(api_base, "https://proxy.example/v1");
+        assert_eq!(api_key_env.as_deref(), Some(expected_key));
+        assert_eq!(api_base, expected_base);
+    }
 }
 
 #[test]
@@ -277,43 +283,40 @@ fn ids(models: &[ModelInfo]) -> Vec<&str> {
     models.iter().map(|model| model.id.as_str()).collect()
 }
 
+/// `model_fetch_request` decision table: a non-active provider fetches
+/// with its own defaults (not the configured openai base); the active
+/// provider keeps the configured custom base (private-gateway scenario).
 #[test]
-fn model_fetch_request_switching_provider_uses_new_provider_defaults() {
-    let (_temp_dir, mut state) = temp_state();
-    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
-    agent_config.llm.provider = "openai".to_string();
-    agent_config.llm.model = "gpt-4o".to_string();
-    agent_config.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
-    agent_config.llm.api_base = "https://api.openai.com/v1".to_string();
+fn model_fetch_request_uses_target_defaults_or_active_config() {
+    // (configured base, configured key env, target, expected base, expected key)
+    for (configured_base, configured_key, target, expected_base, expected_key) in [
+        (
+            "https://api.openai.com/v1",
+            "OPENAI_API_KEY",
+            "deepseek",
+            "https://api.deepseek.com/v1",
+            "DEEPSEEK_API_KEY",
+        ),
+        (
+            "https://proxy.example/v1",
+            "XIAOO_TEST_MODEL_FETCH_KEY",
+            "openai",
+            "https://proxy.example/v1",
+            "XIAOO_TEST_MODEL_FETCH_KEY",
+        ),
+    ] {
+        let (_temp_dir, mut state) = temp_state();
+        let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
+        agent_config.llm.provider = "openai".to_string();
+        agent_config.llm.api_base = configured_base.to_string();
+        agent_config.llm.api_key_env = Some(configured_key.to_string());
 
-    let request = model_fetch_request(&state.agent_config, "deepseek");
+        let request = model_fetch_request(&state.agent_config, target);
 
-    assert_eq!(request.provider, "deepseek");
-    assert_eq!(
-        request.api_base, "https://api.deepseek.com/v1",
-        "非激活 provider 必须用它的默认 base，而不是配置里那份 openai base"
-    );
-    assert_eq!(request.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
-}
-
-#[test]
-fn model_fetch_request_same_provider_preserves_configured_api_base() {
-    let (_temp_dir, mut state) = temp_state();
-    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
-    agent_config.llm.provider = "openai".to_string();
-    agent_config.llm.api_base = "https://proxy.example/v1".to_string();
-    agent_config.llm.api_key_env = Some("XIAOO_TEST_MODEL_FETCH_KEY".to_string());
-
-    let request = model_fetch_request(&state.agent_config, "openai");
-
-    assert_eq!(
-        request.api_base, "https://proxy.example/v1",
-        "激活 provider 必须沿用配置里的自定义 base（私有网关场景）"
-    );
-    assert_eq!(
-        request.api_key_env.as_deref(),
-        Some("XIAOO_TEST_MODEL_FETCH_KEY")
-    );
+        assert_eq!(request.provider, target);
+        assert_eq!(request.api_base, expected_base);
+        assert_eq!(request.api_key_env.as_deref(), Some(expected_key));
+    }
 }
 
 #[test]
@@ -631,29 +634,50 @@ async fn fetched_model_labels_cannot_inject_terminal_control_sequences() {
     );
 }
 
+/// `map_model_fetch_error` 的用户可见契约决策表：密钥不得上屏/进日志，
+/// URL 只保留 scheme://host（否则看不出哪个端点失败），控制字符剥掉。
 #[test]
-fn fetch_failure_messages_drop_control_characters_and_redact_urls() {
-    let raw = "HTTP status client error (401 Unauthorized) for url \
-               (http://host/v1/models?key=sk-secret)\u{1b}[2J";
-    let message = match map_model_fetch_error(
-        crate::gateway::llm_assembly::LlmAssemblyError::ModelCatalog(raw.to_string()),
-    ) {
-        ModelFetchError::Failed(message) => message,
-        other => panic!("应映射为 Failed，实际 {other:?}"),
-    };
+fn map_model_fetch_error_redacts_secrets_and_keeps_hosts_diagnosable() {
+    // (raw error, must contain, must not contain)
+    for (raw, must_contain, must_not_contain) in [
+        // reqwest 的错误串原样拼接了带 key= 查询参数的 URL，还可能带 ESC
+        // 控制字符（URL 只保留 scheme://host 便于定位端点，其余抹掉）。
+        (
+            "HTTP status client error (401 Unauthorized) for url \
+             (http://host/v1/models?key=sk-secret)\u{1b}[2J",
+            vec!["http://host/<redacted>"],
+            vec!["sk-secret", "\u{1b}"],
+        ),
+        // Gemini 的 403 body 被原样拼进错误串，且空白可能拆开 URL——只匹配
+        // `://` 会把 `key=...` 片段留在屏幕上；裸 key= 字段与 Bearer token
+        // 同样要抹。
+        (
+            "403 Forbidden key=sk-live-SECRET\nAuthorization: Bearer sk-live-SECRET",
+            vec!["<redacted>"],
+            vec!["sk-live-SECRET"],
+        ),
+        // 自签网关场景：整条 URL 抹掉会隐藏"哪个端点握手失败"，只抹
+        // 路径/查询。
+        (
+            "error sending request for url (https://gw.example.com/v1/models?key=sk-live-SECRET)",
+            vec!["https://gw.example.com/<redacted>"],
+            vec!["sk-live-SECRET", "/v1/models"],
+        ),
+    ] {
+        let message = match map_model_fetch_error(
+            crate::gateway::llm_assembly::LlmAssemblyError::ModelCatalog(raw.to_string()),
+        ) {
+            ModelFetchError::Failed(message) => message,
+            other => panic!("应映射为 Failed，实际 {other:?}"),
+        };
 
-    assert!(
-        message.contains("http://host/<redacted>"),
-        "URL 必须只保留 scheme://host（便于定位端点），其余抹掉：{message}"
-    );
-    assert!(
-        !message.contains("sk-secret"),
-        "错误文案不得把 URL query 里的密钥带出屏幕：{message}"
-    );
-    assert!(
-        !message.contains('\u{1b}'),
-        "错误文案不得含控制字符：{message}"
-    );
+        for expected in &must_contain {
+            assert!(message.contains(&**expected), "{message}");
+        }
+        for forbidden in &must_not_contain {
+            assert!(!message.contains(&**forbidden), "不得上屏：{message}");
+        }
+    }
 }
 
 #[test]
@@ -707,27 +731,6 @@ fn invisible_format_characters_are_stripped_from_model_labels() {
 }
 
 #[test]
-fn fetch_failure_messages_redact_bare_key_fields_and_bearer_tokens() {
-    // Gemini's 403 body gets spliced verbatim into the error string, and
-    // whitespace may split the URL — matching on `://` alone would leave
-    // `key=...` fragments on screen.
-    let message = match map_model_fetch_error(
-        crate::gateway::llm_assembly::LlmAssemblyError::ModelCatalog(
-            "403 Forbidden key=sk-live-SECRET\nAuthorization: Bearer sk-live-SECRET".to_string(),
-        ),
-    ) {
-        ModelFetchError::Failed(message) => message,
-        other => panic!("应映射为 Failed，实际 {other:?}"),
-    };
-
-    assert!(
-        !message.contains("sk-live-SECRET"),
-        "密钥不得上屏：{message}"
-    );
-    assert!(message.contains("<redacted>"), "应留下抹除痕迹：{message}");
-}
-
-#[test]
 fn huge_model_lists_are_capped() {
     let many = (0..(MAX_MODELS_PER_PROVIDER + 500))
         .map(|index| summary(&format!("m{index}"), None))
@@ -737,31 +740,6 @@ fn huge_model_lists_are_capped() {
         MAX_MODELS_PER_PROVIDER,
         "异常巨大的目录必须截断（每帧都要为列表建行）"
     );
-}
-
-#[test]
-fn redacted_urls_keep_the_host_so_tls_failures_stay_diagnosable() {
-    // Self-signed-gateway case: redacting the whole URL would hide "which
-    // endpoint failed the handshake", so only path/query go.
-    let message = match map_model_fetch_error(
-        crate::gateway::llm_assembly::LlmAssemblyError::ModelCatalog(
-            "error sending request for url (https://gw.example.com/v1/models?key=sk-live-SECRET)"
-                .to_string(),
-        ),
-    ) {
-        ModelFetchError::Failed(message) => message,
-        other => panic!("应映射为 Failed，实际 {other:?}"),
-    };
-
-    assert!(
-        message.contains("https://gw.example.com/<redacted>"),
-        "{message}"
-    );
-    assert!(
-        !message.contains("sk-live-SECRET"),
-        "密钥不得上屏/进日志：{message}"
-    );
-    assert!(!message.contains("/v1/models"), "路径也应抹掉：{message}");
 }
 
 #[test]

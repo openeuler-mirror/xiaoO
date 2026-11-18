@@ -16,6 +16,47 @@ fn config() -> FeishuConfig {
     }
 }
 
+/// Websocket variant of the webhook config; the token policy is the input
+/// under test in the long-connection payloads below.
+fn long_connection_config(verification_token: Option<&str>) -> FeishuConfig {
+    FeishuConfig {
+        event_transport: FeishuEventTransport::Websocket,
+        verification_token: verification_token.map(|token| token.to_string()),
+        ..config()
+    }
+}
+
+/// `im.message.receive_v1` text event; long-connection cases differ only in
+/// the optional header token, which the handler must not require (the
+/// websocket endpoint already authenticates) yet must still verify when the
+/// payload carries one.
+fn long_connection_text_payload(token: Option<&str>) -> Vec<u8> {
+    let mut header = serde_json::json!({ "event_type": "im.message.receive_v1" });
+    if let Some(token) = token {
+        header["token"] = serde_json::json!(token);
+    }
+    serde_json::json!({
+        "schema": "2.0",
+        "header": header,
+        "event": {
+            "sender": {
+                "sender_id": {
+                    "open_id": "ou_sender"
+                }
+            },
+            "message": {
+                "message_id": "om_current",
+                "chat_id": "oc_test",
+                "message_type": "text",
+                "content": "{\"text\":\"你好\"}",
+                "mentions": []
+            }
+        }
+    })
+    .to_string()
+    .into_bytes()
+}
+
 #[test]
 fn handles_url_verification_challenge() {
     let payload = serde_json::json!({
@@ -82,35 +123,12 @@ fn parses_webhook_text_message() {
 
 #[test]
 fn parses_long_connection_payload_without_token_check() {
-    let config = FeishuConfig {
-        event_transport: FeishuEventTransport::Websocket,
-        verification_token: None,
-        ..config()
-    };
-    let payload = serde_json::json!({
-        "schema": "2.0",
-        "header": {
-            "event_type": "im.message.receive_v1"
-        },
-        "event": {
-            "sender": {
-                "sender_id": {
-                    "open_id": "ou_sender"
-                }
-            },
-            "message": {
-                "message_id": "om_current",
-                "chat_id": "oc_test",
-                "message_type": "text",
-                "content": "{\"text\":\"你好\"}",
-                "mentions": []
-            }
-        }
-    });
-
-    let message = handle_long_connection_payload(&config, payload.to_string().as_bytes())
-        .expect("persistent payload should parse")
-        .expect("text message should be produced");
+    let message = handle_long_connection_payload(
+        &long_connection_config(None),
+        &long_connection_text_payload(None),
+    )
+    .expect("persistent payload should parse")
+    .expect("text message should be produced");
 
     assert_eq!(message.text, "你好");
     assert_eq!(message.sender_id, "ou_sender");
@@ -120,70 +138,23 @@ fn parses_long_connection_payload_without_token_check() {
 
 #[test]
 fn long_connection_payload_accepts_missing_token_when_configured() {
-    let config = FeishuConfig {
-        event_transport: FeishuEventTransport::Websocket,
-        verification_token: Some("verify_token".to_string()),
-        ..config()
-    };
-    let payload = serde_json::json!({
-        "schema": "2.0",
-        "header": {
-            "event_type": "im.message.receive_v1"
-        },
-        "event": {
-            "sender": {
-                "sender_id": {
-                    "open_id": "ou_sender"
-                }
-            },
-            "message": {
-                "message_id": "om_current",
-                "chat_id": "oc_test",
-                "message_type": "text",
-                "content": "{\"text\":\"你好\"}",
-                "mentions": []
-            }
-        }
-    });
-
-    let message = handle_long_connection_payload(&config, payload.to_string().as_bytes())
-        .expect("long connection auth is established by the websocket endpoint")
-        .expect("text message should be produced");
+    let message = handle_long_connection_payload(
+        &long_connection_config(Some("verify_token")),
+        &long_connection_text_payload(None),
+    )
+    .expect("long connection auth is established by the websocket endpoint")
+    .expect("text message should be produced");
 
     assert_eq!(message.text, "你好");
 }
 
 #[test]
 fn long_connection_payload_rejects_mismatched_present_token() {
-    let config = FeishuConfig {
-        event_transport: FeishuEventTransport::Websocket,
-        verification_token: Some("verify_token".to_string()),
-        ..config()
-    };
-    let payload = serde_json::json!({
-        "schema": "2.0",
-        "header": {
-            "event_type": "im.message.receive_v1",
-            "token": "wrong_token"
-        },
-        "event": {
-            "sender": {
-                "sender_id": {
-                    "open_id": "ou_sender"
-                }
-            },
-            "message": {
-                "message_id": "om_current",
-                "chat_id": "oc_test",
-                "message_type": "text",
-                "content": "{\"text\":\"你好\"}",
-                "mentions": []
-            }
-        }
-    });
-
-    let error = handle_long_connection_payload(&config, payload.to_string().as_bytes())
-        .expect_err("mismatched websocket token should be rejected when payload includes one");
+    let error = handle_long_connection_payload(
+        &long_connection_config(Some("verify_token")),
+        &long_connection_text_payload(Some("wrong_token")),
+    )
+    .expect_err("mismatched websocket token should be rejected when payload includes one");
 
     assert!(matches!(
         error,

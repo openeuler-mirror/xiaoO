@@ -23,23 +23,21 @@ fn permission_aware_exec_forwards_default_shell() {
 }
 
 #[test]
-fn parses_cat_runtime_denial_path() {
-    let stderr = "cat: /Users/me/.ssh/config: Operation not permitted\n";
-
-    assert_eq!(
-        denied_path_from_stderr(stderr).as_deref(),
-        Some("/Users/me/.ssh/config")
-    );
-}
-
-#[test]
-fn parses_shell_redirection_runtime_denial_path() {
-    let stderr = "bash: /Users/me/out.txt: Operation not permitted\n";
-
-    assert_eq!(
-        denied_path_from_stderr(stderr).as_deref(),
-        Some("/Users/me/out.txt")
-    );
+fn parses_runtime_denial_paths_from_tool_and_redirection_stderr() {
+    // Seatbelt denials surface as "tool: <path>: Operation not permitted" —
+    // both direct tool reads and shell redirections.
+    for (stderr, expected) in [
+        (
+            "cat: /Users/me/.ssh/config: Operation not permitted\n",
+            "/Users/me/.ssh/config",
+        ),
+        (
+            "bash: /Users/me/out.txt: Operation not permitted\n",
+            "/Users/me/out.txt",
+        ),
+    ] {
+        assert_eq!(denied_path_from_stderr(stderr).as_deref(), Some(expected));
+    }
 }
 
 #[test]
@@ -59,67 +57,44 @@ fn runtime_denial_uses_write_grant_to_cover_unknown_path_access() {
 }
 
 #[test]
-fn bubblewrap_candidates_parse_read_path_from_no_such_file() {
-    let candidates = bubblewrap_path_candidates_from_stderr(
-        "cat: /data/secret.txt: No such file or directory\n",
-        "cat /data/secret.txt",
-    );
-
-    assert_eq!(
-        candidates,
-        vec![RuntimePathCandidate {
-            path: "/data/secret.txt".to_string(),
-            capability: SandboxPermissionCapability::Read,
-        }]
-    );
-}
-
-#[test]
-fn bubblewrap_candidates_parse_write_path_from_redirection() {
-    let candidates = bubblewrap_path_candidates_from_stderr(
-        "bash: /data/out.txt: No such file or directory\n",
-        "printf hi > /data/out.txt",
-    );
-
-    assert_eq!(
-        candidates,
-        vec![RuntimePathCandidate {
-            path: "/data/out.txt".to_string(),
-            capability: SandboxPermissionCapability::Write,
-        }]
-    );
-}
-
-#[test]
-fn bubblewrap_candidates_parse_write_path_from_pipeline_tool_stderr() {
-    let candidates = bubblewrap_path_candidates_from_stderr(
-        "tee: /data/out.txt: No such file or directory\n",
-        "printf hi | tee /data/out.txt",
-    );
-
-    assert_eq!(
-        candidates,
-        vec![RuntimePathCandidate {
-            path: "/data/out.txt".to_string(),
-            capability: SandboxPermissionCapability::Write,
-        }]
-    );
-}
-
-#[test]
-fn bubblewrap_candidates_parse_quoted_unicode_path() {
-    let candidates = bubblewrap_path_candidates_from_stderr(
-        "ls: cannot access ‘/data/input folder’: No such file or directory\n",
-        "ls '/data/input folder'",
-    );
-
-    assert_eq!(
-        candidates,
-        vec![RuntimePathCandidate {
-            path: "/data/input folder".to_string(),
-            capability: SandboxPermissionCapability::Read,
-        }]
-    );
+fn bubblewrap_candidates_parse_read_write_and_quoted_paths() {
+    // Missing-file stderr plus the original command reveal the path the
+    // sandbox refused: direct reads, write-style redirections, pipeline
+    // tool stderr, and quoted unicode names.
+    for (stderr, command, expected_path, expected_capability) in [
+        (
+            "cat: /data/secret.txt: No such file or directory\n",
+            "cat /data/secret.txt",
+            "/data/secret.txt",
+            SandboxPermissionCapability::Read,
+        ),
+        (
+            "bash: /data/out.txt: No such file or directory\n",
+            "printf hi > /data/out.txt",
+            "/data/out.txt",
+            SandboxPermissionCapability::Write,
+        ),
+        (
+            "tee: /data/out.txt: No such file or directory\n",
+            "printf hi | tee /data/out.txt",
+            "/data/out.txt",
+            SandboxPermissionCapability::Write,
+        ),
+        (
+            "ls: cannot access ‘/data/input folder’: No such file or directory\n",
+            "ls '/data/input folder'",
+            "/data/input folder",
+            SandboxPermissionCapability::Read,
+        ),
+    ] {
+        assert_eq!(
+            bubblewrap_path_candidates_from_stderr(stderr, command),
+            vec![RuntimePathCandidate {
+                path: expected_path.to_string(),
+                capability: expected_capability,
+            }]
+        );
+    }
 }
 
 #[test]

@@ -3,23 +3,17 @@ use agent_llm::ChatMessageExt;
 use agent_types::MessageRole;
 
 #[test]
-fn estimate_text_quick_handles_chinese() {
+fn estimate_text_quick_handles_mixed_scripts() {
     let estimator = TokenEstimator::new();
-    let chinese_text = "这是一个中文测试文本";
-    let tokens = estimator.estimate_text_quick(chinese_text);
+    for text in [
+        "这是一个中文测试文本",
+        "This is an English test text with multiple words",
+    ] {
+        let tokens = estimator.estimate_text_quick(text);
 
-    assert!(tokens > 0);
-    assert!(tokens < chinese_text.len());
-}
-
-#[test]
-fn estimate_text_quick_handles_english() {
-    let estimator = TokenEstimator::new();
-    let english_text = "This is an English test text with multiple words";
-    let tokens = estimator.estimate_text_quick(english_text);
-
-    assert!(tokens > 0);
-    assert!(tokens < english_text.len());
+        assert!(tokens > 0);
+        assert!(tokens < text.len());
+    }
 }
 
 #[test]

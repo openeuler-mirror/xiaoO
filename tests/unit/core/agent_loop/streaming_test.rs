@@ -25,36 +25,9 @@ fn stream_chunk_bench() {
         fn on_loop_end(&self, _: &AgentId, _: &LoopEndSummary) {}
     }
 
-    // --- New path sink: supports_message_delta() = true ---
+    // --- New path sink: `DeltaSink` (defined below) ---
     // text/reasoning are accumulated independently so the bench can assert
     // the delta path matches the full-snapshot path for each stream.
-    #[derive(Default)]
-    struct NewPathSink {
-        text: Mutex<String>,
-        reasoning: Mutex<String>,
-    }
-    impl LoopEventSink for NewPathSink {
-        fn on_turn_start(&self, _: &AgentId, _: u32) {}
-        fn on_assistant_message(&self, _: &AgentId, text: &str) {
-            // Full-snapshot fallback: used when delta support is unchecked
-            // or when secrets force a snapshot. Replace, not append.
-            *self.text.lock().unwrap() = text.to_string();
-        }
-        fn on_assistant_message_delta(&self, _: &AgentId, delta: &str) {
-            self.text.lock().unwrap().push_str(delta);
-        }
-        fn on_assistant_reasoning(&self, _: &AgentId, text: &str) {
-            *self.reasoning.lock().unwrap() = text.to_string();
-        }
-        fn on_assistant_reasoning_delta(&self, _: &AgentId, delta: &str) {
-            self.reasoning.lock().unwrap().push_str(delta);
-        }
-        fn supports_message_delta(&self) -> bool {
-            true
-        }
-        fn on_tool_result(&self, _: &AgentId, _: &ToolResultEvent) {}
-        fn on_loop_end(&self, _: &AgentId, _: &LoopEndSummary) {}
-    }
 
     // Generate test chunks: 500 chunks × 80 bytes = 40K response
     let chunk_base = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. ";
@@ -85,7 +58,7 @@ fn stream_chunk_bench() {
 
     // ---- Warmup ----
     let old_sink = OldPathSink::default();
-    let new_sink = NewPathSink::default();
+    let new_sink = DeltaSink::default();
     let old_stream = AssistantStreamState::default();
     for _ in 0..5 {
         for chunk in &chunks {
@@ -115,7 +88,7 @@ fn stream_chunk_bench() {
     let old_elapsed = old_start.elapsed();
 
     // ---- Measure new path (delta) ----
-    let new_sink = NewPathSink::default();
+    let new_sink = DeltaSink::default();
     let new_stream = AssistantStreamState::default();
     let new_start = Instant::now();
     for chunk in &chunks {

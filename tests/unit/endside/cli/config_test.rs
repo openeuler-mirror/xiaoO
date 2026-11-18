@@ -2,9 +2,19 @@ use super::*;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
+/// Writes the TOML to a temp file and loads it — every parse case shares
+/// this plumbing.
+fn load_config(content: &str) -> FileConfig {
+    let mut temp_file = NamedTempFile::new().unwrap();
+    temp_file.write_all(content.as_bytes()).unwrap();
+    temp_file.flush().unwrap();
+    FileConfig::load_from_path(temp_file.path(), false)
+}
+
 #[test]
 fn load_subagent_config_reads_roles_with_prompts_and_max_turns() {
-    let config_content = r#"
+    let config = load_config(
+        r#"
 [llm]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
@@ -18,13 +28,8 @@ max_turns = 5
 description = "Test writing specialist"
 prompt = "You are a test writing specialist."
 max_turns = 8
-"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(config_content.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    let config = FileConfig::load_from_path(temp_file.path(), false);
+"#,
+    );
 
     assert_eq!(config.subagent.len(), 2);
     assert!(config.subagent.contains_key("code_reviewer"));
@@ -45,20 +50,16 @@ max_turns = 8
 
 #[test]
 fn subagent_tools_config_parses_per_tool_visibility_flags() {
-    let config_content = r#"
+    let config = load_config(
+        r#"
 [llm]
 provider = "openai"
 
 [subagent.limited_agent]
 description = "Agent with limited tools"
 tools = { "bash" = true, "read" = true }
-"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(config_content.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    let config = FileConfig::load_from_path(temp_file.path(), false);
+"#,
+    );
 
     assert_eq!(config.subagent.len(), 1);
     let agent = config.subagent.get("limited_agent").unwrap();
@@ -70,22 +71,20 @@ tools = { "bash" = true, "read" = true }
 
 #[test]
 fn config_without_subagent_section_has_no_roles() {
-    let config_content = r#"
+    let config = load_config(
+        r#"
 [llm]
 provider = "anthropic"
-"#;
+"#,
+    );
 
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(config_content.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    let config = FileConfig::load_from_path(temp_file.path(), false);
     assert_eq!(config.subagent.len(), 0);
 }
 
 #[test]
 fn memory_automation_section_is_parsed_field_by_field() {
-    let config_content = r#"
+    let config = load_config(
+        r#"
 [memory_automation]
 enabled = true
 server = "ram-a"
@@ -97,13 +96,8 @@ queue_capacity = 32
 max_retries = 4
 retry_backoff_ms = 50
 allowed_agent_roles = ["main", "researcher"]
-"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(config_content.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    let config = FileConfig::load_from_path(temp_file.path(), false);
+"#,
+    );
 
     assert!(config.memory_automation.enabled);
     assert_eq!(config.memory_automation.server, "ram-a");
@@ -121,7 +115,8 @@ allowed_agent_roles = ["main", "researcher"]
 
 #[test]
 fn operation_backend_options_keep_isolation_settings() {
-    let config_content = r#"
+    let config = load_config(
+        r#"
 [llm]
 provider = "openai"
 
@@ -133,13 +128,8 @@ kind = "linux_dynsandbox"
 allow_network = false
 readable_roots = ["/home/alice/project"]
 writable_roots = ["/home/alice/project/.xiaoo-tmp"]
-"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(config_content.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    let config = FileConfig::load_from_path(temp_file.path(), false);
+"#,
+    );
 
     let backend = config.operation_backend.expect("operation_backend");
     assert_eq!(backend.kind, "local");
@@ -156,53 +146,26 @@ writable_roots = ["/home/alice/project/.xiaoo-tmp"]
 }
 
 #[test]
-fn llm_rate_limit_section_parses_explicit_values() {
-    let config_content = r#"
-[llm]
-provider = "openai"
-
-[llm.rate_limit]
-max_concurrent = 2
-requests_per_minute = 10
-"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(config_content.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    let config = FileConfig::load_from_path(temp_file.path(), false);
-    let rate_limit = config
-        .llm
-        .and_then(|llm| llm.rate_limit)
-        .expect("llm.rate_limit");
-    assert_eq!(rate_limit.max_concurrent, 2);
-    assert_eq!(rate_limit.requests_per_minute, 10);
-}
-
-#[test]
-fn llm_rate_limit_section_defaults_missing_fields() {
-    let config_content = r#"
-[llm]
-provider = "openai"
-
-[llm.rate_limit]
-max_concurrent = 3
-"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(config_content.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    let config = FileConfig::load_from_path(temp_file.path(), false);
-    let rate_limit = config
-        .llm
-        .and_then(|llm| llm.rate_limit)
-        .expect("llm.rate_limit");
-    assert_eq!(rate_limit.max_concurrent, 3);
-    assert_eq!(
-        rate_limit.requests_per_minute,
-        xiaoo_api::llm::RateLimitSettings::default().requests_per_minute
-    );
+fn llm_rate_limit_section_parses_explicit_values_and_defaults_missing_fields() {
+    // (rate_limit body, expected max_concurrent, expected requests_per_minute)
+    for (body, expected_concurrent, expected_rpm) in [
+        ("max_concurrent = 2\nrequests_per_minute = 10", 2, 10),
+        (
+            "max_concurrent = 3",
+            3,
+            xiaoo_api::llm::RateLimitSettings::default().requests_per_minute,
+        ),
+    ] {
+        let config = load_config(&format!(
+            "\n[llm]\nprovider = \"openai\"\n\n[llm.rate_limit]\n{body}\n"
+        ));
+        let rate_limit = config
+            .llm
+            .and_then(|llm| llm.rate_limit)
+            .expect("llm.rate_limit");
+        assert_eq!(rate_limit.max_concurrent, expected_concurrent);
+        assert_eq!(rate_limit.requests_per_minute, expected_rpm);
+    }
 }
 
 #[test]

@@ -177,11 +177,7 @@ async fn runtime_exec_interruption_returns_partial_output() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bearer_auth_rejects_missing_token_for_runtime_input() {
-    let router = create_router_with_auth(
-        Arc::new(FakeSessionService::new("unused")),
-        Some(HttpBearerAuthConfig::new("secret-token")),
-        None,
-    );
+    let router = secret_token_router();
 
     let response = router
         .oneshot(
@@ -216,11 +212,7 @@ async fn bearer_auth_rejects_missing_token_for_runtime_input() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bearer_auth_allows_valid_token_for_runtime_input() {
-    let router = create_router_with_auth(
-        Arc::new(FakeSessionService::new("unused")),
-        Some(HttpBearerAuthConfig::new("secret-token")),
-        None,
-    );
+    let router = secret_token_router();
 
     let response = router
         .oneshot(
@@ -242,11 +234,7 @@ async fn bearer_auth_allows_valid_token_for_runtime_input() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bearer_auth_applies_to_runtime_checkpoint_route() {
-    let router = create_router_with_auth(
-        Arc::new(FakeSessionService::new("unused")),
-        Some(HttpBearerAuthConfig::new("secret-token")),
-        None,
-    );
+    let router = secret_token_router();
 
     let missing_auth = router
         .clone()
@@ -314,11 +302,7 @@ async fn bearer_auth_applies_to_runtime_checkpoint_route() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_close_uses_body_runtime_id_route() {
-    let router = create_router_with_auth(
-        Arc::new(FakeSessionService::new("unused")),
-        Some(HttpBearerAuthConfig::new("secret-token")),
-        None,
-    );
+    let router = secret_token_router();
 
     let response = router
         .oneshot(
@@ -338,11 +322,7 @@ async fn runtime_close_uses_body_runtime_id_route() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_export_uses_body_runtime_id_route() {
-    let router = create_router_with_auth(
-        Arc::new(FakeSessionService::new("unused")),
-        Some(HttpBearerAuthConfig::new("secret-token")),
-        None,
-    );
+    let router = secret_token_router();
 
     let response = router
         .clone()
@@ -375,11 +355,7 @@ async fn runtime_export_uses_body_runtime_id_route() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn old_session_control_plane_routes_are_not_registered() {
-    let router = create_router_with_auth(
-        Arc::new(FakeSessionService::new("unused")),
-        Some(HttpBearerAuthConfig::new("secret-token")),
-        None,
-    );
+    let router = secret_token_router();
 
     let input_response = router
         .clone()
@@ -417,11 +393,7 @@ async fn old_session_control_plane_routes_are_not_registered() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bearer_auth_does_not_apply_to_metadata_or_feishu_webhook() {
-    let router = create_router_with_auth(
-        Arc::new(FakeSessionService::new("unused")),
-        Some(HttpBearerAuthConfig::new("secret-token")),
-        None,
-    );
+    let router = secret_token_router();
 
     let health_response = router
         .clone()
@@ -1072,6 +1044,35 @@ pub fn create_router_with_auth(
     )
 }
 
+/// Router wired with the standard test session service and a bearer token
+/// of `secret-token`; the contract tests below probe it with and without
+/// the credential.
+fn secret_token_router() -> Router {
+    create_router_with_auth(
+        Arc::new(FakeSessionService::new("unused")),
+        Some(HttpBearerAuthConfig::new("secret-token")),
+        None,
+    )
+}
+
+/// GET /api/v1/health (optionally bearer-authenticated) and return the
+/// parsed JSON payload.
+async fn health_json(router: Router, bearer_token: Option<&str>) -> serde_json::Value {
+    let mut builder = Request::builder().uri("/api/v1/health");
+    if let Some(token) = bearer_token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    let response = router
+        .oneshot(builder.body(Body::empty()).expect("request should build"))
+        .await
+        .expect("health route should respond");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    serde_json::from_slice(&body).expect("health response should be JSON")
+}
+
 /// Health reports the startup config identity when set.
 #[tokio::test(flavor = "current_thread")]
 async fn health_reports_config_identity_when_set() {
@@ -1082,21 +1083,7 @@ async fn health_reports_config_identity_when_set() {
     }));
     let router = create_router_from_state(state, None, None, HttpSecurityPolicy::default());
 
-    let response = router
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/health")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("health route should respond");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body should read");
-    let payload: serde_json::Value =
-        serde_json::from_slice(&body).expect("health response should be JSON");
+    let payload = health_json(router, None).await;
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["config_path"], "/etc/xiaoo/config.toml");
     assert_eq!(payload["config_sha256"], "deadbeef");
@@ -1106,22 +1093,12 @@ async fn health_reports_config_identity_when_set() {
 /// old-daemon compatibility on field absence.
 #[tokio::test(flavor = "current_thread")]
 async fn health_omits_config_identity_when_unset() {
-    let router = create_router_with_auth(Arc::new(FakeSessionService::new("unused")), None, None);
+    let payload = health_json(
+        create_router_with_auth(Arc::new(FakeSessionService::new("unused")), None, None),
+        None,
+    )
+    .await;
 
-    let response = router
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/health")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("health route should respond");
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body should read");
-    let payload: serde_json::Value =
-        serde_json::from_slice(&body).expect("health response should be JSON");
     assert!(payload.get("config_path").is_none());
     assert!(payload.get("config_sha256").is_none());
 }
@@ -1132,23 +1109,11 @@ async fn health_omits_config_identity_when_unset() {
 /// test asserts against the same value the handler read.
 #[tokio::test(flavor = "current_thread")]
 async fn health_reports_host_identity() {
-    let router = create_router_with_auth(Arc::new(FakeSessionService::new("unused")), None, None);
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/health")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("health route should respond");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body should read");
-    let payload: serde_json::Value =
-        serde_json::from_slice(&body).expect("health response should be JSON");
+    let payload = health_json(
+        create_router_with_auth(Arc::new(FakeSessionService::new("unused")), None, None),
+        None,
+    )
+    .await;
     match xiaoo_shared::host_identity::local_host_identity() {
         Some(identity) => assert_eq!(payload["host_identity"], serde_json::json!(identity)),
         // No identity source on this machine → the field is omitted
@@ -1163,47 +1128,15 @@ async fn health_reports_host_identity() {
 /// health probe sends one).
 #[tokio::test(flavor = "current_thread")]
 async fn health_gates_host_identity_on_bearer_auth() {
-    let router = create_router_with_auth(
-        Arc::new(FakeSessionService::new("unused")),
-        Some(HttpBearerAuthConfig::new("secret-token")),
-        None,
-    );
+    let router = secret_token_router();
 
-    let anonymous = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/health")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("health route should respond");
-    let body = to_bytes(anonymous.into_body(), usize::MAX)
-        .await
-        .expect("body should read");
-    let payload: serde_json::Value =
-        serde_json::from_slice(&body).expect("health response should be JSON");
-    assert!(payload.get("host_identity").is_none());
+    let anonymous = health_json(router.clone(), None).await;
+    assert!(anonymous.get("host_identity").is_none());
 
-    let authenticated = router
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/health")
-                .header("authorization", "Bearer secret-token")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("health route should respond");
-    let body = to_bytes(authenticated.into_body(), usize::MAX)
-        .await
-        .expect("body should read");
-    let payload: serde_json::Value =
-        serde_json::from_slice(&body).expect("health response should be JSON");
+    let authenticated = health_json(router, Some("secret-token")).await;
     if xiaoo_shared::host_identity::local_host_identity().is_some() {
         assert!(
-            payload.get("host_identity").is_some(),
+            authenticated.get("host_identity").is_some(),
             "authenticated health must disclose the host identity"
         );
     }
@@ -1242,6 +1175,7 @@ async fn loopback_host_guard_accepts_h2c_authority_and_plain_http1() {
     // the guard must keep accepting a loopback authority over h2c.
     let h2c = reqwest::Client::builder()
         .http2_prior_knowledge()
+        .no_proxy()
         .build()
         .expect("h2c client");
     let response = h2c
@@ -1253,7 +1187,10 @@ async fn loopback_host_guard_accepts_h2c_authority_and_plain_http1() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
     // Regression: the same listener keeps answering plain HTTP/1.1 callers.
-    let http1 = reqwest::Client::new();
+    let http1 = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("http1 client");
     let response = http1
         .get(format!("{base}/health"))
         .send()
@@ -1273,6 +1210,7 @@ async fn loopback_host_guard_rejects_non_loopback_h2c_authority() {
     let rebind = reqwest::Client::builder()
         .http2_prior_knowledge()
         .resolve("rebind.example.test", address)
+        .no_proxy()
         .build()
         .expect("rebinding h2c client");
     let response = rebind
@@ -1364,6 +1302,7 @@ async fn sse_turn_stream_serves_h2c_on_real_router() {
 
     let h2c = reqwest::Client::builder()
         .http2_prior_knowledge()
+        .no_proxy()
         .build()
         .expect("h2c client");
     let response = h2c

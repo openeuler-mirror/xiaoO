@@ -12,9 +12,27 @@ use axum::Router;
 use futures_util::stream;
 use mcp::{EffectSection, McpClient, McpError, McpServerConfig, Transport};
 use serde_json::{json, Value};
-use tokio::sync::{Barrier, Mutex, Notify};
+use tokio::sync::{Barrier, Mutex, MutexGuard, Notify};
 
 static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+/// Serializes tests that mutate process env vars; restores them on drop.
+struct TestEnv {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
+    }
+}
+
+async fn test_env() -> TestEnv {
+    let _lock = ENV_LOCK.lock().await;
+    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    TestEnv { _lock }
+}
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
@@ -59,7 +77,7 @@ struct FixtureState {
     release_first_stale_request: Arc<Notify>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum ListResponse {
     Correct,
     WrongId,
@@ -92,132 +110,62 @@ enum ListResponse {
     EmptyEventIdResets,
 }
 
+/// Config shared by both fixtures; they differ only in name and URL.
+fn streamable_http_config(name: &str, url: &str) -> McpServerConfig {
+    McpServerConfig {
+        name: name.to_string(),
+        transport: Transport::StreamableHttp,
+        command: None,
+        args: Vec::new(),
+        env: HashMap::new(),
+        url: Some(url.to_string()),
+        bearer_token_env: Some("MCP_STREAMABLE_HTTP_TEST_TOKEN".to_string()),
+        agent_id: Some("xiaoo-test-agent".to_string()),
+        headers: BTreeMap::from([("X-XiaoO-Client".to_string(), "integration-test".to_string())]),
+        enabled: None,
+        timeout_ms: 1_000,
+        effect: EffectSection::default(),
+    }
+}
+
+/// The header set every post-handshake session request (tools/list, DELETE,
+/// …) must carry: the negotiated session, protocol version, bearer token
+/// resolved at request time, and agent id.
+async fn assert_session_headers(server: &FixtureServer, method: &str) {
+    assert_eq!(
+        server
+            .last_header(method, "mcp-session-id")
+            .await
+            .as_deref(),
+        Some("fixture-session")
+    );
+    assert_eq!(
+        server
+            .last_header(method, "mcp-protocol-version")
+            .await
+            .as_deref(),
+        Some("2025-11-25")
+    );
+    assert_eq!(
+        server.last_header(method, "authorization").await.as_deref(),
+        Some("Bearer test-token")
+    );
+    assert_eq!(
+        server.last_header(method, "x-agent-id").await.as_deref(),
+        Some("xiaoo-test-agent")
+    );
+}
+
 impl FixtureServer {
-    async fn json_then_sse() -> Self {
-        Self::start(ListResponse::Correct, "2025-11-25").await
+    /// Boot the fixture: initialize answers plain JSON, tools/list answers
+    /// SSE, and `list_response` picks the deviation under test.
+    async fn start(list_response: ListResponse) -> Self {
+        Self::start_with_protocol(list_response, "2025-11-25").await
     }
 
-    async fn wrong_list_id() -> Self {
-        Self::start(ListResponse::WrongId, "2025-11-25").await
-    }
-
-    async fn unmatched_then_correct_list_id() -> Self {
-        Self::start(ListResponse::UnmatchedThenCorrect, "2025-11-25").await
-    }
-
-    async fn unsupported_protocol() -> Self {
-        Self::start(ListResponse::Correct, "2024-11-05").await
-    }
-
-    async fn session_expiry() -> Self {
-        Self::start(ListResponse::SessionExpiredThenCorrect, "2025-11-25").await
-    }
-
-    async fn persistent_session_expiry() -> Self {
-        Self::start(ListResponse::SessionAlwaysExpired, "2025-11-25").await
-    }
-
-    async fn timeout_headers_and_body() -> Self {
-        Self::start(ListResponse::TimeoutHeadersAndBody, "2025-11-25").await
-    }
-
-    async fn never_completes() -> Self {
-        Self::start(ListResponse::NeverCompletes, "2025-11-25").await
-    }
-
-    async fn initialize_never_completes() -> Self {
-        Self::start(ListResponse::InitializeNeverCompletes, "2025-11-25").await
-    }
-
-    async fn bad_notification() -> Self {
-        Self::start(ListResponse::BadNotification, "2025-11-25").await
-    }
-
-    async fn wrong_notification_status() -> Self {
-        Self::start(ListResponse::WrongNotificationStatus, "2025-11-25").await
-    }
-
-    async fn uppercase_sse() -> Self {
-        Self::start(ListResponse::UppercaseSse, "2025-11-25").await
-    }
-
-    async fn resumable_sse() -> Self {
-        Self::start(ListResponse::ResumableSse, "2025-11-25").await
-    }
-
-    async fn sse_retry_exceeds_deadline() -> Self {
-        Self::start(ListResponse::RetryExceedsDeadline, "2025-11-25").await
-    }
-
-    async fn disconnect_without_event_id() -> Self {
-        Self::start(ListResponse::DisconnectWithoutEventId, "2025-11-25").await
-    }
-
-    async fn resume_still_disconnects() -> Self {
-        Self::start(ListResponse::ResumeStillDisconnects, "2025-11-25").await
-    }
-
-    async fn wrong_recovery_content_type() -> Self {
-        Self::start(ListResponse::WrongRecoveryContentType, "2025-11-25").await
-    }
-
-    async fn concurrent_resumable_sse() -> Self {
-        Self::start(ListResponse::ConcurrentResumableSse, "2025-11-25").await
-    }
-
-    async fn get_session_expiry() -> Self {
-        Self::start(ListResponse::GetSessionExpiredThenCorrect, "2025-11-25").await
-    }
-
-    async fn slow_get_session_expiry() -> Self {
-        Self::start(
-            ListResponse::GetSessionRecoveryExceedsDeadline,
-            "2025-11-25",
-        )
-        .await
-    }
-
-    async fn concurrent_session_expiry() -> Self {
-        Self::start(ListResponse::ConcurrentSessionExpiry, "2025-11-25").await
-    }
-
-    async fn recovery_blocks_concurrent_request() -> Self {
-        Self::start(ListResponse::RecoveryBlocksConcurrentRequest, "2025-11-25").await
-    }
-
-    async fn concurrent_recovery_failure() -> Self {
-        Self::start(ListResponse::ConcurrentRecoveryFailure, "2025-11-25").await
-    }
-
-    async fn recovery_mutex_deadline() -> Self {
-        Self::start(ListResponse::RecoveryMutexDeadline, "2025-11-25").await
-    }
-
-    async fn failed_initialize_session() -> Self {
-        Self::start(ListResponse::FailedInitializeSession, "2025-11-25").await
-    }
-
-    async fn empty_session_id() -> Self {
-        Self::start(ListResponse::EmptySessionId, "2025-11-25").await
-    }
-
-    async fn invalid_session_id() -> Self {
-        Self::start(ListResponse::InvalidSessionId, "2025-11-25").await
-    }
-
-    async fn rate_limits_initialize_once() -> Self {
-        Self::start(ListResponse::RateLimitsInitializeOnce, "2025-11-25").await
-    }
-
-    async fn server_request_then_response() -> Self {
-        Self::start(ListResponse::ServerRequestThenResponse, "2025-11-25").await
-    }
-
-    async fn empty_event_id_resets() -> Self {
-        Self::start(ListResponse::EmptyEventIdResets, "2025-11-25").await
-    }
-
-    async fn start(list_response: ListResponse, init_protocol_version: &str) -> Self {
+    /// Like [`start`], but the server advertises a different protocol
+    /// version at initialize (the unsupported-protocol rejection test).
+    async fn start_with_protocol(list_response: ListResponse, init_protocol_version: &str) -> Self {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recovery_started = Arc::new(Notify::new());
         let release_recovery = Arc::new(Notify::new());
@@ -260,23 +208,7 @@ impl FixtureServer {
     }
 
     fn config(&self) -> McpServerConfig {
-        McpServerConfig {
-            name: "ram-a".to_string(),
-            transport: Transport::StreamableHttp,
-            command: None,
-            args: Vec::new(),
-            env: HashMap::new(),
-            url: Some(self.url.clone()),
-            bearer_token_env: Some("MCP_STREAMABLE_HTTP_TEST_TOKEN".to_string()),
-            agent_id: Some("xiaoo-test-agent".to_string()),
-            headers: BTreeMap::from([(
-                "X-XiaoO-Client".to_string(),
-                "integration-test".to_string(),
-            )]),
-            enabled: None,
-            timeout_ms: 1_000,
-            effect: EffectSection::default(),
-        }
+        streamable_http_config("ram-a", &self.url)
     }
 
     async fn last_header(&self, method: &str, name: &str) -> Option<String> {
@@ -356,23 +288,7 @@ impl RedirectFixture {
     }
 
     fn config(&self) -> McpServerConfig {
-        McpServerConfig {
-            name: "redirect-test".to_string(),
-            transport: Transport::StreamableHttp,
-            command: None,
-            args: Vec::new(),
-            env: HashMap::new(),
-            url: Some(self.url.clone()),
-            bearer_token_env: Some("MCP_STREAMABLE_HTTP_TEST_TOKEN".to_string()),
-            agent_id: Some("xiaoo-test-agent".to_string()),
-            headers: BTreeMap::from([(
-                "X-XiaoO-Client".to_string(),
-                "integration-test".to_string(),
-            )]),
-            enabled: None,
-            timeout_ms: 1_000,
-            effect: EffectSection::default(),
-        }
+        streamable_http_config("redirect-test", &self.url)
     }
 }
 
@@ -839,10 +755,9 @@ async fn handle_delete(State(state): State<FixtureState>, headers: HeaderMap) ->
 
 #[tokio::test]
 async fn initialize_captures_session_and_subsequent_calls_send_streamable_headers() {
-    let _environment = ENV_LOCK.lock().await;
+    let _environment = test_env().await;
     std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "old-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::json_then_sse().await;
+    let server = FixtureServer::start(ListResponse::Correct).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
 
@@ -859,34 +774,7 @@ async fn initialize_captures_session_and_subsequent_calls_send_streamable_header
     );
     client.list_tools().await.unwrap();
 
-    assert_eq!(
-        server
-            .last_header("tools/list", "mcp-session-id")
-            .await
-            .as_deref(),
-        Some("fixture-session")
-    );
-    assert_eq!(
-        server
-            .last_header("tools/list", "mcp-protocol-version")
-            .await
-            .as_deref(),
-        Some("2025-11-25")
-    );
-    assert_eq!(
-        server
-            .last_header("tools/list", "authorization")
-            .await
-            .as_deref(),
-        Some("Bearer test-token")
-    );
-    assert_eq!(
-        server
-            .last_header("tools/list", "x-agent-id")
-            .await
-            .as_deref(),
-        Some("xiaoo-test-agent")
-    );
+    assert_session_headers(&server, "tools/list").await;
     assert_eq!(
         server.last_header("tools/list", "accept").await.as_deref(),
         Some("application/json, text/event-stream")
@@ -897,15 +785,12 @@ async fn initialize_captures_session_and_subsequent_calls_send_streamable_header
     let tool_result = client.call_tool("structured", json!({})).await.unwrap();
     assert_eq!(tool_result.structured_content, Some(json!({"answer": 42})));
     assert_eq!(tool_result.flatten_text(), r#"{"answer":42}"#);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn close_deletes_the_active_streamable_http_session_once() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::json_then_sse().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::Correct).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -913,40 +798,13 @@ async fn close_deletes_the_active_streamable_http_session_once() {
     client.close().await.unwrap();
 
     assert_eq!(server.count_method("DELETE").await, 1);
-    assert_eq!(
-        server
-            .last_header("DELETE", "mcp-session-id")
-            .await
-            .as_deref(),
-        Some("fixture-session")
-    );
-    assert_eq!(
-        server
-            .last_header("DELETE", "mcp-protocol-version")
-            .await
-            .as_deref(),
-        Some("2025-11-25")
-    );
-    assert_eq!(
-        server
-            .last_header("DELETE", "authorization")
-            .await
-            .as_deref(),
-        Some("Bearer test-token")
-    );
-    assert_eq!(
-        server.last_header("DELETE", "x-agent-id").await.as_deref(),
-        Some("xiaoo-test-agent")
-    );
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
+    assert_session_headers(&server, "DELETE").await;
 }
 
 #[tokio::test]
 async fn close_waits_for_session_recovery_then_deletes_the_recovered_session() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::recovery_blocks_concurrent_request().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::RecoveryBlocksConcurrentRequest).await;
     let client = Arc::new(McpClient::connect(&server.config()).await.unwrap());
     client.initialize().await.unwrap();
 
@@ -977,42 +835,33 @@ async fn close_waits_for_session_recovery_then_deletes_the_recovered_session() {
         client.list_tools().await,
         Err(McpError::Disconnected)
     ));
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn rejects_an_unsupported_streamable_http_protocol_version() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::unsupported_protocol().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start_with_protocol(ListResponse::Correct, "2024-11-05").await;
     let client = McpClient::connect(&server.config()).await.unwrap();
 
     let error = client.initialize().await.unwrap_err();
     assert!(matches!(error, McpError::HandshakeFailed(message) if message.contains("2024-11-05")));
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn retries_a_rate_limited_initialize_once_within_the_request_deadline() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::rate_limits_initialize_once().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::RateLimitsInitializeOnce).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
 
     assert!(client.initialize().await.is_ok());
     assert_eq!(server.count_method("initialize").await, 2);
     assert_eq!(server.count_method("notifications/initialized").await, 1);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn reinitializes_once_when_a_session_request_returns_not_found() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::session_expiry().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::SessionExpiredThenCorrect).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1030,30 +879,24 @@ async fn reinitializes_once_when_a_session_request_returns_not_found() {
         server.last_header("initialize", "mcp-session-id").await,
         None
     );
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn session_not_found_recovery_is_bounded_to_one_retry() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::persistent_session_expiry().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::SessionAlwaysExpired).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
     assert!(matches!(client.list_tools().await, Err(McpError::Http(_))));
     assert_eq!(server.count_method("initialize").await, 2);
     assert_eq!(server.count_method("tools/list").await, 2);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn get_not_found_recovers_the_session_and_retries_the_original_request_once() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::get_session_expiry().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::GetSessionExpiredThenCorrect).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1068,15 +911,12 @@ async fn get_not_found_recovers_the_session_and_retries_the_original_request_onc
             .as_deref(),
         Some("fixture-session-2")
     );
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn get_not_found_session_recovery_keeps_the_original_request_deadline() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::slow_get_session_expiry().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::GetSessionRecoveryExceedsDeadline).await;
     let mut config = server.config();
     config.timeout_ms = 80;
     let client = McpClient::connect(&config).await.unwrap();
@@ -1089,15 +929,12 @@ async fn get_not_found_session_recovery_keeps_the_original_request_deadline() {
     ));
     assert!(started.elapsed() < Duration::from_millis(120));
     assert_eq!(server.count_method("tools/list").await, 1);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn stale_concurrent_request_does_not_clear_a_newer_session() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::concurrent_session_expiry().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::ConcurrentSessionExpiry).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1106,15 +943,12 @@ async fn stale_concurrent_request_does_not_clear_a_newer_session() {
     assert!(second.is_ok(), "second request failed: {second:?}");
     assert_eq!(server.count_method("initialize").await, 2);
     assert_eq!(server.count_method("tools/list").await, 4);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn requests_started_during_recovery_wait_and_use_the_recovered_session() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::recovery_blocks_concurrent_request().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::RecoveryBlocksConcurrentRequest).await;
     let client = Arc::new(McpClient::connect(&server.config()).await.unwrap());
     client.initialize().await.unwrap();
 
@@ -1171,15 +1005,12 @@ async fn requests_started_during_recovery_wait_and_use_the_recovered_session() {
         Some("fixture-session-2")
     );
     drop(requests);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn recovery_failure_is_returned_to_waiters_without_a_sessionless_retry() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::concurrent_recovery_failure().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::ConcurrentRecoveryFailure).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1200,15 +1031,12 @@ async fn recovery_failure_is_returned_to_waiters_without_a_sessionless_retry() {
         .iter()
         .filter(|request| request.method == "tools/list")
         .all(|request| request.headers.get("mcp-session-id").is_some()));
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn waiting_for_the_recovery_mutex_is_bounded_by_the_original_deadline() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::recovery_mutex_deadline().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::RecoveryMutexDeadline).await;
     let mut config = server.config();
     config.timeout_ms = 400;
     let client = Arc::new(McpClient::connect(&config).await.unwrap());
@@ -1236,15 +1064,12 @@ async fn waiting_for_the_recovery_mutex_is_bounded_by_the_original_deadline() {
         second.await.unwrap(),
         Err(McpError::Timeout { .. })
     ));
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn captures_a_session_id_only_from_a_successful_initialize() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::failed_initialize_session().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::FailedInitializeSession).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
 
     assert!(matches!(
@@ -1262,19 +1087,14 @@ async fn captures_a_session_id_only_from_a_successful_initialize() {
         server.last_header("tools/list", "mcp-session-id").await,
         None
     );
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn rejects_empty_or_non_visible_ascii_session_ids_without_installing_them() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    let _environment = test_env().await;
 
-    for server in [
-        FixtureServer::empty_session_id().await,
-        FixtureServer::invalid_session_id().await,
-    ] {
+    for list_response in [ListResponse::EmptySessionId, ListResponse::InvalidSessionId] {
+        let server = FixtureServer::start(list_response).await;
         let client = McpClient::connect(&server.config()).await.unwrap();
         let error = client.initialize().await.unwrap_err();
         assert!(
@@ -1289,55 +1109,45 @@ async fn rejects_empty_or_non_visible_ascii_session_ids_without_installing_them(
             None
         );
     }
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn rejects_a_streamable_response_with_the_wrong_json_rpc_id() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::wrong_list_id().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::WrongId).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
     let error = client.list_tools().await.unwrap_err();
     assert!(matches!(error, McpError::Protocol(message) if message.contains("response id")));
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
-async fn waits_for_the_matching_json_rpc_response_in_an_sse_body() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::unmatched_then_correct_list_id().await;
-    let client = McpClient::connect(&server.config()).await.unwrap();
-    client.initialize().await.unwrap();
+async fn waits_for_the_matching_json_rpc_response_among_non_matching_sse_events() {
+    // Two shapes of foreign message may precede the real response in the SSE
+    // body: a response carrying an unrelated id, and a server-initiated
+    // request (whose id does match the pending one). Neither may be consumed
+    // as the tools/list answer.
+    let _environment = test_env().await;
+    for list_response in [
+        ListResponse::UnmatchedThenCorrect,
+        ListResponse::ServerRequestThenResponse,
+    ] {
+        let server = FixtureServer::start(list_response).await;
+        let client = McpClient::connect(&server.config()).await.unwrap();
+        client.initialize().await.unwrap();
 
-    assert!(client.list_tools().await.is_ok());
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
-}
-
-#[tokio::test]
-async fn server_initiated_request_does_not_consume_the_matching_sse_response() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::server_request_then_response().await;
-    let client = McpClient::connect(&server.config()).await.unwrap();
-    client.initialize().await.unwrap();
-
-    assert!(client.list_tools().await.is_ok());
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
+        assert!(
+            client.list_tools().await.is_ok(),
+            "failed for {list_response:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn rejects_sensitive_and_transport_managed_fixed_headers_at_connect() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::json_then_sse().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::Correct).await;
     for name in [
         "Authorization",
         "Proxy-Authorization",
@@ -1363,14 +1173,11 @@ async fn rejects_sensitive_and_transport_managed_fixed_headers_at_connect() {
             "header {name} unexpectedly accepted"
         );
     }
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn does_not_follow_cross_origin_redirects_with_streamable_http_headers() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    let _environment = test_env().await;
     let server = RedirectFixture::start().await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
@@ -1382,15 +1189,12 @@ async fn does_not_follow_cross_origin_redirects_with_streamable_http_headers() {
         "cross-origin redirect target received a request"
     );
     assert!(matches!(result, Err(McpError::Http(_))));
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn applies_one_timeout_deadline_to_response_headers_and_sse_body() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::timeout_headers_and_body().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::TimeoutHeadersAndBody).await;
     let mut config = server.config();
     config.timeout_ms = 80;
     let client = McpClient::connect(&config).await.unwrap();
@@ -1400,15 +1204,12 @@ async fn applies_one_timeout_deadline_to_response_headers_and_sse_body() {
     let error = client.list_tools().await.unwrap_err();
     assert!(matches!(error, McpError::Timeout { .. }));
     assert!(started.elapsed() < Duration::from_millis(110));
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn cancels_a_timed_out_non_initialize_request_with_its_original_id() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::never_completes().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::NeverCompletes).await;
     let mut config = server.config();
     config.timeout_ms = 80;
     let client = McpClient::connect(&config).await.unwrap();
@@ -1424,15 +1225,12 @@ async fn cancels_a_timed_out_non_initialize_request_with_its_original_id() {
             .and_then(|body| body.pointer("/params/requestId").cloned()),
         Some(json!(2))
     );
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn never_cancels_a_timed_out_initialize_request() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::initialize_never_completes().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::InitializeNeverCompletes).await;
     let mut config = server.config();
     config.timeout_ms = 80;
     let client = McpClient::connect(&config).await.unwrap();
@@ -1442,51 +1240,39 @@ async fn never_cancels_a_timed_out_initialize_request() {
         Err(McpError::Timeout { .. })
     ));
     assert_eq!(server.count_method("notifications/cancelled").await, 0);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn accepts_case_insensitive_sse_content_type() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::uppercase_sse().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::UppercaseSse).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
     assert!(client.list_tools().await.is_ok());
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn rejects_notification_success_with_a_body() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::bad_notification().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::BadNotification).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     let error = client.initialize().await.unwrap_err();
     assert!(matches!(error, McpError::Protocol(message) if message.contains("empty body")));
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn rejects_notification_response_without_accepted_status() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::wrong_notification_status().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::WrongNotificationStatus).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     let error = client.initialize().await.unwrap_err();
     assert!(matches!(error, McpError::Http(message) if message.contains("200")));
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn reconnects_sse_after_eof_with_last_event_id() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::resumable_sse().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::ResumableSse).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1496,15 +1282,12 @@ async fn reconnects_sse_after_eof_with_last_event_id() {
         server.last_header("GET", "last-event-id").await.as_deref(),
         Some("event-1")
     );
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn rejects_a_successful_sse_recovery_get_without_event_stream_content_type() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::wrong_recovery_content_type().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::WrongRecoveryContentType).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1515,15 +1298,12 @@ async fn rejects_a_successful_sse_recovery_get_without_event_stream_content_type
         "unexpected recovery content type error: {error:?}"
     );
     assert_eq!(server.count_method("GET").await, 1);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn empty_sse_event_id_clears_the_reconnect_cursor() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::empty_event_id_resets().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::EmptyEventIdResets).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1532,15 +1312,12 @@ async fn empty_sse_event_id_clears_the_reconnect_cursor() {
         Err(McpError::Disconnected)
     ));
     assert_eq!(server.count_method("GET").await, 0);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn sse_retry_delay_is_bounded_by_the_original_request_deadline() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::sse_retry_exceeds_deadline().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::RetryExceedsDeadline).await;
     let mut config = server.config();
     config.timeout_ms = 80;
     let client = McpClient::connect(&config).await.unwrap();
@@ -1551,15 +1328,12 @@ async fn sse_retry_delay_is_bounded_by_the_original_request_deadline() {
         Err(McpError::Timeout { .. })
     ));
     assert_eq!(server.count_method("GET").await, 0);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn premature_sse_eof_without_an_event_id_is_a_disconnect_not_a_cancellation() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::disconnect_without_event_id().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::DisconnectWithoutEventId).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1569,15 +1343,12 @@ async fn premature_sse_eof_without_an_event_id_is_a_disconnect_not_a_cancellatio
     ));
     assert_eq!(server.count_method("GET").await, 0);
     assert_eq!(server.count_method("notifications/cancelled").await, 0);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn sse_resume_is_bounded_to_one_get_after_premature_eof() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::resume_still_disconnects().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::ResumeStillDisconnects).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1587,15 +1358,12 @@ async fn sse_resume_is_bounded_to_one_get_after_premature_eof() {
     ));
     assert_eq!(server.count_method("GET").await, 1);
     assert_eq!(server.count_method("notifications/cancelled").await, 0);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
 #[tokio::test]
 async fn concurrent_sse_resumes_track_last_event_id_per_post_response() {
-    let _environment = ENV_LOCK.lock().await;
-    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
-    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-    let server = FixtureServer::concurrent_resumable_sse().await;
+    let _environment = test_env().await;
+    let server = FixtureServer::start(ListResponse::ConcurrentResumableSse).await;
     let client = McpClient::connect(&server.config()).await.unwrap();
     client.initialize().await.unwrap();
 
@@ -1603,5 +1371,4 @@ async fn concurrent_sse_resumes_track_last_event_id_per_post_response() {
     assert!(first.is_ok(), "first request failed: {first:?}");
     assert!(second.is_ok(), "second request failed: {second:?}");
     assert_eq!(server.count_method("GET").await, 2);
-    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }

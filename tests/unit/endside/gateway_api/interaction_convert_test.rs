@@ -28,45 +28,33 @@ fn hooker_source() -> InteractionSource {
     }
 }
 
+/// Decision table for the Choice flag/hint mapping: the flag maps
+/// faithfully for every source (permission backends only accept their
+/// exact option strings), while the type-answer hint is exclusively for
+/// Tool-sourced requests with custom input allowed.
 #[test]
-fn choice_flag_is_mapped_faithfully_for_tool_source_too() {
-    // The always-allow guarantee lives in the executor; a Tool-sourced `false`
-    // (none exists today) must be honored, not silently widened.
-    let request = choice_request(false, Some(ask_user_source()));
-    let prompt = build_prompt_request(&request);
-    assert!(!prompt.allow_custom_input);
-    assert!(prompt.custom_input_hint.is_none());
-}
-
-#[test]
-fn tool_choice_with_custom_input_uses_type_answer_hint() {
-    let request = choice_request(true, Some(ask_user_source()));
-    let prompt = build_prompt_request(&request);
-    assert!(prompt.allow_custom_input);
-    assert_eq!(prompt.custom_input_hint.as_deref(), Some(TYPE_ANSWER_HINT));
-}
-
-#[test]
-fn permission_style_choice_keeps_custom_input_disabled() {
-    // Permission backends only accept their exact option strings.
-    let request = choice_request(false, None);
-    let prompt = build_prompt_request(&request);
-    assert!(!prompt.allow_custom_input);
-    assert!(prompt.custom_input_hint.is_none());
-}
-
-#[test]
-fn non_tool_sources_keep_flag_semantics_and_default_hint() {
-    for source in [Some(hooker_source()), Some(InteractionSource::System), None] {
-        let enabled = choice_request(true, source.clone());
-        let prompt = build_prompt_request(&enabled);
-        assert!(prompt.allow_custom_input);
-        assert!(prompt.custom_input_hint.is_none());
-
-        let disabled = choice_request(false, source);
-        let prompt = build_prompt_request(&disabled);
-        assert!(!prompt.allow_custom_input);
-        assert!(prompt.custom_input_hint.is_none());
+fn build_prompt_request_choice_flag_and_hint_follow_the_source() {
+    for (source, allow, expect_hint) in [
+        // Tool + custom input → type-answer hint.
+        (Some(ask_user_source()), true, true),
+        // A Tool-sourced `false` (none exists today) must be honored, not
+        // silently widened: the always-allow guarantee lives in the executor.
+        (Some(ask_user_source()), false, false),
+        // Non-tool sources keep the flag semantics but never the hint.
+        (Some(hooker_source()), true, false),
+        (Some(hooker_source()), false, false),
+        (Some(InteractionSource::System), true, false),
+        (Some(InteractionSource::System), false, false),
+        (None, true, false),
+        (None, false, false),
+    ] {
+        let request = choice_request(allow, source);
+        let prompt = build_prompt_request(&request);
+        assert_eq!(prompt.allow_custom_input, allow);
+        assert_eq!(
+            prompt.custom_input_hint.as_deref(),
+            expect_hint.then_some(TYPE_ANSWER_HINT)
+        );
     }
 }
 
@@ -105,40 +93,26 @@ fn single_result(
     }
 }
 
+/// Decision table for `map_response` on Choice requests: a typed answer
+/// submitted from the supplement box wins; a blank supplement falls back
+/// to the selected option; residue typed in the box but submitted from
+/// the list must not override the selection.
 #[test]
-fn choice_response_prefers_typed_answer_over_selected_option() {
-    let request = choice_request(false, None);
-    let result = single_result("a", Some("my own answer".to_string()), true);
-    match map_response(&request, result) {
-        Some(InteractionResponse::Choice { value }) => {
-            assert_eq!(value.as_deref(), Some("my own answer"));
+fn choice_response_maps_single_result_by_submission_origin() {
+    // (choice_id, supplement, submitted_from_supplement, expected value)
+    for (choice_id, supplement, from_supplement, expected) in [
+        ("a", Some("my own answer"), true, "my own answer"),
+        ("b", None, true, "b"),
+        ("a", Some("stale residue"), false, "a"),
+    ] {
+        let request = choice_request(false, Some(ask_user_source()));
+        let result = single_result(choice_id, supplement.map(str::to_string), from_supplement);
+        match map_response(&request, result) {
+            Some(InteractionResponse::Choice { value }) => {
+                assert_eq!(value.as_deref(), Some(expected));
+            }
+            other => panic!("expected Choice response, got {:?}", other),
         }
-        other => panic!("expected Choice response, got {:?}", other),
-    }
-}
-
-#[test]
-fn choice_response_falls_back_to_selected_option_when_answer_blank() {
-    let request = choice_request(false, None);
-    let result = single_result("b", None, true);
-    match map_response(&request, result) {
-        Some(InteractionResponse::Choice { value }) => {
-            assert_eq!(value.as_deref(), Some("b"));
-        }
-        other => panic!("expected Choice response, got {:?}", other),
-    }
-}
-
-#[test]
-fn choice_response_ignores_supplement_residue_when_list_selection_submitted() {
-    let request = choice_request(false, Some(ask_user_source()));
-    // Typed in the box, then submitted from the list: residue must not win.
-    let result = single_result("a", Some("stale residue".to_string()), false);
-    match map_response(&request, result) {
-        Some(InteractionResponse::Choice { value }) => {
-            assert_eq!(value.as_deref(), Some("a"));
-        }
-        other => panic!("expected Choice response, got {:?}", other),
     }
 }
 

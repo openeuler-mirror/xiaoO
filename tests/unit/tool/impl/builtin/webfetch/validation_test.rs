@@ -1,180 +1,109 @@
 use super::*;
 use crate::r#impl::builtin::webfetch::input::WebFetchFormat;
 
+/// SSRF guard: only public addresses may be fetched. Loopback (v4/v6),
+/// RFC1918 private ranges, link-local (incl. the cloud metadata endpoint),
+/// unspecified, and IPv4-mapped IPv6 addresses must all be blocked.
 #[test]
-fn is_ip_blocks_loopback_ipv4() {
-    assert!(is_ip_blocked(IpAddr::V4("127.0.0.1".parse().unwrap())));
-    assert!(is_ip_blocked(IpAddr::V4("127.0.0.2".parse().unwrap())));
-    assert!(is_ip_blocked(IpAddr::V4(
-        "127.255.255.255".parse().unwrap()
-    )));
+fn is_ip_blocks_non_public_addresses() {
+    // (address, expected)
+    let cases = [
+        // loopback v4
+        ("127.0.0.1", true),
+        ("127.0.0.2", true),
+        ("127.255.255.255", true),
+        // loopback v6
+        ("::1", true),
+        // RFC1918 private (172.32.0.1 lies just outside the 172.16/12 range)
+        ("10.0.0.1", true),
+        ("10.255.255.255", true),
+        ("172.16.0.1", true),
+        ("172.31.255.255", true),
+        ("172.32.0.1", false),
+        ("192.168.0.1", true),
+        ("192.168.255.255", true),
+        // link-local, incl. the cloud metadata endpoint
+        ("169.254.169.254", true),
+        ("169.254.1.1", true),
+        ("fe80::1", true),
+        // unspecified
+        ("0.0.0.0", true),
+        ("::", true),
+        // IPv4-mapped IPv6 must not bypass the v4 checks
+        ("::ffff:127.0.0.1", true),
+        ("::ffff:10.0.0.1", true),
+        // public addresses stay reachable
+        ("8.8.8.8", false),
+        ("1.1.1.1", false),
+        ("2001:4860:4860::8888", false),
+    ];
+    for (address, blocked) in cases {
+        let ip: IpAddr = address.parse().unwrap();
+        assert_eq!(is_ip_blocked(ip), blocked, "{address}");
+    }
 }
 
+/// extract_host: scheme, port, and userinfo are stripped; IPv4 and bracketed
+/// IPv6 literals are kept verbatim.
 #[test]
-fn is_ip_blocks_loopback_ipv6() {
-    assert!(is_ip_blocked(IpAddr::V6("::1".parse().unwrap())));
+fn extract_host_normalizes_urls() {
+    // (url, expected host)
+    let cases = [
+        // scheme and path stripped
+        ("https://example.com/path", "example.com"),
+        ("http://example.com", "example.com"),
+        // port stripped
+        ("https://example.com:443/path", "example.com"),
+        ("http://example.com:8080", "example.com"),
+        // IPv4 literals kept
+        ("http://127.0.0.1:8080/path", "127.0.0.1"),
+        ("http://192.168.1.1/api", "192.168.1.1"),
+        // bracketed IPv6 literals kept
+        ("http://[::1]:8080/", "[::1]"),
+        ("http://[::ffff:127.0.0.1]/path", "[::ffff:127.0.0.1]"),
+        // userinfo stripped
+        ("http://user:pass@example.com/path", "example.com"),
+    ];
+    for (url, expected) in cases {
+        assert_eq!(extract_host(url), expected, "{url}");
+    }
 }
 
+/// URLs pointing at non-public endpoints (loopback, cloud metadata, private
+/// ranges) must be rejected with URL_BLOCKED_IP.
 #[test]
-fn is_ip_blocks_rfc1918_private() {
-    assert!(is_ip_blocked(IpAddr::V4("10.0.0.1".parse().unwrap())));
-    assert!(is_ip_blocked(IpAddr::V4("10.255.255.255".parse().unwrap())));
-
-    assert!(is_ip_blocked(IpAddr::V4("172.16.0.1".parse().unwrap())));
-    assert!(is_ip_blocked(IpAddr::V4("172.31.255.255".parse().unwrap())));
-    assert!(!is_ip_blocked(IpAddr::V4("172.32.0.1".parse().unwrap())));
-    assert!(is_ip_blocked(IpAddr::V4("192.168.0.1".parse().unwrap())));
-    assert!(is_ip_blocked(IpAddr::V4(
-        "192.168.255.255".parse().unwrap()
-    )));
+fn validate_url_blocks_non_public_endpoints() {
+    for url in [
+        "http://127.0.0.1:8080/admin",
+        // cloud metadata endpoint
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[::1]/admin",
+        "http://192.168.1.1/secret",
+    ] {
+        let input = WebFetchInput {
+            url: url.to_string(),
+            format: WebFetchFormat::Text,
+            timeout: None,
+        };
+        let result = validate_url(&input);
+        assert!(!result.result, "{url}");
+        assert_eq!(result.error_code, Some(error_code::URL_BLOCKED_IP), "{url}");
+    }
 }
 
+/// Public URLs and plain hostnames (resolved later, not at validation) pass.
 #[test]
-fn is_ip_blocks_link_local() {
-    assert!(is_ip_blocked(IpAddr::V4(
-        "169.254.169.254".parse().unwrap()
-    )));
-    assert!(is_ip_blocked(IpAddr::V4("169.254.1.1".parse().unwrap())));
-
-    assert!(is_ip_blocked(IpAddr::V6("fe80::1".parse().unwrap())));
-}
-
-#[test]
-fn is_ip_blocks_unspecified() {
-    assert!(is_ip_blocked(IpAddr::V4("0.0.0.0".parse().unwrap())));
-    assert!(is_ip_blocked(IpAddr::V6("::".parse().unwrap())));
-}
-
-#[test]
-fn is_ip_blocks_ipv4_mapped_ipv6() {
-    assert!(is_ip_blocked(IpAddr::V6(
-        "::ffff:127.0.0.1".parse().unwrap()
-    )));
-    assert!(is_ip_blocked(IpAddr::V6(
-        "::ffff:10.0.0.1".parse().unwrap()
-    )));
-}
-
-#[test]
-fn is_ip_allows_public_ips() {
-    assert!(!is_ip_blocked(IpAddr::V4("8.8.8.8".parse().unwrap())));
-    assert!(!is_ip_blocked(IpAddr::V4("1.1.1.1".parse().unwrap())));
-    assert!(!is_ip_blocked(IpAddr::V6(
-        "2001:4860:4860::8888".parse().unwrap()
-    )));
-}
-
-#[test]
-fn extract_host_strips_scheme_and_path() {
-    assert_eq!(extract_host("https://example.com/path"), "example.com");
-    assert_eq!(extract_host("http://example.com"), "example.com");
-}
-
-#[test]
-fn extract_host_strips_port() {
-    assert_eq!(extract_host("https://example.com:443/path"), "example.com");
-    assert_eq!(extract_host("http://example.com:8080"), "example.com");
-}
-
-#[test]
-fn extract_host_keeps_ipv4_literal() {
-    assert_eq!(extract_host("http://127.0.0.1:8080/path"), "127.0.0.1");
-    assert_eq!(extract_host("http://192.168.1.1/api"), "192.168.1.1");
-}
-
-#[test]
-fn extract_host_keeps_bracketed_ipv6_literal() {
-    assert_eq!(extract_host("http://[::1]:8080/"), "[::1]");
-    assert_eq!(
-        extract_host("http://[::ffff:127.0.0.1]/path"),
-        "[::ffff:127.0.0.1]"
-    );
-}
-
-#[test]
-fn extract_host_strips_userinfo() {
-    assert_eq!(
-        extract_host("http://user:pass@example.com/path"),
-        "example.com"
-    );
-}
-
-#[test]
-fn validate_url_blocks_loopback() {
-    let input = WebFetchInput {
-        url: "http://127.0.0.1:8080/admin".to_string(),
-        format: WebFetchFormat::Text,
-        timeout: None,
-    };
-    let result = validate_url(&input);
-    assert!(!result.result);
-    assert_eq!(result.error_code, Some(error_code::URL_BLOCKED_IP));
-}
-
-#[test]
-fn validate_url_blocks_aws_metadata() {
-    let input = WebFetchInput {
-        url: "http://169.254.169.254/latest/meta-data/".to_string(),
-        format: WebFetchFormat::Text,
-        timeout: None,
-    };
-    let result = validate_url(&input);
-    assert!(!result.result);
-    assert_eq!(result.error_code, Some(error_code::URL_BLOCKED_IP));
-}
-
-#[test]
-fn validate_url_blocks_ipv6_loopback() {
-    let input = WebFetchInput {
-        url: "http://[::1]/admin".to_string(),
-        format: WebFetchFormat::Text,
-        timeout: None,
-    };
-    let result = validate_url(&input);
-    assert!(!result.result);
-    assert_eq!(result.error_code, Some(error_code::URL_BLOCKED_IP));
-}
-
-#[test]
-fn validate_url_blocks_rfc1918() {
-    let input = WebFetchInput {
-        url: "http://192.168.1.1/secret".to_string(),
-        format: WebFetchFormat::Text,
-        timeout: None,
-    };
-    let result = validate_url(&input);
-    assert!(!result.result);
-    assert_eq!(result.error_code, Some(error_code::URL_BLOCKED_IP));
-}
-
-#[test]
-fn validate_url_allows_public_urls() {
-    let input = WebFetchInput {
-        url: "https://example.com/page".to_string(),
-        format: WebFetchFormat::Text,
-        timeout: None,
-    };
-    let result = validate_url(&input);
-    assert!(result.result);
-}
-
-#[test]
-fn validate_url_allows_public_ip() {
-    let input = WebFetchInput {
-        url: "https://8.8.8.8".to_string(),
-        format: WebFetchFormat::Text,
-        timeout: None,
-    };
-    let result = validate_url(&input);
-    assert!(result.result);
-}
-
-#[test]
-fn validate_hostname_passes_validation() {
-    let input = WebFetchInput {
-        url: "https://localhost/admin".to_string(),
-        format: WebFetchFormat::Text,
-        timeout: None,
-    };
-    assert!(validate_url(&input).result);
+fn validate_url_allows_public_urls_and_hostnames() {
+    for url in [
+        "https://example.com/page",
+        "https://8.8.8.8",
+        "https://localhost/admin",
+    ] {
+        let input = WebFetchInput {
+            url: url.to_string(),
+            format: WebFetchFormat::Text,
+            timeout: None,
+        };
+        assert!(validate_url(&input).result, "{url}");
+    }
 }

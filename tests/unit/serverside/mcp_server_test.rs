@@ -523,6 +523,21 @@ fn mcp_post(path: &str, token: Option<&str>, body: serde_json::Value) -> HttpReq
     builder.body(Body::from(body.to_string())).expect("request")
 }
 
+/// Standard JSON-RPC `initialize` request shared by the oneshot transport
+/// tests; the h2c system test keeps its inline copy (distinct clientInfo).
+fn initialize_body() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"}
+        }
+    })
+}
+
 fn parse_mcp_response(body: &[u8]) -> serde_json::Value {
     if let Ok(value) = serde_json::from_slice(body) {
         return value;
@@ -548,20 +563,7 @@ async fn mcp_transport_requires_endpoint_auth_and_lists_only_chat() {
 
     let unauthorized = router
         .clone()
-        .oneshot(mcp_post(
-            "/mcp/chatbot",
-            None,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "1"}
-                }
-            }),
-        ))
+        .oneshot(mcp_post("/mcp/chatbot", None, initialize_body()))
         .await
         .expect("response");
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
@@ -571,16 +573,7 @@ async fn mcp_transport_requires_endpoint_auth_and_lists_only_chat() {
         .oneshot(mcp_post(
             "/mcp/chatbot",
             Some("agent-token"),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "1"}
-                }
-            }),
+            initialize_body(),
         ))
         .await
         .expect("response");
@@ -591,16 +584,7 @@ async fn mcp_transport_requires_endpoint_auth_and_lists_only_chat() {
         .oneshot(mcp_post(
             "/mcp/chatbot",
             Some("chat-token"),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "1"}
-                }
-            }),
+            initialize_body(),
         ))
         .await
         .expect("initialize response");
@@ -708,20 +692,7 @@ async fn mcp_transport_requires_endpoint_auth_and_lists_only_chat() {
 async fn browser_origin_is_denied_by_default() {
     let workspace = TempDir::new().expect("workspace");
     let router = test_router(workspace.path());
-    let mut request = mcp_post(
-        "/mcp/chatbot",
-        Some("chat-token"),
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": {"name": "test", "version": "1"}
-            }
-        }),
-    );
+    let mut request = mcp_post("/mcp/chatbot", Some("chat-token"), initialize_body());
     request
         .headers_mut()
         .insert(header::ORIGIN, "https://example.com".parse().unwrap());
@@ -754,16 +725,7 @@ async fn agent_endpoint_lists_agent_tools_and_requires_workspace_for_new_call() 
         .oneshot(mcp_post(
             "/mcp/agent",
             Some("agent-token"),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-11-25",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "1"}
-                }
-            }),
+            initialize_body(),
         ))
         .await
         .expect("initialize response");

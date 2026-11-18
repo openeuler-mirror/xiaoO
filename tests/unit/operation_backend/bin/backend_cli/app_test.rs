@@ -7,6 +7,22 @@ fn config_for(workspace: &std::path::Path) -> OperationBackendConfig {
     )
 }
 
+/// Build the stdin envelope (backend section in the config-file `backend`
+/// shape + request in the classic `--json` shape, one document) and run it
+/// through `execute_request`.
+async fn execute_envelope(
+    workspace: &std::path::Path,
+    request: serde_json::Value,
+) -> Result<Value, OperationError> {
+    let envelope = json!({
+        "backend": { "kind": "local", "options": { "workspace_root": workspace.display().to_string() } },
+        "request": request
+    });
+    let parsed: RequestEnvelope = serde_json::from_value(envelope).expect("envelope parses");
+    let config = OperationBackendConfig::new(parsed.backend.kind, parsed.backend.options);
+    execute_request(config, parsed.request).await
+}
+
 #[test]
 fn parse_cli_args_supports_both_invocation_forms() {
     let config_form = parse_cli_args(&[
@@ -83,25 +99,19 @@ async fn stdin_envelope_write_bytes_round_trips_binary_content() {
     let payload: Vec<u8> = vec![0x00, 0xde, 0xad, 0xbe, 0xef, 0xff, 0x0a, 0x0d, b'\n'];
     let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
 
-    // Envelope: backend section (config-file `backend` shape) + request
-    // (classic `--json` shape) in one document.
-    let envelope = json!({
-        "backend": { "kind": "local", "options": { "workspace_root": workspace.display().to_string() } },
-        "request": {
+    execute_envelope(
+        &workspace,
+        json!({
             "kind": "write_bytes",
             "args": {
                 "path": workspace.join("blob.bin").display().to_string(),
                 "content_b64": encoded,
                 "mode": "atomic_overwrite"
             }
-        }
-    });
-    let parsed: RequestEnvelope = serde_json::from_value(envelope).expect("envelope parses");
-    let config = OperationBackendConfig::new(parsed.backend.kind, parsed.backend.options);
-
-    execute_request(config, parsed.request)
-        .await
-        .expect("envelope execution");
+        }),
+    )
+    .await
+    .expect("envelope execution");
 
     let on_disk = std::fs::read(workspace.join("blob.bin")).expect("written file");
     assert_eq!(on_disk, payload, "bytes must round-trip exactly");
@@ -114,19 +124,15 @@ async fn stdin_envelope_create_dir_all_creates_nested_directories() {
     std::fs::create_dir_all(&workspace).unwrap();
 
     let target = workspace.join("a/b/c");
-    let envelope = json!({
-        "backend": { "kind": "local", "options": { "workspace_root": workspace.display().to_string() } },
-        "request": {
+    execute_envelope(
+        &workspace,
+        json!({
             "kind": "create_dir_all",
             "args": { "path": target.display().to_string() }
-        }
-    });
-    let parsed: RequestEnvelope = serde_json::from_value(envelope).unwrap();
-    let config = OperationBackendConfig::new(parsed.backend.kind, parsed.backend.options);
-
-    execute_request(config, parsed.request)
-        .await
-        .expect("envelope execution");
+        }),
+    )
+    .await
+    .expect("envelope execution");
 
     assert!(target.is_dir());
 }
@@ -137,17 +143,15 @@ async fn envelope_write_bytes_without_content_reports_a_request_error() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
 
-    let envelope = json!({
-        "backend": { "kind": "local", "options": { "workspace_root": workspace.display().to_string() } },
-        "request": {
+    let error = execute_envelope(
+        &workspace,
+        json!({
             "kind": "write_bytes",
             "args": { "path": workspace.join("x.txt").display().to_string(), "mode": "overwrite" }
-        }
-    });
-    let parsed: RequestEnvelope = serde_json::from_value(envelope).unwrap();
-    let config = config_for(&workspace);
-
-    let error = execute_request(config, parsed.request).await.unwrap_err();
+        }),
+    )
+    .await
+    .unwrap_err();
     let message = error.to_string();
     assert!(
         message.contains("content"),
@@ -198,23 +202,19 @@ async fn envelope_large_base64_content_executes() {
 
     let payload = vec![0x5au8; 1_100_000];
     let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
-    let envelope = json!({
-        "backend": { "kind": "local", "options": { "workspace_root": workspace.display().to_string() } },
-        "request": {
+    execute_envelope(
+        &workspace,
+        json!({
             "kind": "write_bytes",
             "args": {
                 "path": workspace.join("big.bin").display().to_string(),
                 "content_b64": encoded,
                 "mode": "overwrite"
             }
-        }
-    });
-    let parsed: RequestEnvelope = serde_json::from_value(envelope).unwrap();
-    let config = OperationBackendConfig::new(parsed.backend.kind, parsed.backend.options);
-
-    execute_request(config, parsed.request)
-        .await
-        .expect("large envelope execution");
+        }),
+    )
+    .await
+    .expect("large envelope execution");
 
     assert_eq!(std::fs::read(workspace.join("big.bin")).unwrap(), payload);
 }

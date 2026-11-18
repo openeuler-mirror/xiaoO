@@ -122,177 +122,69 @@ fn leading_dash_pattern_is_guarded() {
     assert!(pattern_is_e_guarded(&args, "-n"));
 }
 
-/// Default head_limit=250 → `--max-count=251` (+1 sentinel).
+/// Content mode caps results with `--max-count` (rg) / `-m` (grep fallback)
+/// using one shared formula: `resolve_head_limit(head_limit) + offset + 1` —
+/// the +1 sentinel lets callers tell "exactly head_limit results" and
+/// "truncated" apart, and `offset` is included so paging works. `head_limit`
+/// is silently remapped when omitted (→250) or out of range (0 or
+/// > ABSOLUTE_HARD_CAP → 2000).
 #[test]
-fn rg_content_mode_adds_max_count_with_sentinel() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    let args = GrepExecutor::build_rg_args(&input, ".");
-    assert!(
-        has_pair(&args, "--max-count", "251"),
-        "default head_limit=250 → --max-count=251 (+1 sentinel)"
-    );
+fn content_mode_max_count_formula_is_shared_by_rg_and_grep() {
+    // (head_limit, offset, expected cap)
+    let cases: [(Option<u32>, Option<u32>, u32); 7] = [
+        // Default head_limit=250 → +1 sentinel.
+        (None, None, 251),
+        // User-supplied `head_limit` is honored.
+        (Some(50), None, 51),
+        // `head_limit == 0` (unlimited) → silently capped at ABSOLUTE_HARD_CAP=2000.
+        (Some(0), None, 2_001),
+        // `head_limit > ABSOLUTE_HARD_CAP` → capped at ABSOLUTE_HARD_CAP.
+        (Some(50_000), None, 2_001),
+        // head_limit=50 + offset=30 + 1 sentinel = 81.
+        (Some(50), Some(30), 81),
+        // Default head_limit=250 + offset=30 → 281.
+        (None, Some(30), 281),
+        // head_limit=0 → 2000, plus offset=5000 → 7001.
+        (Some(0), Some(5_000), 7_001),
+    ];
+    for (head_limit, offset, expected) in cases {
+        let mut grep_input = input("needle");
+        grep_input.output_mode = Some(OutputMode::Content);
+        grep_input.head_limit = head_limit;
+        grep_input.offset = offset;
+        let expected = expected.to_string();
+
+        let rg_args = GrepExecutor::build_rg_args(&grep_input, ".");
+        assert!(
+            has_pair(&rg_args, "--max-count", &expected),
+            "rg: head_limit={head_limit:?} offset={offset:?} → --max-count {expected}"
+        );
+
+        // The grep fallback path gets `-m` (per-file cap) mirroring rg's
+        // `--max-count`, with the same +1 sentinel semantics and the same
+        // ABSOLUTE_HARD_CAP remap for head_limit=0 or above the cap.
+        let grep_args = GrepExecutor::build_grep_args(&grep_input, ".");
+        assert!(
+            has_pair(&grep_args, "-m", &expected),
+            "grep: head_limit={head_limit:?} offset={offset:?} → -m {expected}"
+        );
+    }
 }
 
-/// User-supplied `head_limit` is honored.
+/// `--max-count` is only meaningful in content mode: count mode needs
+/// accurate per-file counts (`--max-count` would corrupt them), and
+/// FilesWithMatches lists the file after 1 match regardless.
 #[test]
-fn rg_content_mode_respects_user_head_limit() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    input.head_limit = Some(50);
-    let args = GrepExecutor::build_rg_args(&input, ".");
-    assert!(
-        has_pair(&args, "--max-count", "51"),
-        "user head_limit=50 → --max-count=51"
-    );
-}
-
-/// `head_limit=0` → silently capped at `ABSOLUTE_HARD_CAP=2000`.
-#[test]
-fn rg_content_mode_caps_unlimited_to_absolute_max_count() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    input.head_limit = Some(0);
-    let args = GrepExecutor::build_rg_args(&input, ".");
-    assert!(
-        has_pair(&args, "--max-count", "2001"),
-        "head_limit=0 → silently capped at ABSOLUTE_HARD_CAP=2000, so --max-count=2001"
-    );
-}
-
-/// `head_limit > ABSOLUTE_HARD_CAP` → capped at `ABSOLUTE_HARD_CAP`.
-#[test]
-fn rg_content_mode_caps_above_absolute_to_max_count() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    input.head_limit = Some(50_000);
-    let args = GrepExecutor::build_rg_args(&input, ".");
-    assert!(
-        has_pair(&args, "--max-count", "2001"),
-        "head_limit=50000 → silently capped at ABSOLUTE_HARD_CAP=2000"
-    );
-}
-
-/// Count mode needs accurate per-file counts; `--max-count` would
-/// corrupt them. Verify it's not applied.
-#[test]
-fn rg_count_mode_skips_max_count() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Count);
-    let args = GrepExecutor::build_rg_args(&input, ".");
-    assert!(
-        !args.iter().any(|a| a == "--max-count"),
-        "count mode must not cap per-file counts"
-    );
-}
-
-/// FilesWithMatches is a no-op for `--max-count` (rg lists the file
-/// after 1 match regardless) — verify we don't emit it there either.
-#[test]
-fn rg_files_with_matches_skips_max_count() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::FilesWithMatches);
-    let args = GrepExecutor::build_rg_args(&input, ".");
-    assert!(
-        !args.iter().any(|a| a == "--max-count"),
-        "files-with-matches doesn't need --max-count"
-    );
-}
-
-/// The grep fallback path gets `-m` (per-file cap) mirroring rg's
-/// `--max-count`. Same +1 sentinel semantics.
-#[test]
-fn grep_content_mode_adds_m_with_sentinel() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    let args = GrepExecutor::build_grep_args(&input, ".");
-    assert!(
-        has_pair(&args, "-m", "251"),
-        "default head_limit=250 → -m 251 (+1 sentinel)"
-    );
-}
-
-/// `head_limit == 0` on the grep fallback path is also silently
-/// remapped to `ABSOLUTE_HARD_CAP` — same hard cap as the rg path.
-#[test]
-fn grep_content_mode_caps_unlimited_to_absolute_m() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    input.head_limit = Some(0);
-    let args = GrepExecutor::build_grep_args(&input, ".");
-    assert!(
-        has_pair(&args, "-m", "2001"),
-        "head_limit=0 → silently capped at ABSOLUTE_HARD_CAP=2000, so -m 2001"
-    );
-}
-
-/// `--max-count` includes `offset` so paging works.
-#[test]
-fn rg_content_mode_max_count_includes_offset() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    input.head_limit = Some(50);
-    input.offset = Some(30);
-    let args = GrepExecutor::build_rg_args(&input, ".");
-    // head_limit=50 + offset=30 + 1 sentinel = 81
-    assert!(
-        has_pair(&args, "--max-count", "81"),
-        "head_limit=50 + offset=30 → --max-count=81 (head_limit + offset + 1)"
-    );
-}
-
-/// Default head_limit=250 + offset=30 → `--max-count=281`.
-#[test]
-fn rg_content_mode_max_count_default_head_limit_with_offset() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    input.offset = Some(30);
-    let args = GrepExecutor::build_rg_args(&input, ".");
-    assert!(
-        has_pair(&args, "--max-count", "281"),
-        "default head_limit=250 + offset=30 → --max-count=281"
-    );
-}
-
-/// Large offset + `head_limit=0` → `2000 + 5000 + 1 = 7001`.
-#[test]
-fn rg_content_mode_max_count_offset_with_capped_head_limit() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    input.head_limit = Some(0);
-    input.offset = Some(5_000);
-    let args = GrepExecutor::build_rg_args(&input, ".");
-    assert!(
-        has_pair(&args, "--max-count", "7001"),
-        "head_limit=0→2000 + offset=5000 → --max-count=7001"
-    );
-}
-
-/// `offset` included in `-m` on the grep fallback path too.
-#[test]
-fn grep_content_mode_m_includes_offset() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    input.head_limit = Some(50);
-    input.offset = Some(30);
-    let args = GrepExecutor::build_grep_args(&input, ".");
-    assert!(
-        has_pair(&args, "-m", "81"),
-        "head_limit=50 + offset=30 → -m 81 (head_limit + offset + 1)"
-    );
-}
-
-/// Default head_limit=250 + offset=30 → `-m 281`.
-#[test]
-fn grep_content_mode_m_default_head_limit_with_offset() {
-    let mut input = input("needle");
-    input.output_mode = Some(OutputMode::Content);
-    input.offset = Some(30);
-    let args = GrepExecutor::build_grep_args(&input, ".");
-    assert!(
-        has_pair(&args, "-m", "281"),
-        "default head_limit=250 + offset=30 → -m 281"
-    );
+fn rg_non_content_modes_skip_max_count() {
+    for mode in [OutputMode::Count, OutputMode::FilesWithMatches] {
+        let mut grep_input = input("needle");
+        grep_input.output_mode = Some(mode);
+        let args = GrepExecutor::build_rg_args(&grep_input, ".");
+        assert!(
+            !args.iter().any(|a| a == "--max-count"),
+            "{mode:?} must not emit --max-count"
+        );
+    }
 }
 
 /// `saturating_add` prevents overflow on huge `offset`.
@@ -354,55 +246,44 @@ fn resolve_head_limit_handles_all_branches() {
     assert_eq!(resolve_head_limit(&input), 50);
 }
 
-/// Simple truncation: `total_matches > want_k`.
+/// `files_with_matches_truncated` (head_limit, total_matches, want_k,
+/// collector_capped):
+/// - simple check: `total_matches > want_k`;
+/// - regression: `collector_capped` must OR into truncation when
+///   `want_k > max_keep` (so `total_matches` alone misses it);
+/// - `head_limit == 0` (unlimited) → never truncated.
 #[test]
-fn files_with_matches_truncated_simple_case() {
-    // head_limit=250, offset=0 → want_k=250. 300 stat'd matches.
-    // 300 > 250 → truncated. (collector_capped irrelevant here.)
-    assert!(GrepExecutor::files_with_matches_truncated(
-        250, 300, 250, false
-    ));
-    // Exactly at want_k → not truncated (all fit in heap).
-    assert!(!GrepExecutor::files_with_matches_truncated(
-        250, 250, 250, false
-    ));
-    // Below want_k → not truncated.
-    assert!(!GrepExecutor::files_with_matches_truncated(
-        250, 100, 250, false
-    ));
-}
-
-/// Regression: `collector_capped` must OR into truncation when
-/// `want_k > max_keep` (so `total_matches` alone misses it).
-#[test]
-fn files_with_matches_truncated_collector_capped_with_large_offset() {
-    // want_k=2250 > total_matches=2001, collector capped → truncated.
-    assert!(GrepExecutor::files_with_matches_truncated(
-        250, 2001, 2250, true
-    ));
-    // Same scenario but collector did NOT cap (actual == 2001
-    // exactly, stream ended naturally) → NOT truncated (the user
-    // sees all 2001 files, gets 1 after offset, but that's all
-    // there is — no more matches exist).
-    assert!(!GrepExecutor::files_with_matches_truncated(
-        250, 2001, 2250, false
-    ));
-    // Sanity: collector capped with small want_k → truncated via
-    // the simple check (total_matches > want_k already true).
-    assert!(GrepExecutor::files_with_matches_truncated(
-        250, 2001, 250, true
-    ));
-}
-
-/// `head_limit == 0` (unlimited) → never truncated.
-#[test]
-fn files_with_matches_truncated_unlimited_never_truncated() {
-    assert!(!GrepExecutor::files_with_matches_truncated(
-        0, 5000, 5000, true
-    ));
-    assert!(!GrepExecutor::files_with_matches_truncated(
-        0, 2001, 2001, true
-    ));
+fn files_with_matches_truncated_covers_all_signals() {
+    // (head_limit, total_matches, want_k, collector_capped, expected)
+    let cases: [(u32, usize, usize, bool, bool); 8] = [
+        // head_limit=250, offset=0 → want_k=250. 300 stat'd matches.
+        // 300 > 250 → truncated (collector_capped irrelevant here).
+        (250, 300, 250, false, true),
+        // Exactly at want_k → not truncated (all fit in heap).
+        (250, 250, 250, false, false),
+        // Below want_k → not truncated.
+        (250, 100, 250, false, false),
+        // want_k=2250 > total_matches=2001, collector capped → truncated.
+        (250, 2_001, 2_250, true, true),
+        // Same scenario but collector did NOT cap (actual == 2001 exactly,
+        // stream ended naturally) → NOT truncated (the user sees all 2001
+        // files, gets 1 after offset, but that's all there is — no more
+        // matches exist).
+        (250, 2_001, 2_250, false, false),
+        // Sanity: collector capped with small want_k → truncated via the
+        // simple check (total_matches > want_k already true).
+        (250, 2_001, 250, true, true),
+        // `head_limit == 0` (unlimited) → never truncated.
+        (0, 5_000, 5_000, true, false),
+        (0, 2_001, 2_001, true, false),
+    ];
+    for (head_limit, total, want_k, capped, expected) in cases {
+        assert_eq!(
+            GrepExecutor::files_with_matches_truncated(head_limit, total, want_k, capped),
+            expected,
+            "head_limit={head_limit} total_matches={total} want_k={want_k} capped={capped}"
+        );
+    }
 }
 
 /// Collector does NOT pre-skip `offset` at the stream level —

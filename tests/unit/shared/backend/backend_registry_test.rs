@@ -330,82 +330,54 @@ async fn refresh_heartbeats_touches_only_target_process() {
     assert_eq!(b.owner_heartbeat_ms, before_b);
 }
 
+/// Eviction eligibility is the OR of two independent escape hatches —
+/// all sessions idle, or the owner heartbeat gone stale. A running
+/// session with a live owner is not evictable.
 #[tokio::test]
-async fn is_evictable_when_owner_stale() {
-    let (_dir, registry) = temp_registry();
-    let key = SandboxCounterKey::new("e2b", "test-stale-owner");
-    let mut entry = BackendRegistryEntry::new(
-        "backend-stale".to_string(),
-        key,
-        vec!["session-1".to_string()],
-        "process-dead".to_string(),
-        "e2b-sandbox-stale".to_string(),
-        None,
-    );
-    // Session is running (not idle), but owner heartbeat is very old.
-    entry.update_session_status("session-1", "running", 1);
-    entry.owner_heartbeat_ms = current_time_ms().saturating_sub(60_000);
-    registry.register(entry).await.expect("register");
+async fn is_evictable_depends_on_idle_and_owner_staleness() {
+    // (session status, queue depth, owner heartbeat age, expected
+    // (idle, stale, evictable)) — the three rows cover the full truth
+    // table of the two escape hatches.
+    let cases = [
+        // Running session, but owner heartbeat is very old.
+        ("running", 1, 60_000, (false, true, true)),
+        // Idle sessions and a live owner.
+        ("idle", 0, 0, (true, false, true)),
+        // Running session with a live owner.
+        ("running", 1, 0, (false, false, false)),
+    ];
+    for (index, (status, queue_depth, heartbeat_age_ms, expected)) in cases.into_iter().enumerate()
+    {
+        let (_dir, registry) = temp_registry();
+        let key = SandboxCounterKey::new("e2b", "test-evictable");
+        let mut entry = BackendRegistryEntry::new(
+            format!("backend-evictable-{index}"),
+            key,
+            vec![format!("session-{index}")],
+            format!("process-{index}"),
+            format!("e2b-sandbox-{index}"),
+            None,
+        );
+        entry.update_session_status(&format!("session-{index}"), status, queue_depth);
+        if heartbeat_age_ms > 0 {
+            entry.owner_heartbeat_ms = current_time_ms().saturating_sub(heartbeat_age_ms);
+        }
+        registry.register(entry).await.expect("register");
 
-    let retrieved = registry
-        .get_entry("backend-stale")
-        .await
-        .expect("get")
-        .expect("has entry");
-    // Running session → not idle, but stale owner → evictable.
-    assert!(!retrieved.is_all_sessions_idle());
-    assert!(retrieved.is_owner_stale(30_000));
-    assert!(retrieved.is_evictable(30_000));
-}
-
-#[tokio::test]
-async fn is_evictable_when_idle_and_owner_alive() {
-    let (_dir, registry) = temp_registry();
-    let key = SandboxCounterKey::new("e2b", "test-alive-owner");
-    let mut entry = BackendRegistryEntry::new(
-        "backend-alive".to_string(),
-        key,
-        vec!["session-1".to_string()],
-        "process-alive".to_string(),
-        "e2b-sandbox-alive".to_string(),
-        None,
-    );
-    entry.update_session_status("session-1", "idle", 0);
-    registry.register(entry).await.expect("register");
-
-    let retrieved = registry
-        .get_entry("backend-alive")
-        .await
-        .expect("get")
-        .expect("has entry");
-    assert!(retrieved.is_all_sessions_idle());
-    assert!(!retrieved.is_owner_stale(30_000));
-    assert!(retrieved.is_evictable(30_000));
-}
-
-#[tokio::test]
-async fn not_evictable_when_running_and_owner_alive() {
-    let (_dir, registry) = temp_registry();
-    let key = SandboxCounterKey::new("e2b", "test-busy-owner");
-    let mut entry = BackendRegistryEntry::new(
-        "backend-busy".to_string(),
-        key,
-        vec!["session-1".to_string()],
-        "process-alive".to_string(),
-        "e2b-sandbox-busy".to_string(),
-        None,
-    );
-    entry.update_session_status("session-1", "running", 1);
-    registry.register(entry).await.expect("register");
-
-    let retrieved = registry
-        .get_entry("backend-busy")
-        .await
-        .expect("get")
-        .expect("has entry");
-    assert!(!retrieved.is_all_sessions_idle());
-    assert!(!retrieved.is_owner_stale(30_000));
-    assert!(!retrieved.is_evictable(30_000));
+        let retrieved = registry
+            .get_entry(&format!("backend-evictable-{index}"))
+            .await
+            .expect("get")
+            .expect("has entry");
+        let (idle, stale, evictable) = expected;
+        assert_eq!(
+            retrieved.is_all_sessions_idle(),
+            idle,
+            "case {index}: status={status}, heartbeat_age_ms={heartbeat_age_ms}"
+        );
+        assert_eq!(retrieved.is_owner_stale(30_000), stale, "case {index}");
+        assert_eq!(retrieved.is_evictable(30_000), evictable, "case {index}");
+    }
 }
 
 /// Regression test for the root-turn race (apps/shared/src/gateway/

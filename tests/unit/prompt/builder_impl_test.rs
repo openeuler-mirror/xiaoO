@@ -43,37 +43,20 @@ impl ToolSpecView for TestToolSpec {
     }
 }
 
-#[test]
-fn build_projects_tools_into_llm_request() {
-    let builder = PromptBuilderImpl;
-    let input = PromptBuildInput {
-        system_prompt: "You are a coding agent.".to_string(),
-        messages: vec![ChatMessage::user("hello")],
-        visible_tools: vec![std::sync::Arc::new(TestToolSpec {
-            id: ToolId("search".to_string()),
-            name: ToolName("search".to_string()),
-            description: "search docs".to_string(),
-            input_schema: InputSchemaRef {
-                schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}}
-                }),
-            },
-        }) as std::sync::Arc<dyn ToolSpecView>],
-        skill_summaries: vec![SkillSummary {
-            skill_id: "skill".to_string(),
-            description: "do thing".to_string(),
-            when_to_use: None,
-            paths: Vec::new(),
-            tags: Vec::new(),
-            disable_model_invocation: false,
-        }]
-        .into(),
-        memory_snippets: vec![MemorySnippet {
-            source: "memory".to_string(),
-            content: "remember this".to_string(),
-            relevance_score: 0.9,
-        }],
+/// Common `PromptBuildInput` fixture: standard environment, budget, and
+/// turn count; per-test fields (tools / skills / turn_count / budget) are
+/// overridden at the call site.
+fn build_input(
+    system_prompt: &str,
+    messages: Vec<ChatMessage>,
+    memory_snippets: Vec<MemorySnippet>,
+) -> PromptBuildInput {
+    PromptBuildInput {
+        system_prompt: system_prompt.to_string(),
+        messages,
+        visible_tools: Vec::new(),
+        skill_summaries: Vec::new().into(),
+        memory_snippets,
         environment: EnvironmentInfo {
             model: "gpt-test".to_string(),
             cwd: "/tmp".to_string(),
@@ -89,7 +72,41 @@ fn build_projects_tools_into_llm_request() {
             reserved_for_system: 128,
             hard_limit_ratio: 0.9,
         },
-    };
+    }
+}
+
+#[test]
+fn build_projects_tools_into_llm_request() {
+    let builder = PromptBuilderImpl;
+    let mut input = build_input(
+        "You are a coding agent.",
+        vec![ChatMessage::user("hello")],
+        vec![MemorySnippet {
+            source: "memory".to_string(),
+            content: "remember this".to_string(),
+            relevance_score: 0.9,
+        }],
+    );
+    input.visible_tools = vec![std::sync::Arc::new(TestToolSpec {
+        id: ToolId("search".to_string()),
+        name: ToolName("search".to_string()),
+        description: "search docs".to_string(),
+        input_schema: InputSchemaRef {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}}
+            }),
+        },
+    }) as std::sync::Arc<dyn ToolSpecView>];
+    input.skill_summaries = vec![SkillSummary {
+        skill_id: "skill".to_string(),
+        description: "do thing".to_string(),
+        when_to_use: None,
+        paths: Vec::new(),
+        tags: Vec::new(),
+        disable_model_invocation: false,
+    }]
+    .into();
 
     let result = futures::executor::block_on(builder.build(input)).unwrap();
 
@@ -110,16 +127,14 @@ fn build_projects_tools_into_llm_request() {
 #[test]
 fn build_appends_volatile_context_as_trailing_reminder_message() {
     let builder = PromptBuilderImpl;
-    let input = PromptBuildInput {
-        system_prompt: "You are a coding agent.".to_string(),
-        messages: vec![
+    let mut input = build_input(
+        "You are a coding agent.",
+        vec![
             ChatMessage::user("hello"),
             ChatMessage::assistant("working on it", 0),
             ChatMessage::user("continue"),
         ],
-        visible_tools: Vec::new(),
-        skill_summaries: Vec::new().into(),
-        memory_snippets: vec![
+        vec![
             MemorySnippet {
                 source: "horizon".to_string(),
                 content: "- turn: 9/10 (1 remaining)".to_string(),
@@ -131,22 +146,8 @@ fn build_appends_volatile_context_as_trailing_reminder_message() {
                 relevance_score: 0.9,
             },
         ],
-        environment: EnvironmentInfo {
-            model: "gpt-test".to_string(),
-            cwd: "/tmp".to_string(),
-            workspace_root: None,
-            date: "2026-04-10".to_string(),
-            agent_id: "main".to_string(),
-        },
-        feature_flags: FeatureFlags::default(),
-        turn_count: 9,
-        budget: TokenBudgetConfig {
-            total_budget: 1024,
-            reserved_for_output: 256,
-            reserved_for_system: 128,
-            hard_limit_ratio: 0.9,
-        },
-    };
+    );
+    input.turn_count = 9;
 
     let result = futures::executor::block_on(builder.build(input)).unwrap();
     let messages = &result.request.messages;
@@ -185,27 +186,17 @@ fn build_appends_volatile_context_as_trailing_reminder_message() {
 #[test]
 fn build_fails_fast_when_budget_is_zero() {
     let builder = PromptBuilderImpl;
-    let input = PromptBuildInput {
-        system_prompt: "You are a coding agent.".to_string(),
-        messages: vec![ChatMessage::user("hello")],
-        visible_tools: Vec::new(),
-        skill_summaries: Vec::new().into(),
-        memory_snippets: Vec::new(),
-        environment: EnvironmentInfo {
-            model: "gpt-test".to_string(),
-            cwd: String::new(),
-            workspace_root: None,
-            date: "2026-04-10".to_string(),
-            agent_id: "main".to_string(),
-        },
-        feature_flags: FeatureFlags::default(),
-        turn_count: 1,
-        budget: TokenBudgetConfig {
-            total_budget: 0,
-            reserved_for_output: 0,
-            reserved_for_system: 0,
-            hard_limit_ratio: 1.0,
-        },
+    let mut input = build_input(
+        "You are a coding agent.",
+        vec![ChatMessage::user("hello")],
+        Vec::new(),
+    );
+    input.environment.cwd = String::new();
+    input.budget = TokenBudgetConfig {
+        total_budget: 0,
+        reserved_for_output: 0,
+        reserved_for_system: 0,
+        hard_limit_ratio: 1.0,
     };
 
     let err = match futures::executor::block_on(builder.build(input)) {
@@ -219,33 +210,17 @@ fn build_fails_fast_when_budget_is_zero() {
 #[test]
 fn build_filters_out_existing_system_messages() {
     let builder = PromptBuilderImpl;
-    let input = PromptBuildInput {
-        system_prompt: "New system prompt".to_string(),
-        messages: vec![
+    let mut input = build_input(
+        "New system prompt",
+        vec![
             ChatMessage::system("Old system prompt 1"),
             ChatMessage::user("hello"),
             ChatMessage::system("Old system prompt 2"),
             ChatMessage::assistant("response", 0),
         ],
-        visible_tools: Vec::new(),
-        skill_summaries: Vec::new().into(),
-        memory_snippets: Vec::new(),
-        environment: EnvironmentInfo {
-            model: "gpt-test".to_string(),
-            cwd: String::new(),
-            workspace_root: None,
-            date: "2026-04-10".to_string(),
-            agent_id: "main".to_string(),
-        },
-        feature_flags: FeatureFlags::default(),
-        turn_count: 1,
-        budget: TokenBudgetConfig {
-            total_budget: 1024,
-            reserved_for_output: 256,
-            reserved_for_system: 128,
-            hard_limit_ratio: 0.9,
-        },
-    };
+        Vec::new(),
+    );
+    input.environment.cwd = String::new();
 
     let result = futures::executor::block_on(builder.build(input)).unwrap();
 

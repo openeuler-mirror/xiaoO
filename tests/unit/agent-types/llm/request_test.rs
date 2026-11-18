@@ -33,3 +33,16 @@ fn reasoning_effort_parses_aliases() {
 fn reasoning_effort_defaults_to_provider_default() {
     assert_eq!(ReasoningEffort::default(), ReasoningEffort::Default);
 }
+
+#[test]
+fn reasoning_effort_display_strings_are_stable() {
+    // Display contract: the TUI status bar renders `Think(Ctrl+T) <value>`
+    // with these exact strings, and E2E suites assert on them. A change
+    // here is a user-visible breaking change, not a refactoring detail.
+    assert_eq!(ReasoningEffort::Default.as_str(), "default");
+    assert_eq!(ReasoningEffort::Off.as_str(), "off");
+    assert_eq!(ReasoningEffort::High.as_str(), "high");
+    assert_eq!(ReasoningEffort::Max.as_str(), "max");
+    // Display delegates to as_str — this is the text the status bar shows.
+    assert_eq!(ReasoningEffort::Max.to_string(), "max");
+}
