@@ -42,7 +42,6 @@ WORKDIR /build
 # first, then copy real source. Code changes won't invalidate the fetch layer
 # — only Cargo.toml/Cargo.lock changes will.
 COPY Cargo.toml Cargo.lock ./
-COPY apps/acp/Cargo.toml              apps/acp/
 COPY apps/shared/Cargo.toml           apps/shared/
 COPY apps/endside/Cargo.toml          apps/endside/
 COPY apps/serverside/Cargo.toml       apps/serverside/
@@ -97,13 +96,12 @@ COPY . .
 # Build the application binaries. Without buildx cache mounts, target/ is rebuilt
 # from scratch each docker build — but fetch above ensures deps are already
 # downloaded, so only compilation work remains.
-RUN cargo build --release -p xiaoo-acp -p xiaoo-endside -p xiaoo-serverside -p moirai
+RUN cargo build --release -p xiaoo-endside -p xiaoo-serverside -p moirai
 
 # ── Stage packaged files at /staging/ ────────────────────────────────────────
 
 # Binaries → /usr/bin/
 RUN mkdir -p /staging/usr/bin && \
-    cp /build/target/release/xiaoo-acp     /staging/usr/bin/xiaoo-acp && \
     cp /build/target/release/xiaoo         /staging/usr/bin/xiaoo && \
     cp /build/target/release/xiaoo-daemon  /staging/usr/bin/xiaoo-daemon && \
     cp /build/target/release/moirai        /staging/usr/bin/moirai

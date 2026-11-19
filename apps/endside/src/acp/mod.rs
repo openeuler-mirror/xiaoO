@@ -1,13 +1,12 @@
 mod server;
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
 use anyhow::{bail, ensure, Result};
 use serde::Deserialize;
 use xiaoo_shared::gateway::controlled_session::ControlledModelProfile;
 
-const VERSION: &str = env!("XIAOO_ACP_VERSION");
-const COMMIT: &str = env!("XIAOO_ACP_COMMIT");
+use crate::build_identity;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,25 +40,23 @@ impl Config {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let mut args = std::env::args_os().skip(1);
+pub(crate) async fn run(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     match (
         args.next().as_deref().and_then(|arg| arg.to_str()),
         args.next(),
         args.next(),
     ) {
-        (Some("--version"), None, None) => println!("{VERSION}"),
+        (Some("--version"), None, None) => build_identity::print_version(false),
         (Some("--version"), Some(verbose), None) if verbose == "--verbose" => {
-            println!("xiaoo-acp {VERSION} (commit {COMMIT})");
+            build_identity::print_version(true);
         }
         (Some("--help"), None, None) => {
-            println!("Usage: xiaoo-acp --config FILE | --version [--verbose]");
+            println!("Usage: xiaoo acp --config FILE | --version [--verbose]");
         }
         (Some("--config"), Some(path), None) => {
             server::serve(Config::load(PathBuf::from(path))?).await?;
         }
-        _ => bail!("usage: xiaoo-acp --config FILE | --version [--verbose]"),
+        _ => bail!("usage: xiaoo acp --config FILE | --version [--verbose]"),
     }
     Ok(())
 }

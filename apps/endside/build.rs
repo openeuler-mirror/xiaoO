@@ -13,12 +13,9 @@ fn main() {
             );
             (version, commit.to_ascii_lowercase())
         }
-        (None, None) => (
-            concat!(env!("CARGO_PKG_VERSION"), "-dev").to_string(),
-            "unknown".to_string(),
-        ),
+        (None, None) => (env!("CARGO_PKG_VERSION").to_string(), "unknown".to_string()),
         _ => panic!("XIAOO_RELEASE_VERSION and XIAOO_BUILD_COMMIT must be set together"),
     };
-    println!("cargo:rustc-env=XIAOO_ACP_VERSION={version}");
-    println!("cargo:rustc-env=XIAOO_ACP_COMMIT={commit}");
+    println!("cargo:rustc-env=XIAOO_VERSION={version}");
+    println!("cargo:rustc-env=XIAOO_COMMIT={commit}");
 }

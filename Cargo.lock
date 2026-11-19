@@ -5097,24 +5097,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xiaoo-acp"
-version = "0.1.0"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml",
- "uuid",
- "xiaoo-api",
- "xiaoo-shared",
-]
-
-[[package]]
 name = "xiaoo-api"
 version = "0.1.0"
 dependencies = [
@@ -5161,6 +5143,7 @@ dependencies = [
 name = "xiaoo-endside"
 version = "0.1.0"
 dependencies = [
+ "agent-client-protocol",
  "anyhow",
  "arboard",
  "async-trait",
@@ -5173,6 +5156,7 @@ dependencies = [
  "mockito",
  "ratatui",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "shellexpand",

@@ -26,7 +26,8 @@ use xiaoo_api::{
 };
 use xiaoo_shared::gateway::{controlled_session::ControlledTextSession, TurnOutcome};
 
-use crate::{Config, COMMIT, VERSION};
+use super::Config;
+use crate::build_identity::{COMMIT, VERSION};
 
 const PROFILE_META: &str = "org.openeuler.xiaoo/acp";
 const BUILD_META: &str = "org.openeuler.xiaoo/build";
@@ -93,7 +94,7 @@ impl Server {
             ));
         Ok(acp::InitializeResponse::new(ProtocolVersion::V1)
             .agent_capabilities(capabilities)
-            .agent_info(acp::Implementation::new("xiaoo-acp", VERSION))
+            .agent_info(acp::Implementation::new("xiaoo", VERSION))
             .meta(meta(BUILD_META, json!({"commit": COMMIT}))))
     }
 
@@ -463,7 +464,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let close = Arc::clone(&server);
     let agent = Agent
         .builder()
-        .name("xiaoo-acp")
+        .name("xiaoo")
         .on_receive_request(
             async move |request: acp::InitializeRequest,
                         responder: Responder<acp::InitializeResponse>,

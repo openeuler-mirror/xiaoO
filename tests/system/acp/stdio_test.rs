@@ -135,13 +135,14 @@ fn contents(path: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 fn spawn_agent(config: &Path, cwd: &Path, home: &Path) -> Agent {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_xiaoo-acp"))
-        .arg("--config")
+    let mut child = Command::new(env!("CARGO_BIN_EXE_xiaoo"))
+        .args(["acp", "--config"])
         .arg(config)
         .current_dir(cwd)
         .env_clear()
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
+        .env("XIAOO_CONFIG", home.join("unexpected-default-config.toml"))
         .env("ACP_TEST_KEY", "isolated-test-token")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -184,22 +185,6 @@ async fn controlled_text_session_over_stdio() {
     )
     .unwrap();
 
-    let binary = env!("CARGO_BIN_EXE_xiaoo-acp");
-    let version = Command::new(binary)
-        .arg("--version")
-        .output()
-        .await
-        .unwrap();
-    assert!(version.status.success());
-    let version = std::str::from_utf8(&version.stdout).unwrap().trim();
-    let verbose = Command::new(binary)
-        .args(["--version", "--verbose"])
-        .output()
-        .await
-        .unwrap();
-    assert!(verbose.status.success());
-    let verbose = std::str::from_utf8(&verbose.stdout).unwrap().trim();
-
     let mut agent = spawn_agent(&config, &cwd, &home);
     let setup = json!({"cwd":"/client-workspace", "mcpServers":[]});
     let pre_init = agent.request(1, "session/new", setup.clone()).await;
@@ -218,12 +203,36 @@ async fn controlled_text_session_over_stdio() {
     assert!(handshake.get("error").is_none(), "{handshake}");
     let handshake = &handshake["result"];
     assert_eq!(handshake["protocolVersion"], 1);
-    assert_eq!(handshake["agentInfo"]["name"], "xiaoo-acp");
+    assert_eq!(handshake["agentInfo"]["name"], "xiaoo");
+    let binary = env!("CARGO_BIN_EXE_xiaoo");
+    let version = Command::new(binary)
+        .arg("--version")
+        .output()
+        .await
+        .unwrap();
+    assert!(version.status.success());
+    let version = std::str::from_utf8(&version.stdout).unwrap().trim();
+    let verbose = Command::new(binary)
+        .args(["--version", "--verbose"])
+        .output()
+        .await
+        .unwrap();
+    assert!(verbose.status.success());
+    let verbose = std::str::from_utf8(&verbose.stdout).unwrap().trim();
+    for (args, expected) in [
+        (&["acp", "--version"][..], version),
+        (&["acp", "--version", "--verbose"][..], verbose),
+    ] {
+        let acp = Command::new(binary).args(args).output().await.unwrap();
+        assert!(acp.status.success());
+        assert_eq!(std::str::from_utf8(&acp.stdout).unwrap().trim(), expected);
+    }
+
     assert_eq!(handshake["agentInfo"]["version"], version);
     let commit = handshake["_meta"]["org.openeuler.xiaoo/build"]["commit"]
         .as_str()
         .unwrap();
-    assert_eq!(verbose, format!("xiaoo-acp {version} (commit {commit})"));
+    assert_eq!(verbose, format!("xiaoo {version} (commit {commit})"));
     assert_eq!(
         handshake["agentCapabilities"]["_meta"][PROFILE]["mode"],
         "controlled-text"
@@ -401,6 +410,17 @@ async fn controlled_text_session_over_stdio() {
         .await
         .unwrap();
     assert!(status.success(), "{stderr}");
+    let mut trailing_stdout = Vec::new();
+    agent
+        .output
+        .read_to_end(&mut trailing_stdout)
+        .await
+        .unwrap();
+    assert!(
+        trailing_stdout.is_empty(),
+        "unexpected stdout after ACP close"
+    );
+
     assert!(!stderr.contains("isolated-test-token"));
     provider.await.unwrap();
     assert_eq!(contents(&cwd), cwd_before);

@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "apps/acp",
     "apps/shared",
     "apps/endside",
     "apps/serverside",

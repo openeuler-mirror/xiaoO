@@ -16,7 +16,9 @@ use xiaoo_shared::backend::ProcessGroupCleanupGuard;
 use xiaoo_shared::config_identity::ConfigFileIdentity;
 pub use xiaoo_shared::{backend, gateway};
 
+mod acp;
 mod app;
+mod build_identity;
 mod cli;
 mod gateway_api;
 mod input;
@@ -52,9 +54,17 @@ const CLI_SWITCH: &str = "--cli";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _cleanup_guard = ProcessGroupCleanupGuard;
+    let args: Vec<_> = env::args_os().collect();
+    if args.get(1).is_some_and(|arg| arg == "acp") {
+        return acp::run(args.into_iter().skip(2)).await;
+    }
 
-    match classify_args(env::args_os().collect()) {
+    let _cleanup_guard = ProcessGroupCleanupGuard;
+    match classify_args(args) {
+        EntryInvocation::Version { verbose } => {
+            build_identity::print_version(verbose);
+            Ok(())
+        }
         EntryInvocation::Help { program } => {
             print_end_side_usage(&program);
             Ok(())
@@ -91,6 +101,7 @@ where
 
 #[derive(Debug, PartialEq, Eq)]
 enum EntryInvocation {
+    Version { verbose: bool },
     Help { program: OsString },
     Cli(Vec<OsString>),
     Tui(Vec<OsString>),
@@ -101,6 +112,13 @@ fn classify_args(mut args: Vec<OsString>) -> EntryInvocation {
         .first()
         .cloned()
         .unwrap_or_else(|| OsString::from("xiaoo"));
+    match args.as_slice() {
+        [_, flag] if flag == "--version" => return EntryInvocation::Version { verbose: false },
+        [_, flag, verbose] if flag == "--version" && verbose == "--verbose" => {
+            return EntryInvocation::Version { verbose: true };
+        }
+        _ => {}
+    }
     match args.get(1) {
         Some(first) if os_str_eq(first, "--help") || os_str_eq(first, "-h") => {
             EntryInvocation::Help { program }
@@ -119,7 +137,9 @@ fn os_str_eq(value: &OsStr, expected: &str) -> bool {
 
 fn print_end_side_usage(program: &OsStr) {
     eprintln!(
-        "Usage: {} [--config <path>] [--mcp-config <path>]\n       {} --cli <command>\n\nDefault: launch the TUI.\nCLI: pass --cli before existing CLI commands, for example `{} --cli run -p \"hello\"`.",
+        "Usage: {} [--config <path>] [--mcp-config <path>]\n       {} --cli <command>\n       {} acp --config <path>\n       {} --version [--verbose]\n\nDefault: launch the TUI.\nCLI: pass --cli before existing CLI commands, for example `{} --cli run -p \"hello\"`.",
+        PathBuf::from(program).display(),
+        PathBuf::from(program).display(),
         PathBuf::from(program).display(),
         PathBuf::from(program).display(),
         PathBuf::from(program).display()

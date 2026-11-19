@@ -1,14 +1,13 @@
 # ACP text sessions
 
-`xiaoo-acp` is a stdio Agent Client Protocol v1 agent for text conversations. It
-uses a configuration provided by the process launcher and keeps sessions in
-memory for the lifetime of the connection.
+`xiaoo acp` is the xiaoO subcommand for Agent Client Protocol v1 over stdio.
+The controlled text profile uses a configuration provided by the launcher.
 
 ## Start the agent
 
-Install from the workspace with `cargo install --locked --path apps/acp`. Use
-`xiaoo-acp --config /path/to/acp.toml` as the ACP client command. Its stdout
-carries newline-delimited JSON-RPC messages.
+Install from the workspace with `cargo install --locked --path apps/endside`.
+Configure the client to launch `xiaoo acp --config /path/to/acp.toml`.
+During a session, stdout carries only newline-delimited ACP JSON-RPC messages.
 
 ```toml
 default_model = "work"
@@ -27,6 +26,17 @@ absolute path to a trusted text file. The launcher controls the configuration,
 provider endpoints, and credential references. Clients choose a configured
 profile ID and never submit model credentials. By default the agent uses a
 32768-token context window without querying a model catalog.
+
+## Responsibility boundary
+
+`xiaoo acp` provides the agent side of ACP. Each stdio connection has its own
+process. Sessions live in that process's memory. When the selected profile
+supports workspace tools, the agent delegates commands and file operations to
+the client. When portable conversation state is available, the client stores
+exports and supplies them for restoration.
+
+The driving control plane owns execution environments, persistence, agent
+process lifecycle, snapshots and branching, cleanup, and scheduling.
 
 ## ACP compatibility
 
@@ -62,12 +72,12 @@ error as `error.data.usage`.
 ## Build identity
 
 The release build supplies `XIAOO_RELEASE_VERSION` (SemVer) and
-`XIAOO_BUILD_COMMIT` (the full Git SHA) together. `--version` and
-`initialize.agentInfo.version` expose the same version.
-`--version --verbose` and the initialize response's
+`XIAOO_BUILD_COMMIT` (the full Git SHA) together. `xiaoo --version`,
+`xiaoo acp --version`, and `initialize.agentInfo.version` expose the same
+version. The `--verbose` version output and the initialize response's
 `_meta["org.openeuler.xiaoo/build"].commit` also expose the build commit.
-Building without release inputs reports the workspace version with a
-`-dev` suffix and an unknown commit.
+Building without release inputs reports the workspace version and an
+unknown commit.
 
 The Rust ACP dependencies are distributed under Apache-2.0. See the
 [third-party notice](../License/Third_Party_Open_Source_Software_Notice.md)
