@@ -53,6 +53,16 @@ impl ValidationResult {
     }
 }
 
+/// Longest extension the "unknown extension looks binary" heuristic still
+/// guesses on.
+///
+/// Extensions longer than this are never treated as binary: several text
+/// formats (`.ipynb`, `.jsonl`, `.graphql`) exceed it, and length alone is a
+/// poor signal — `.class` (6 chars) used to slip through while `.rb` (3 chars)
+/// was rejected. Anything not covered by `TEXT_FILE_EXTENSIONS` and longer than
+/// this is left to the reader, which decides on content.
+const UNKNOWN_EXT_MAX_LEN: usize = 5;
+
 /// Checks whether the path's extension marks it as a binary (non-text) file.
 ///
 /// Extensions in `REJECTED_BINARY_EXTENSIONS` are always rejected; any other
@@ -75,13 +85,14 @@ fn is_binary_file_extension(path: &str) -> bool {
 
     // Fall back to a heuristic for unknown extensions: image and PDF suffixes
     // are allowed, known text extensions are allowed, anything else looks
-    // binary (e.g. .o, .obj, .class).
+    // binary (e.g. .o, .obj).
     if let Some(pos) = path_lower.rfind('.') {
         let ext = &path_lower[pos..];
         if ext == PDF_PATH_SUFFIX || IMAGE_PATH_SUFFIXES.contains(&ext) {
             return false;
         }
-        if ext.len() > 1 && ext.len() <= 5 && !TEXT_FILE_EXTENSIONS.contains(&ext) {
+        if ext.len() > 1 && ext.len() <= UNKNOWN_EXT_MAX_LEN && !TEXT_FILE_EXTENSIONS.contains(&ext)
+        {
             return true;
         }
     }
