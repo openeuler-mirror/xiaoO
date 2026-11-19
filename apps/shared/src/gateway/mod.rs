@@ -1,6 +1,7 @@
 mod backend_workspace_context;
 pub mod bootstrap;
 pub mod channel_interaction;
+pub mod controlled_delegation;
 pub mod controlled_session;
 mod e2b_runtime;
 pub mod hook_action_sink;

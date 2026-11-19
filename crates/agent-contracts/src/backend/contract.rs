@@ -24,6 +24,11 @@ pub trait OperationBackend: Send + Sync {
     /// Advertised capability metadata for gating and fail-fast decisions.
     fn capabilities(&self) -> OperationBackendCapabilities;
 
+    /// The filesystem transport supports UTF-8 text files only.
+    fn requires_text_files(&self) -> bool {
+        false
+    }
+
     fn paths(&self) -> &dyn OperationPathResolver;
     fn files(&self) -> &dyn OperationFileSystem;
     fn search(&self) -> &dyn OperationSearch;

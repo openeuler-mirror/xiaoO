@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use agent_contracts::backend::capability::exec::ExecRequest;
+use agent_contracts::backend::capability::exec::{ExecOutput, ExecRequest};
 use agent_contracts::backend::capability::filesystem::{
     TempPathKind, TempPathRequest, WriteBytesRequest, WriteMode,
 };
@@ -64,6 +64,16 @@ impl BashExecutor {
         result: &agent_contracts::backend::capability::exec::ExecResult,
         session: &str,
     ) -> BashOutput {
+        if let ExecOutput::Combined { truncated } = result.output {
+            return BashOutput {
+                stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
+                stdout_truncated: truncated,
+                stderr: String::new(),
+                stderr_truncated: false,
+                exit_code: result.exit_code,
+                interrupted: result.timed_out,
+            };
+        }
         let (stdout, stdout_truncated) = window_stream(backend, session, &result.stdout).await;
         let (stderr, stderr_truncated) = window_stream(backend, session, &result.stderr).await;
 

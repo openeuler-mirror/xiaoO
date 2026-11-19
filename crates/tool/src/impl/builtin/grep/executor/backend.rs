@@ -59,6 +59,31 @@ fn resolve_head_limit(input: &GrepInput) -> u32 {
     }
 }
 
+fn terminate_options(mut args: Vec<String>) -> Vec<String> {
+    args.insert(args.len() - 1, "--".to_string());
+    args
+}
+
+enum RgError {
+    Unavailable,
+    Failed(String),
+}
+
+impl From<String> for RgError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl std::fmt::Display for RgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("rg is unavailable"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
 pub struct GrepExecutor {
     spec: Arc<GrepToolSpec>,
 }
@@ -249,7 +274,7 @@ impl GrepExecutor {
         head_limit: u32,
         offset: u32,
         output_mode: OutputMode,
-    ) -> Result<(Vec<String>, bool), String> {
+    ) -> Result<(Vec<String>, bool), RgError> {
         // Stream rg's stdout line-by-line through a BoundedLineCollector.
         // The collector stops asking for more after `head_limit + offset + 1`
         // lines — it never pre-skips `offset` at the stream level (the skip
@@ -308,7 +333,11 @@ impl GrepExecutor {
             return Err(format!(
                 "rg timed out after {}ms; narrow the search path, tighten the pattern, or pass a larger `timeout`",
                 timeout_ms
-            ));
+            ).into());
+        }
+
+        if backend.requires_text_files() && result.exit_code == Some(127) {
+            return Err(RgError::Unavailable);
         }
 
         if !(result.exit_code == Some(0) || result.exit_code == Some(1) || result.stopped_early) {
@@ -316,7 +345,8 @@ impl GrepExecutor {
                 "rg exited with code {:?}: {}",
                 result.exit_code,
                 String::from_utf8_lossy(result.stderr.as_slice())
-            ));
+            )
+            .into());
         }
 
         let collector_capped = result.stopped_early;
@@ -528,7 +558,14 @@ impl GrepExecutor {
         let offset = input.offset.unwrap_or(0);
         let timeout_ms = input.timeout.unwrap_or_else(default_timeout_ms);
 
-        let rg_args = Self::build_rg_args(input, &resolved_target.search_target);
+        let client_backend = backend.requires_text_files();
+        let search_target = &resolved_target.search_target;
+        let rg_args = Self::build_rg_args(input, search_target);
+        let rg_args = if client_backend {
+            terminate_options(rg_args)
+        } else {
+            rg_args
+        };
         // Compute a single wall-clock deadline for the whole search so the
         // `rg`→`grep` fallback path cannot double the hang: the fallback only
         // spends the *remaining* budget, and is skipped entirely once `rg`
@@ -550,6 +587,7 @@ impl GrepExecutor {
         .await
         {
             Ok((lines, capped)) => (lines, capped),
+            Err(RgError::Failed(message)) if client_backend => return Err(message),
             Err(rg_err) => {
                 // `rg` is missing or errored; fall back to GNU `grep`, which is
                 // present in environments (e.g. SWE-bench containers) that lack
@@ -562,7 +600,18 @@ impl GrepExecutor {
                         ));
                     }
                 };
-                let grep_args = Self::build_grep_args(input, &resolved_target.search_target);
+                if client_backend && (input.multiline.unwrap_or(false) || input.file_type.is_some())
+                {
+                    return Err(
+                        "client ripgrep is required for multiline or file type filters".into(),
+                    );
+                }
+                let grep_args = Self::build_grep_args(input, search_target);
+                let grep_args = if client_backend {
+                    terminate_options(grep_args)
+                } else {
+                    grep_args
+                };
                 let (lines, collector_capped) = Self::run_grep(
                     backend.as_ref(),
                     grep_args,

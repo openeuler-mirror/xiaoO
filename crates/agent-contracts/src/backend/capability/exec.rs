@@ -18,9 +18,19 @@ pub struct ExecRequest {
     pub extra: Option<serde_json::Value>,
 }
 
+/// How the backend captured the command output.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum ExecOutput {
+    #[default]
+    Separate,
+    /// Client reported a single combined stream in `stdout`.
+    Combined { truncated: bool },
+}
+
 /// Result of command execution.
 #[derive(Debug, Clone, Default)]
 pub struct ExecResult {
+    pub output: ExecOutput,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,

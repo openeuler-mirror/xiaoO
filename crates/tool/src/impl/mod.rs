@@ -8,10 +8,10 @@ mod runtime_services;
 mod source_loader;
 pub mod tool_input;
 
-pub use builtin::file_read;
 pub use builtin::{
     checkpoint_todos, open_todo_lines, restore_checkpoint_todos, CheckpointTodoItem,
 };
+pub use builtin::{file_read, BuiltinToolSource};
 pub use builtin::{
     FILE_EDIT_TOOL_NAME, FILE_PATH_INPUT_KEY, FILE_WRITE_TOOL_NAME, SKILL_NAME_INPUT_KEY,
     SKILL_TOOL_NAME,

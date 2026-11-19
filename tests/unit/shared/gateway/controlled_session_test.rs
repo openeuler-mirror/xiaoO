@@ -16,11 +16,12 @@ async fn controlled_open_requires_a_bound_backend() {
         context_window: None,
     };
 
-    let error = ControlledTextSession::open_with_backend_manager(
+    let error = ControlledSession::open_with_backend_manager(
         "unbound".to_string(),
         workspace.clone(),
         &profile,
         Arc::new(BackendManager::new_controlled()),
+        Arc::new(EmptyToolRegistry::new()),
     )
     .await
     .err()

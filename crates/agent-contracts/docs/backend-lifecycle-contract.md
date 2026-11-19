@@ -549,3 +549,24 @@ These are intentionally left for implementation planning.
 | Manager persistence | In-memory only, session store extension, or dedicated backend store |
 | Delete idempotency window | Provider-specific or manager-enforced |
 | OperationBackend shutdown | Keep as best-effort cleanup, or route all release through lifecycle delete/pause |
+
+## Client-bound workspace backends
+
+A client-bound backend receives the logical workspace root, caller identity
+and negotiated capabilities from a session binding. Its paths use the client's
+namespace. The backend performs lexical checks, and the client validates
+real paths, symlinks and command permissions in its execution environment.
+Missing capabilities and client errors fail the operation. They do not cause
+a lookup of an agent-host backend.
+
+A text file transport advertises non-atomic writes. Deployments that enable
+writes must enforce exclusive access through the validation-to-write window.
+Use combined output metadata for a terminal that merges stdout and stderr,
+and preserve the remote truncation flag. Filesystem queries and searches
+require complete output.
+
+An active prompt owns terminal IDs and in-flight mutation requests. Stop
+admitting operations when cancellation begins. Kill and release known active
+terminals within the settlement budget. The client owns the final cleanup on
+disconnect. A session with an unconfirmed mutation or terminal state must
+fail subsequent execution until replaced with a reconciled client session.

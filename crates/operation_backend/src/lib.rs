@@ -2,6 +2,9 @@ mod backends;
 mod builder;
 pub mod process_group;
 
+pub use backends::client::{
+    ClientBackend, ClientCommand, ClientOperationCapabilities, ClientOperations,
+};
 pub use backends::local::{
     local_backend, local_backend_provider, local_backend_with_isolation, LocalBackendProvider,
     LocalOperationBackend,

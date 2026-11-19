@@ -1,3 +1,4 @@
+mod delegation;
 mod server;
 
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
@@ -12,6 +13,8 @@ use crate::build_identity;
 #[serde(deny_unknown_fields)]
 struct Config {
     default_model: String,
+    #[serde(default)]
+    delegation: delegation::DelegationConfig,
     models: BTreeMap<String, ControlledModelProfile>,
 }
 

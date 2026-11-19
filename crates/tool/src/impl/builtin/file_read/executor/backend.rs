@@ -401,6 +401,11 @@ impl ToolExecutor for FileReadExecutor {
         }
 
         let ext = Self::get_extension(&resolved_str).unwrap_or_default();
+        if backend.requires_text_files() && !Self::dedup_applies(&ext) {
+            return Err(ToolExecutionError::ExecutionFailed {
+                message: "the client backend supports text files only".into(),
+            });
+        }
         let mtime = system_time_to_timestamp(stat.modified_at);
 
         // Short-circuit: return the cached "FileUnchanged" notice before

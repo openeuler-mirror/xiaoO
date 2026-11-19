@@ -8,6 +8,9 @@ use tokio::{
     sync::oneshot,
 };
 
+#[path = "delegation_test.rs"]
+mod delegation;
+
 const DEADLINE: Duration = Duration::from_secs(15);
 const PROFILE: &str = "org.openeuler.xiaoo/acp";
 const USAGE: &str = "org.openeuler.xiaoo/usage";
@@ -70,7 +73,7 @@ impl Agent {
     }
 }
 
-async fn receive_request(socket: &mut TcpStream) -> Value {
+async fn read_request(socket: &mut TcpStream) -> Value {
     let mut reader = BufReader::new(socket);
     let mut size = None;
     let mut authorization = None;
@@ -92,12 +95,16 @@ async fn receive_request(socket: &mut TcpStream) -> Value {
     assert_eq!(authorization.as_deref(), Some("Bearer isolated-test-token"));
     let mut body = vec![0; size.expect("HTTP request length")];
     reader.read_exact(&mut body).await.unwrap();
-    let value: Value = serde_json::from_slice(&body).unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn receive_request(socket: &mut TcpStream) -> Value {
+    let request = read_request(socket).await;
     assert!(
-        value["tools"].is_null() || value["tools"] == json!([]),
-        "{value}"
+        request["tools"].is_null() || request["tools"] == json!([]),
+        "{request}"
     );
-    value
+    request
 }
 
 async fn reply(socket: &mut TcpStream, model: &str, text: &str, usage: Option<Value>) {

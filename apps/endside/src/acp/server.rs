@@ -24,9 +24,15 @@ use xiaoo_api::{
     chat::AgentId,
     events::{LoopEndSummary, LoopEventSink, ToolResultEvent},
 };
-use xiaoo_shared::gateway::{controlled_session::ControlledTextSession, TurnOutcome};
+use xiaoo_shared::gateway::{
+    controlled_delegation::ClientOperationCapabilities, controlled_session::ControlledSession,
+    TurnOutcome,
+};
 
-use super::Config;
+use super::{
+    delegation::{Delegation, DelegationOutcome},
+    Config,
+};
 use crate::build_identity::{COMMIT, VERSION};
 
 const PROFILE_META: &str = "org.openeuler.xiaoo/acp";
@@ -34,6 +40,15 @@ const BUILD_META: &str = "org.openeuler.xiaoo/build";
 const USAGE_META: &str = "org.openeuler.xiaoo/usage";
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const UPDATE_BUFFER: usize = 256;
+
+#[derive(
+    Clone, Debug, serde::Deserialize, serde::Serialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[request(method = "_org.openeuler.xiaoo/tools/list", response = Value)]
+struct ToolsListRequest {
+    session_id: acp::SessionId,
+}
 
 struct Server {
     config: Config,
@@ -43,7 +58,8 @@ struct Server {
 }
 
 struct Session {
-    runtime: ControlledTextSession,
+    runtime: ControlledSession,
+    delegation: Option<Arc<Delegation>>,
     state: Mutex<SessionState>,
 }
 
@@ -84,14 +100,16 @@ impl Server {
             return Err(Error::new(-32600, "connection is already initialized"));
         }
 
+        let mode = if self.config.delegation.enabled() {
+            "controlled-coding"
+        } else {
+            "controlled-text"
+        };
         let capabilities = acp::AgentCapabilities::new()
             .session_capabilities(
                 acp::SessionCapabilities::new().close(acp::SessionCloseCapabilities::new()),
             )
-            .meta(meta(
-                PROFILE_META,
-                json!({"mode": "controlled-text", "version": 1}),
-            ));
+            .meta(meta(PROFILE_META, json!({"mode": mode, "version": 1})));
         Ok(acp::InitializeResponse::new(ProtocolVersion::V1)
             .agent_capabilities(capabilities)
             .agent_info(acp::Implementation::new("xiaoo", VERSION))
@@ -132,6 +150,7 @@ impl Server {
     async fn new_session(
         &self,
         request: acp::NewSessionRequest,
+        connection: ConnectionTo<Client>,
     ) -> Result<acp::NewSessionResponse, Error> {
         self.require_initialize()?;
         if !request.mcp_servers.is_empty() {
@@ -163,14 +182,47 @@ impl Server {
             .get(profile)
             .ok_or_else(|| invalid("unknown model profile"))?;
         let id = uuid::Uuid::new_v4().to_string();
-        let runtime = ControlledTextSession::open(id.clone(), request.cwd, configured)
-            .await
+        let session_id = acp::SessionId::new(id.clone());
+        let (runtime, delegation) = if self.config.delegation.enabled() {
+            let client = self
+                .client_capabilities
+                .get()
+                .expect("connection initialized");
+            let capabilities = ClientOperationCapabilities {
+                read: client.fs.read_text_file,
+                write: client.fs.write_text_file && self.config.delegation.exclusive_writer,
+                terminal: client.terminal,
+            };
+            let delegation = Arc::new(Delegation::new(
+                connection,
+                session_id.clone(),
+                self.config.delegation.permission,
+            ));
+            (
+                ControlledSession::open_delegated(
+                    id,
+                    request.cwd,
+                    configured,
+                    capabilities,
+                    delegation.clone(),
+                )
+                .await,
+                Some(delegation),
+            )
+        } else {
+            (
+                ControlledSession::open(id, request.cwd, configured).await,
+                None,
+            )
+        };
+        let runtime = runtime
             .map_err(|_| Error::new(-32000, "session model or runtime could not be initialized"))?;
-        let id = acp::SessionId::new(id);
+        let id = session_id;
         self.sessions.lock().await.insert(
             id.clone(),
             Arc::new(Session {
                 runtime,
+                delegation,
                 state: Mutex::new(SessionState {
                     profile: profile.clone(),
                     active: None,
@@ -230,6 +282,13 @@ impl Server {
         if let Err(error) = require_idle(&state) {
             return responder.respond_with_error(error);
         }
+        if session
+            .delegation
+            .as_ref()
+            .is_some_and(|delegation| delegation.is_uncertain())
+        {
+            return responder.respond_with_error(Error::new(-32000, "operation_result_unknown"));
+        }
         let cancel = self.disconnect.child_token();
         let task_session = Arc::clone(&session);
         let task_cancel = cancel.clone();
@@ -249,6 +308,17 @@ impl Server {
         });
         state.active = Some(ActivePrompt { cancel, task });
         Ok(())
+    }
+
+    async fn tools_list(&self, request: ToolsListRequest) -> Result<Value, Error> {
+        let session = self.session(&request.session_id).await?;
+        let tools = session
+            .runtime
+            .tool_names()
+            .into_iter()
+            .map(|name| json!({"name": name, "source": "builtin"}))
+            .collect::<Vec<_>>();
+        Ok(json!({"tools": tools}))
     }
 
     async fn cancel(&self, id: &acp::SessionId) -> Result<(), Error> {
@@ -415,6 +485,9 @@ async fn run_prompt(
         text: SyncMutex::default(),
         reasoning: SyncMutex::default(),
     });
+    if let Some(delegation) = &session.delegation {
+        delegation.start(cancel.clone());
+    }
     let turn = session.runtime.prompt(text, output, cancel.clone());
     tokio::pin!(turn);
 
@@ -436,6 +509,16 @@ async fn run_prompt(
         emit(update);
     }
     let usage = serde_json::to_value(usage).map_err(|_| Error::internal_error())?;
+    if let Some(delegation) = &session.delegation {
+        let message = match delegation.settle().await {
+            DelegationOutcome::Settled => None,
+            DelegationOutcome::InteractionRequired => Some("interaction_required"),
+            DelegationOutcome::Uncertain => Some("operation_result_unknown"),
+        };
+        if let Some(message) = message {
+            return Err(Error::new(-32000, message).data(json!({"usage": usage})));
+        }
+    }
     if delivery_failed.load(Ordering::Acquire) {
         return Err(
             Error::new(-32000, "prompt output could not be delivered in order")
@@ -462,6 +545,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let prompt = Arc::clone(&server);
     let cancel = Arc::clone(&server);
     let close = Arc::clone(&server);
+    let tools_list = Arc::clone(&server);
     let agent = Agent
         .builder()
         .name("xiaoo")
@@ -474,8 +558,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .on_receive_request(
             async move |request: acp::NewSessionRequest,
                         responder: Responder<acp::NewSessionResponse>,
-                        _| {
-                responder.respond_with_result(new.new_session(request).await)
+                        connection| {
+                responder.respond_with_result(new.new_session(request, connection).await)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -492,6 +576,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                         responder: Responder<acp::PromptResponse>,
                         connection| {
                 prompt.prompt(request, responder, connection).await
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ToolsListRequest, responder: Responder<Value>, _| {
+                responder.respond_with_result(tools_list.tools_list(request).await)
             },
             agent_client_protocol::on_receive_request!(),
         )
