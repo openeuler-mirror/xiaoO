@@ -45,3 +45,43 @@ fn preferred_overwrite_mode(supports_atomic_write: bool) -> WriteMode {
         WriteMode::Overwrite
     }
 }
+
+// Keep client results below the core's file-backed truncation threshold.
+const CLIENT_RESULT_LIMIT: usize = 32 * 1024;
+
+fn result_json<T: serde::Serialize>(output: &T, client: bool) -> serde_json::Result<String> {
+    if !client {
+        return serde_json::to_string(output);
+    }
+
+    let mut writer = ClientResultWriter::default();
+    match serde_json::to_writer(&mut writer, output) {
+        Ok(()) => Ok(String::from_utf8(writer.bytes).expect("JSON is UTF-8")),
+        Err(_) if writer.exceeded => Ok(
+            r#"{"truncated":true,"message":"Client tool result exceeds the display limit. Request a narrower result."}"#
+                .into(),
+        ),
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Default)]
+struct ClientResultWriter {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl std::io::Write for ClientResultWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > CLIENT_RESULT_LIMIT - self.bytes.len() {
+            self.exceeded = true;
+            return Err(std::io::Error::other("client result limit exceeded"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

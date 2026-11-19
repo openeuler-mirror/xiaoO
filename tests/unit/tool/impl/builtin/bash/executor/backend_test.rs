@@ -129,3 +129,29 @@ fn reclaim_skips_non_host_paths() {
     // reclaimer must be a no-op and never inspect the filesystem.
     reclaim_host_spills("/tmp/.xiaoo-bash-output-e2b-1.txt", "e2b");
 }
+
+#[tokio::test]
+async fn client_stdout_stays_structured_after_escape_expansion() {
+    use agent_contracts::backend::capability::exec::ExecResult;
+
+    let temp = tempfile::tempdir().unwrap();
+    let backend =
+        operation_backend::local_backend(temp.path().to_path_buf(), None, None, None).unwrap();
+    let output = BashExecutor::format_output(
+        &*backend,
+        &ExecResult {
+            stdout: vec![0x1b; 16 * 1024],
+            exit_code: Some(7),
+            output: ExecOutput::Combined { truncated: false },
+            ..Default::default()
+        },
+        "test-session",
+    )
+    .await;
+    let json = serde_json::to_string(&output).unwrap();
+    assert!(json.len() < crate::r#impl::builtin::CLIENT_RESULT_LIMIT);
+    let value: BashOutput = serde_json::from_str(&json).unwrap();
+    assert!(value.stdout_truncated && !value.stdout.is_empty());
+    assert_eq!(value.exit_code, Some(7));
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}

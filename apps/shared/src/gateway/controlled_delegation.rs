@@ -22,11 +22,12 @@ pub use agent_contracts::backend::{
     OperationError,
 };
 pub use operation_backend::{ClientCommand, ClientOperationCapabilities, ClientOperations};
+pub use tool::r#impl::tool_input::parse_tool_input;
 
 #[async_trait]
 pub trait ControlledToolClient: ClientOperations {
     async fn start_tool(&self, name: &str, input: &Value) -> Result<String, OperationError>;
-    fn finish_tool(&self, id: &str, name: &str, output: Option<&str>);
+    fn finish_tool(&self, id: &str, name: &str, completed_input: Option<&Value>);
 }
 
 struct ControlledBuiltinSource(Vec<DiscoveredTool>);
@@ -46,10 +47,8 @@ impl ToolSource for ControlledBuiltinSource {
 fn allows(capabilities: ClientOperationCapabilities, name: &str) -> bool {
     match name {
         "bash" | "glob" | "grep" => capabilities.terminal,
-        "file_read" => capabilities.terminal && capabilities.read,
-        "file_edit" | "file_write" => {
-            capabilities.terminal && capabilities.read && capabilities.write
-        }
+        "file_read" => capabilities.can_read(),
+        "file_edit" | "file_write" => capabilities.can_write(),
         "todo_write" | "ask_user_question" => true,
         _ => false,
     }
@@ -124,20 +123,20 @@ impl ToolExecutor for ControlledExecutor {
             bound_output(message);
         }
 
-        if let Ok(ToolExecutorOutput::Completed { raw_outcome }) = &mut result {
-            let text = match raw_outcome {
-                RawToolOutcome::Success { output } => output,
-                RawToolOutcome::Error { message } => message,
-            };
-            bound_output(text);
+        if let Ok(ToolExecutorOutput::Completed {
+            raw_outcome: RawToolOutcome::Error { message },
+        }) = &mut result
+        {
+            bound_output(message);
         }
-        let output = match &result {
+        let completed = matches!(
+            result,
             Ok(ToolExecutorOutput::Completed {
-                raw_outcome: RawToolOutcome::Success { output },
-            }) => Some(output.as_str()),
-            _ => None,
-        };
-        self.client.finish_tool(&id, &call.tool_name, output);
+                raw_outcome: RawToolOutcome::Success { .. },
+            })
+        );
+        self.client
+            .finish_tool(&id, &call.tool_name, completed.then_some(&call.input));
         result
     }
 }

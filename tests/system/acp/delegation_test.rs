@@ -43,6 +43,7 @@ async fn scripted_model(
             let chunk = json!({
                 "id": "test", "object": "chat.completion.chunk", "created": 0, "model": "scripted",
                 "choices": [{"index": 0, "finish_reason": "tool_calls", "delta": {
+                    "content": "Preparing client call. ",
                     "tool_calls": [{"index": 0, "id": format!("call-{index}"), "type": "function",
                     "function": {"name": name, "arguments": args.to_string()}}]
                 }}],
@@ -229,11 +230,13 @@ fn capabilities() -> Value {
 
 #[tokio::test]
 async fn controlled_tools_execute_in_the_client_workspace() {
+    let plan_content = format!("Run client tools{}", "\n".repeat(17_000));
     let steps = vec![
+        ("file_read", json!({"file_path":"large-link.txt"}), None),
         (
             "file_write",
             json!({"file_path": "nest/remote.txt", "content": "alpha\n"}),
-            None,
+            Some("within 1 MiB"),
         ),
         ("file_read", json!({"file_path": "nest/remote.txt"}), None),
         (
@@ -248,13 +251,18 @@ async fn controlled_tools_execute_in_the_client_workspace() {
             Some("nest/remote.txt"),
         ),
         (
-            "bash",
-            json!({"command": "printf terminal-marker > from-bash.txt"}),
+            "grep",
+            json!({"pattern":"failing-search", "output_mode":"content", "head_limit":1}),
             Some("bravo"),
         ),
         (
+            "bash",
+            json!({"command": "printf terminal-marker > from-bash.txt"}),
+            Some("rg exited with code Some(2)"),
+        ),
+        (
             "todo_write",
-            json!({"todos": [{"content": "Run client tools", "status": "completed"}]}),
+            json!({"todos": [{"content": plan_content, "status": "completed"}]}),
             None,
         ),
     ];
@@ -262,12 +270,20 @@ async fn controlled_tools_execute_in_the_client_workspace() {
     let (endpoint, model) = scripted_model(ALL_TOOLS, steps, true).await;
     let mut fixture = Fixture::start(&endpoint, "ask", capabilities()).await;
     fixture.assert_tools(ALL_TOOLS).await;
+    let large = fixture.client.join("large.txt");
+    fs::File::create(&large)
+        .unwrap()
+        .set_len(1024 * 1024 + 1)
+        .unwrap();
+    std::os::unix::fs::symlink(&large, fixture.client.join("large-link.txt")).unwrap();
     fixture.prompt(4).await;
 
     let mut terminal = std::collections::HashMap::new();
     let mut next_terminal = 1;
-    let mut completed = BTreeSet::new();
+    let mut finished = BTreeSet::new();
     let mut announced = BTreeSet::new();
+    let mut failed = 0;
+    let mut prefaces = 0;
     let mut approvals = 0;
     let mut plan_completed = false;
     let mut reads = 0;
@@ -292,14 +308,24 @@ async fn controlled_tools_execute_in_the_client_workspace() {
         let result = match method {
             "session/update" => {
                 let update = &params["update"];
-                if update["sessionUpdate"] == "tool_call" {
+                if update["sessionUpdate"] == "agent_message_chunk"
+                    && update["content"]["text"] == "Preparing client call. "
+                {
+                    prefaces += 1;
+                } else if update["sessionUpdate"] == "tool_call" {
+                    assert_eq!(
+                        prefaces,
+                        announced.len() + 1,
+                        "text must arrive before the tool"
+                    );
                     assert!(announced.insert(update["toolCallId"].as_str().unwrap().to_owned()));
                 } else if update["sessionUpdate"] == "tool_call_update"
-                    && update["status"] == "completed"
+                    && matches!(update["status"].as_str(), Some("completed" | "failed"))
                 {
-                    assert!(completed.insert(update["toolCallId"].as_str().unwrap().to_owned()));
+                    failed += usize::from(update["status"] == "failed");
+                    assert!(finished.insert(update["toolCallId"].as_str().unwrap().to_owned()));
                 } else if update["sessionUpdate"] == "plan" {
-                    assert_eq!(update["entries"][0]["content"], "Run client tools");
+                    assert_eq!(update["entries"][0]["content"], plan_content);
                     assert_eq!(update["entries"][0]["status"], "completed");
                     plan_completed = true;
                 }
@@ -312,7 +338,9 @@ async fn controlled_tools_execute_in_the_client_workspace() {
             }
             "fs/read_text_file" => {
                 reads += 1;
-                json!({"content": fs::read_to_string(fixture.translate(&params["path"])).unwrap()})
+                let path = fixture.translate(&params["path"]);
+                assert_ne!(path.file_name().unwrap(), "large-link.txt");
+                json!({"content": fs::read_to_string(path).unwrap()})
             }
             "fs/write_text_file" => {
                 writes += 1;
@@ -339,20 +367,27 @@ async fn controlled_tools_execute_in_the_client_workspace() {
                     })
                     .collect();
                 assert!(params["env"].as_array().is_none_or(Vec::is_empty));
-                let process = Command::new(command)
-                    .args(args.drain(..))
-                    .current_dir(fixture.translate(&params["cwd"]))
-                    .env_remove("ACP_TEST_KEY")
-                    .output()
-                    .await
-                    .unwrap();
+                let (code, output) = if args.iter().any(|arg| arg == "failing-search") {
+                    (2, "partial match\n".repeat(8))
+                } else {
+                    let process = Command::new(command)
+                        .args(args.drain(..))
+                        .current_dir(fixture.translate(&params["cwd"]))
+                        .env_remove("ACP_TEST_KEY")
+                        .output()
+                        .await
+                        .unwrap();
+                    let mut output = process.stdout;
+                    output.extend(process.stderr);
+                    (
+                        process.status.code().unwrap(),
+                        String::from_utf8(output).unwrap(),
+                    )
+                };
                 let id = format!("terminal-{next_terminal}");
                 next_terminal += 1;
-                let mut output = process.stdout;
-                output.extend(process.stderr);
-                let output = String::from_utf8(output).unwrap();
                 assert!(output.len() as u64 <= params["outputByteLimit"].as_u64().unwrap());
-                terminal.insert(id.clone(), (process.status.code().unwrap(), output));
+                terminal.insert(id.clone(), (code, output));
                 json!({"terminalId": id})
             }
             "terminal/wait_for_exit" => {
@@ -375,7 +410,8 @@ async fn controlled_tools_execute_in_the_client_workspace() {
     }
 
     assert_eq!(announced.len(), count);
-    assert_eq!(completed, announced);
+    assert_eq!(finished, announced);
+    assert_eq!(failed, 2);
     assert_eq!(approvals, count - 1);
     assert!(plan_completed);
     assert!(reads >= 2 && writes == 2 && terminal.is_empty());
@@ -400,15 +436,27 @@ async fn controlled_tools_execute_in_the_client_workspace() {
 
 #[tokio::test]
 async fn capabilities_and_user_denial_fail_closed_before_callbacks() {
-    for (caps, names) in [(json!({}), IN_MEMORY_TOOLS), (capabilities(), ALL_TOOLS)] {
+    let terminal_tools: &[&str] = &["ask_user_question", "bash", "glob", "grep", "todo_write"];
+    for (caps, names, attempted, arguments) in [
+        (json!({}), IN_MEMORY_TOOLS, "bash", json!({"command":"pwd"})),
+        (
+            json!({"fs":{"readTextFile":true}}),
+            IN_MEMORY_TOOLS,
+            "file_read",
+            json!({"file_path":"sentinel.txt"}),
+        ),
+        (
+            json!({"terminal":true,"fs":{"writeTextFile":true}}),
+            terminal_tools,
+            "file_write",
+            json!({"file_path":"sentinel.txt","content":"denied"}),
+        ),
+        (capabilities(), ALL_TOOLS, "bash", json!({"command":"pwd"})),
+    ] {
         let (endpoint, model) = scripted_model(
             names,
             vec![
-                (
-                    "bash",
-                    json!({"command": "printf denied > escaped.txt"}),
-                    None,
-                ),
+                (attempted, arguments, None),
                 (
                     "ask_user_question",
                     json!({"questions": [{"kind": "confirm", "prompt": "Proceed?"}]}),
@@ -456,12 +504,16 @@ async fn capabilities_and_user_denial_fail_closed_before_callbacks() {
 
 #[tokio::test]
 async fn terminal_cancel_kills_and_releases_before_prompt_completion() {
-    for confirm_release in [true, false] {
-        cancel_terminal(confirm_release).await;
+    for (stage, confirm_release) in [
+        ("terminal/wait_for_exit", true),
+        ("terminal/wait_for_exit", false),
+        ("terminal/output", true),
+    ] {
+        cancel_terminal(stage, confirm_release).await;
     }
 }
 
-async fn cancel_terminal(confirm_release: bool) {
+async fn cancel_terminal(stage: &str, confirm_release: bool) {
     let (endpoint, model) = scripted_model(
         ALL_TOOLS,
         vec![("bash", json!({"command": "sleep 30"}), None)],
@@ -477,7 +529,8 @@ async fn cancel_terminal(confirm_release: bool) {
         let result = match message["method"].as_str() {
             Some("session/update" | "$/cancel_request") => continue,
             Some("terminal/create") => json!({"terminalId": "running"}),
-            Some("terminal/wait_for_exit") => {
+            Some("terminal/wait_for_exit") if stage == "terminal/output" => json!({"exitCode":0}),
+            Some(method) if method == stage => {
                 started = Some(tokio::time::Instant::now());
                 fixture
                     .agent

@@ -4,9 +4,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use agent_contracts::backend::{
     capability::{
-        exec::{
-            exec_streaming_via_exec, ExecOutput, ExecRequest, ExecResult, LineSink, OperationExec,
-        },
+        exec::{ExecOutput, ExecRequest, ExecResult, LineSink, OperationExec},
         export::{ExportFileRequest, OperationExport},
         filesystem::{
             OperationFileSystem, ReadBytesRequest, TempPathRequest, WriteBytesOutcome,
@@ -23,7 +21,7 @@ use glob::Pattern;
 
 const MAX_TEXT_BYTES: usize = 1024 * 1024;
 const STAT: &str = r#"
-out=$(LC_ALL=C stat --format='%f %s %Y %y' -- "$1" 2>&1)
+out=$(LC_ALL=C stat --dereference --format='%f %s %Y %y' -- "$1" 2>&1)
 status=$?
 if (( status == 0 )); then
     printf '%s\n' "$out"
@@ -34,11 +32,33 @@ else
 fi
 "#;
 
+const GLOB_FILTER: &str = r#"
+export LC_ALL=C
+root=$1 pattern=$2
+shift 2
+for path; do
+    relative=${path#./}
+    if [[ $relative == $pattern || "$root/$relative" == $pattern ]]; then
+        printf '%s\0' "$path"
+    fi
+done
+"#;
+
 #[derive(Clone, Copy, Default)]
 pub struct ClientOperationCapabilities {
     pub read: bool,
     pub write: bool,
     pub terminal: bool,
+}
+
+impl ClientOperationCapabilities {
+    pub fn can_read(self) -> bool {
+        self.terminal && self.read
+    }
+
+    pub fn can_write(self) -> bool {
+        self.can_read() && self.write
+    }
 }
 
 pub struct ClientCommand {
@@ -152,13 +172,10 @@ impl ClientBackend {
     async fn find(
         &self,
         cwd: &BackendPath,
-        files_only: bool,
+        filters: Vec<String>,
     ) -> Result<Vec<BackendPath>, OperationError> {
         let mut args = strings(&[".", "-mindepth", "1"]);
-        if files_only {
-            args.extend(strings(&["-type", "f"]));
-        }
-        args.push("-print0".into());
+        args.extend(filters);
         let result = self.query(cwd, "find", args, 64 * 1024).await?;
         let output = command_output(result, &[0])?;
         if !output.is_empty() && !output.ends_with('\0') {
@@ -352,10 +369,19 @@ impl OperationFileSystem for ClientBackend {
     }
 
     async fn read_bytes(&self, request: ReadBytesRequest) -> Result<Vec<u8>, OperationError> {
-        if !self.capabilities.read {
-            return Err(unsupported("client read capability is required"));
+        if !self.capabilities.can_read() {
+            return Err(unsupported(
+                "client read and terminal capabilities are required",
+            ));
         }
         let path = self.check_path(&request.path)?;
+        let stat = self.stat(&path).await?;
+        if stat
+            .size_bytes
+            .is_some_and(|size| size > MAX_TEXT_BYTES as u64)
+        {
+            return Err(unsupported("client file must be UTF-8 text within 1 MiB"));
+        }
         let text = self.operations.read_text(path.native()).await?;
         if text.len() > MAX_TEXT_BYTES || text.contains('\0') {
             return Err(unsupported("client file must be UTF-8 text within 1 MiB"));
@@ -367,7 +393,7 @@ impl OperationFileSystem for ClientBackend {
         &self,
         request: WriteBytesRequest,
     ) -> Result<WriteBytesOutcome, OperationError> {
-        if !self.capabilities.write {
+        if !self.capabilities.can_write() {
             return Err(unsupported(
                 "client write capability and exclusive access are required",
             ));
@@ -392,7 +418,7 @@ impl OperationFileSystem for ClientBackend {
     }
 
     async fn create_dir_all(&self, path: &BackendPath) -> Result<(), OperationError> {
-        if !self.capabilities.write {
+        if !self.capabilities.can_write() {
             return Err(unsupported(
                 "client write capability and exclusive access are required",
             ));
@@ -473,12 +499,22 @@ impl OperationExec for ClientBackend {
         request: ExecRequest,
         sink: Arc<dyn LineSink>,
     ) -> Result<ExecResult, OperationError> {
-        let result = exec_streaming_via_exec(self, request, sink).await?;
+        let mut result = OperationExec::exec(self, request).await?;
+        let stdout = std::mem::take(&mut result.stdout);
+        result.stopped_early = false;
+        // A buffered terminal has already exited. Only a successful search
+        // may be paged, so the sink cannot mask a client command failure.
+        if result.timed_out || !matches!(result.exit_code, Some(0 | 1)) {
+            return Ok(result);
+        }
         if matches!(result.output, ExecOutput::Combined { truncated: true }) {
             return Err(failed(
                 "client search output was truncated; narrow the search",
             ));
         }
+        result.stopped_early = String::from_utf8_lossy(&stdout)
+            .lines()
+            .any(|line| !sink.on_line(line));
         Ok(result)
     }
 }
@@ -488,8 +524,21 @@ impl OperationSearch for ClientBackend {
     async fn glob(&self, request: GlobRequest) -> Result<Vec<BackendPath>, OperationError> {
         let base = request.base_dir.unwrap_or_else(|| self.root.clone());
         let pattern = Pattern::new(&request.pattern).map_err(|_| failed("invalid glob pattern"))?;
+        let base = self.check_path(&base)?;
+        let prefilter = glob_prefilter(pattern.as_str());
+        let filters = strings(&[
+            "-exec",
+            "bash",
+            "-c",
+            GLOB_FILTER,
+            "glob",
+            base.native().trim_end_matches('/'),
+            &prefilter,
+            "{}",
+            "+",
+        ]);
         Ok(self
-            .find(&base, false)
+            .find(&base, filters)
             .await?
             .into_iter()
             .filter(|path| matches_pattern(&pattern, &base, path))
@@ -507,7 +556,9 @@ impl OperationSearch for ClientBackend {
             .map(Pattern::new)
             .transpose()
             .map_err(|_| failed("invalid grep include pattern"))?;
-        let files = self.find(&request.base_dir, true).await?;
+        let files = self
+            .find(&request.base_dir, strings(&["-type", "f", "-print0"]))
+            .await?;
         let files: Vec<_> = files
             .into_iter()
             .filter(|path| {
@@ -556,6 +607,40 @@ impl OperationSearch for ClientBackend {
     }
 }
 
+/// Project a validated Rust glob onto a Bash pattern that accepts at least
+/// the same paths. The Rust matcher below still decides exact membership.
+fn glob_prefilter(pattern: &str) -> String {
+    let mut chars = pattern.chars().peekable();
+    let mut filter = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => {
+                if chars.next_if_eq(&'*').is_some() {
+                    chars.next_if_eq(&'/');
+                }
+                filter.push('*');
+            }
+            '?' => filter.push('*'),
+            '[' => {
+                chars.next_if_eq(&'!');
+                // The first class member may itself be a closing bracket.
+                chars.next();
+                for member in chars.by_ref() {
+                    if member == ']' {
+                        break;
+                    }
+                }
+                filter.push('*');
+            }
+            literal => {
+                filter.push('\\');
+                filter.push(literal);
+            }
+        }
+    }
+    filter
+}
+
 fn matches_pattern(pattern: &Pattern, base: &BackendPath, path: &BackendPath) -> bool {
     let path = Path::new(path.native());
     path.strip_prefix(base.native())
@@ -572,3 +657,7 @@ impl OperationExport for ClientBackend {
         Err(unsupported("client files cannot be exported"))
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/operation_backend/backends/client_test.rs"]
+mod tests;

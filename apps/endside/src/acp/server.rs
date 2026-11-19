@@ -13,7 +13,7 @@ use agent_client_protocol::{
 };
 use serde_json::{json, Map, Value};
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::{mpsc, oneshot, Mutex},
     task::JoinHandle,
 };
 use tokio_util::{
@@ -404,21 +404,47 @@ fn prompt_text(blocks: Vec<acp::ContentBlock>) -> Result<String, Error> {
     Ok(text)
 }
 
-struct TurnOutput {
-    updates: mpsc::Sender<acp::SessionUpdate>,
-    cancel: CancellationToken,
-    delivery_failed: Arc<AtomicBool>,
-    text: SyncMutex<String>,
-    reasoning: SyncMutex<String>,
+enum QueuedUpdate {
+    Notification(acp::SessionUpdate),
+    Flush(oneshot::Sender<()>),
 }
 
-impl TurnOutput {
-    fn emit(&self, update: acp::SessionUpdate) {
-        if let Err(mpsc::error::TrySendError::Full(_)) = self.updates.try_send(update) {
-            self.delivery_failed.store(true, Ordering::Release);
-            self.cancel.cancel();
+#[derive(Clone)]
+pub(crate) struct TurnUpdates {
+    sender: mpsc::Sender<QueuedUpdate>,
+    cancel: CancellationToken,
+    delivery_failed: Arc<AtomicBool>,
+}
+
+impl TurnUpdates {
+    fn fail(&self) {
+        self.delivery_failed.store(true, Ordering::Release);
+        self.cancel.cancel();
+    }
+
+    pub fn emit(&self, update: acp::SessionUpdate) -> Result<(), ()> {
+        self.sender
+            .try_send(QueuedUpdate::Notification(update))
+            .map_err(|_| self.fail())
+    }
+
+    pub async fn flush(&self) -> Result<(), ()> {
+        let (flushed, done) = oneshot::channel();
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(()),
+            result = async {
+                self.sender.send(QueuedUpdate::Flush(flushed)).await.map_err(|_| ())?;
+                done.await.map_err(|_| ())
+            } => result,
         }
     }
+}
+
+struct TurnOutput {
+    updates: TurnUpdates,
+    text: SyncMutex<String>,
+    reasoning: SyncMutex<String>,
 }
 
 impl TurnOutput {
@@ -431,14 +457,15 @@ impl TurnOutput {
         let mut previous = previous.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(delta) = current.strip_prefix(previous.as_str()) {
             if !delta.is_empty() {
-                self.emit(update(acp::ContentChunk::new(delta.into())));
+                let _ = self
+                    .updates
+                    .emit(update(acp::ContentChunk::new(delta.into())));
                 previous.push_str(delta);
             }
         } else {
             // ACP updates append text. A provider retry cannot replace what was
             // already sent to the client.
-            self.delivery_failed.store(true, Ordering::Release);
-            self.cancel.cancel();
+            self.updates.fail();
         }
     }
 }
@@ -477,26 +504,33 @@ async fn run_prompt(
     connection: &ConnectionTo<Client>,
 ) -> Result<acp::PromptResponse, Error> {
     let (sender, mut receiver) = mpsc::channel(UPDATE_BUFFER);
-    let delivery_failed = Arc::new(AtomicBool::new(false));
-    let output = Arc::new(TurnOutput {
-        updates: sender,
+    let updates = TurnUpdates {
+        sender,
         cancel: cancel.clone(),
-        delivery_failed: delivery_failed.clone(),
+        delivery_failed: Arc::new(AtomicBool::new(false)),
+    };
+    let output = Arc::new(TurnOutput {
+        updates: updates.clone(),
         text: SyncMutex::default(),
         reasoning: SyncMutex::default(),
     });
     if let Some(delegation) = &session.delegation {
-        delegation.start(cancel.clone());
+        delegation.start(cancel.clone(), updates.clone());
     }
     let turn = session.runtime.prompt(text, output, cancel.clone());
     tokio::pin!(turn);
 
-    let emit = |update| {
-        if connection
-            .send_notification(acp::SessionNotification::new(id.clone(), update))
-            .is_err()
-        {
-            cancel.cancel();
+    let emit = |queued| match queued {
+        QueuedUpdate::Notification(update) => {
+            if connection
+                .send_notification(acp::SessionNotification::new(id.clone(), update))
+                .is_err()
+            {
+                updates.fail();
+            }
+        }
+        QueuedUpdate::Flush(flushed) => {
+            let _ = flushed.send(());
         }
     };
     let (result, usage) = loop {
@@ -510,7 +544,11 @@ async fn run_prompt(
     }
     let usage = serde_json::to_value(usage).map_err(|_| Error::internal_error())?;
     if let Some(delegation) = &session.delegation {
-        let message = match delegation.settle().await {
+        let outcome = delegation.settle().await;
+        while let Ok(update) = receiver.try_recv() {
+            emit(update);
+        }
+        let message = match outcome {
             DelegationOutcome::Settled => None,
             DelegationOutcome::InteractionRequired => Some("interaction_required"),
             DelegationOutcome::Uncertain => Some("operation_result_unknown"),
@@ -519,7 +557,7 @@ async fn run_prompt(
             return Err(Error::new(-32000, message).data(json!({"usage": usage})));
         }
     }
-    if delivery_failed.load(Ordering::Acquire) {
+    if updates.delivery_failed.load(Ordering::Acquire) {
         return Err(
             Error::new(-32000, "prompt output could not be delivered in order")
                 .data(json!({"usage": usage})),

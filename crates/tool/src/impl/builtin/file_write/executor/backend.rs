@@ -243,8 +243,8 @@ impl ToolExecutor for FileWriteExecutor {
             }),
         };
 
-        let json_output =
-            serde_json::to_string(&output).map_err(|e| ToolExecutionError::ExecutionFailed {
+        let json_output = super::super::super::result_json(&output, backend.requires_text_files())
+            .map_err(|e| ToolExecutionError::ExecutionFailed {
                 message: format!("Failed to serialize output: {}", e),
             })?;
 

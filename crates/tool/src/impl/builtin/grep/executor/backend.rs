@@ -889,11 +889,10 @@ impl ToolExecutor for GrepExecutor {
 
         match self.call_inner(&input, &resolved_target, &backend).await {
             Ok(output) => {
-                let json = serde_json::to_string(&output).map_err(|e| {
-                    ToolExecutionError::ExecutionFailed {
+                let json = super::super::super::result_json(&output, backend.requires_text_files())
+                    .map_err(|e| ToolExecutionError::ExecutionFailed {
                         message: format!("Failed to serialize output: {}", e),
-                    }
-                })?;
+                    })?;
                 Ok(ToolExecutorOutput::Completed {
                     raw_outcome: RawToolOutcome::Success { output: json },
                 })

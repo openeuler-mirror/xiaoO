@@ -66,7 +66,10 @@ impl ToolExecutor for TodoWriteToolExecutor {
             new_todos: input.todos,
             verification_nudge_needed: Some(false),
         };
-        let output = serde_json::to_string(&output).map_err(|error| {
+        let client = runtime
+            .operation_backend()
+            .is_some_and(|backend| backend.requires_text_files());
+        let output = super::super::result_json(&output, client).map_err(|error| {
             ToolExecutionError::ExecutionFailed {
                 message: format!("failed to serialize todo_write output: {error}"),
             }

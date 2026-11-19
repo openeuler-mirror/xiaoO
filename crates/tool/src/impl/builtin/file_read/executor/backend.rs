@@ -415,11 +415,11 @@ impl ToolExecutor for FileReadExecutor {
                 .check_dedup_unchanged(&resolved_str, &input, mtime)
                 .await
             {
-                let json_output = serde_json::to_string(&output).map_err(|e| {
-                    ToolExecutionError::ExecutionFailed {
-                        message: format!("Failed to serialize output: {}", e),
-                    }
-                })?;
+                let json_output =
+                    super::super::super::result_json(&output, backend.requires_text_files())
+                        .map_err(|e| ToolExecutionError::ExecutionFailed {
+                            message: format!("Failed to serialize output: {}", e),
+                        })?;
                 return Ok(ToolExecutorOutput::Completed {
                     raw_outcome: RawToolOutcome::Success {
                         output: json_output,
@@ -474,11 +474,11 @@ impl ToolExecutor for FileReadExecutor {
                         spawn_touch_file(lsp, Path::new(&resolved_str));
                     }
                 }
-                let json_output = serde_json::to_string(&output).map_err(|e| {
-                    ToolExecutionError::ExecutionFailed {
-                        message: format!("Failed to serialize output: {}", e),
-                    }
-                })?;
+                let json_output =
+                    super::super::super::result_json(&output, backend.requires_text_files())
+                        .map_err(|e| ToolExecutionError::ExecutionFailed {
+                            message: format!("Failed to serialize output: {}", e),
+                        })?;
                 Ok(ToolExecutorOutput::Completed {
                     raw_outcome: RawToolOutcome::Success {
                         output: json_output,

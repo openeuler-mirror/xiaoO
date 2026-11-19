@@ -15,8 +15,11 @@ use serde_json::Value;
 use tokio::time::{timeout, timeout_at, Instant};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use xiaoo_shared::gateway::controlled_delegation::{
-    ClientCommand, ClientOperations, ControlledToolClient, ExecOutput, ExecResult, OperationError,
+    parse_tool_input, ClientCommand, ClientOperations, ControlledToolClient, ExecOutput,
+    ExecResult, OperationError,
 };
+
+use super::server::TurnUpdates;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(1);
@@ -56,6 +59,7 @@ pub(crate) struct Delegation {
 }
 
 struct ActiveTurn {
+    updates: TurnUpdates,
     cancel: CancellationToken,
     tasks: TaskTracker,
     calls: Mutex<HashSet<acp::ToolCallId>>,
@@ -87,13 +91,14 @@ impl Delegation {
         self.uncertain.load(Ordering::Acquire)
     }
 
-    pub fn start(&self, cancel: CancellationToken) {
+    pub fn start(&self, cancel: CancellationToken, updates: TurnUpdates) {
         let mut active = self
             .active
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         debug_assert!(active.is_none());
         *active = Some(Arc::new(ActiveTurn {
+            updates,
             cancel,
             tasks: TaskTracker::new(),
             calls: Mutex::default(),
@@ -118,7 +123,9 @@ impl Delegation {
         let calls =
             std::mem::take(&mut *turn.calls.lock().unwrap_or_else(|error| error.into_inner()));
         for id in calls {
-            let _ = self.update(tool_status(id, acp::ToolCallStatus::Failed));
+            let _ = turn
+                .updates
+                .emit(tool_status(id, acp::ToolCallStatus::Failed));
         }
         if self.is_uncertain() {
             DelegationOutcome::Uncertain
@@ -139,12 +146,6 @@ impl Delegation {
             return Err(cancelled());
         }
         Ok(turn.clone())
-    }
-
-    fn update(&self, update: acp::SessionUpdate) -> Result<(), OperationError> {
-        self.connection
-            .send_notification(acp::SessionNotification::new(self.session.clone(), update))
-            .map_err(|_| transport("client notification failed"))
     }
 
     async fn operation<T: Send + 'static>(
@@ -213,9 +214,11 @@ impl ControlledToolClient for Delegation {
         let turn = self.turn()?;
         let identifier = uuid::Uuid::new_v4().to_string();
         let id = acp::ToolCallId::new(identifier.clone());
-        self.update(acp::SessionUpdate::ToolCall(
-            acp::ToolCall::new(id.clone(), name).kind(kind(name)),
-        ))?;
+        turn.updates
+            .emit(acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(id.clone(), name).kind(kind(name)),
+            ))
+            .map_err(|_| cancelled())?;
         turn.calls
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -232,6 +235,8 @@ impl ControlledToolClient for Delegation {
                 Permission::Deny => false,
                 Permission::Preauthorized => true,
                 Permission::Ask => {
+                    // The client must receive the tool announcement before its approval request.
+                    turn.updates.flush().await.map_err(|_| cancelled())?;
                     let request = acp::RequestPermissionRequest::new(
                         self.session.clone(),
                         acp::ToolCallUpdate::new(
@@ -274,11 +279,14 @@ impl ControlledToolClient for Delegation {
         if turn.cancel.is_cancelled() {
             return Err(cancelled());
         }
-        self.update(tool_status(id, acp::ToolCallStatus::InProgress))?;
+        turn.updates
+            .emit(tool_status(id, acp::ToolCallStatus::InProgress))
+            .map_err(|_| cancelled())?;
+        turn.updates.flush().await.map_err(|_| cancelled())?;
         Ok(identifier)
     }
 
-    fn finish_tool(&self, id: &str, name: &str, output: Option<&str>) {
+    fn finish_tool(&self, id: &str, name: &str, completed_input: Option<&Value>) {
         let active = self
             .active
             .lock()
@@ -290,19 +298,17 @@ impl ControlledToolClient for Delegation {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&id);
-        let status = if output.is_some() {
+        let status = if completed_input.is_some() {
             acp::ToolCallStatus::Completed
         } else {
             acp::ToolCallStatus::Failed
         };
-        if self.update(tool_status(id, status)).is_err() {
-            turn.cancel.cancel();
-        }
-        if let Some(output) = output.filter(|_| name == "todo_write") {
-            if let Ok(todos) = serde_json::from_str::<TodoResult>(output) {
+        let _ = turn.updates.emit(tool_status(id, status));
+        if let Some(input) = completed_input.filter(|_| name == "todo_write") {
+            if let Ok(todos) = parse_tool_input::<TodoPlan>(input) {
                 let plan = acp::Plan::new(
                     todos
-                        .new_todos
+                        .todos
                         .into_iter()
                         .map(|item| {
                             acp::PlanEntry::new(
@@ -313,18 +319,15 @@ impl ControlledToolClient for Delegation {
                         })
                         .collect(),
                 );
-                if self.update(acp::SessionUpdate::Plan(plan)).is_err() {
-                    turn.cancel.cancel();
-                }
+                let _ = turn.updates.emit(acp::SessionUpdate::Plan(plan));
             }
         }
     }
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TodoResult {
-    new_todos: Vec<TodoItem>,
+struct TodoPlan {
+    todos: Vec<TodoItem>,
 }
 
 #[derive(Deserialize)]
@@ -442,19 +445,6 @@ impl TerminalController {
                 Err(_) => Ok(None),
             },
         };
-        let kill_failed = if !matches!(waited, Ok(Some(_))) {
-            let kill = acp::KillTerminalRequest::new(self.session.clone(), id.clone());
-            !matches!(
-                timeout(
-                    TERMINAL_CLEANUP_TIMEOUT,
-                    self.connection.send_request(kill).block_task()
-                )
-                .await,
-                Ok(Ok(_))
-            )
-        } else {
-            false
-        };
         let result = match waited {
             Ok(Some(exit)) => {
                 self.output(
@@ -471,6 +461,21 @@ impl TerminalController {
                 ..Default::default()
             }),
             Err(error) => Err(error),
+        };
+        let kill_failed = if result.as_ref().map_or(true, |result| result.timed_out)
+            || self.turn.cancel.is_cancelled()
+        {
+            let kill = acp::KillTerminalRequest::new(self.session.clone(), id.clone());
+            !matches!(
+                timeout(
+                    TERMINAL_CLEANUP_TIMEOUT,
+                    self.connection.send_request(kill).block_task()
+                )
+                .await,
+                Ok(Ok(_))
+            )
+        } else {
+            false
         };
         let release = acp::ReleaseTerminalRequest::new(self.session.clone(), id);
         if !matches!(
