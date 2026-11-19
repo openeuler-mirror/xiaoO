@@ -12,7 +12,10 @@ use agent_client_protocol::{
     Agent, ByteStreams, Client, ConnectionTo, Error, Responder,
 };
 use serde_json::{json, Map, Value};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::{
+    sync::{mpsc, Mutex},
+    task::JoinHandle,
+};
 use tokio_util::{
     compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt},
     sync::CancellationToken,
@@ -41,13 +44,17 @@ struct Server {
 struct Session {
     runtime: ControlledTextSession,
     state: Mutex<SessionState>,
-    idle: Notify,
 }
 
 struct SessionState {
     profile: String,
-    active: Option<CancellationToken>,
+    active: Option<ActivePrompt>,
     closing: bool,
+}
+
+struct ActivePrompt {
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
 }
 
 fn invalid(message: &str) -> Error {
@@ -168,7 +175,6 @@ impl Server {
                     active: None,
                     closing: false,
                 }),
-                idle: Notify::new(),
             }),
         );
         Ok(acp::NewSessionResponse::new(id).config_options(self.options(profile)))
@@ -219,64 +225,82 @@ impl Server {
             Ok(text) => text,
             Err(error) => return responder.respond_with_error(error),
         };
-        let cancel = self.disconnect.child_token();
-        {
-            let mut state = session.state.lock().await;
-            if let Err(error) = require_idle(&state) {
-                return responder.respond_with_error(error);
-            }
-            state.active = Some(cancel.clone());
+        let mut state = session.state.lock().await;
+        if let Err(error) = require_idle(&state) {
+            return responder.respond_with_error(error);
         }
-        tokio::spawn(async move {
-            let result = run_prompt(&session, text, cancel, &request.session_id, &connection).await;
-            let mut state = session.state.lock().await;
+        let cancel = self.disconnect.child_token();
+        let task_session = Arc::clone(&session);
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let result = run_prompt(
+                &task_session,
+                text,
+                task_cancel,
+                &request.session_id,
+                &connection,
+            )
+            .await;
+            let mut state = task_session.state.lock().await;
             // Serialize terminal response and idle admission for this session.
-            let _ = match result {
-                Ok(response) => responder.respond(response),
-                Err(error) => responder.respond_with_error(error),
-            };
+            let _ = responder.respond_with_result(result);
             state.active = None;
-            session.idle.notify_waiters();
         });
+        state.active = Some(ActivePrompt { cancel, task });
         Ok(())
     }
 
     async fn cancel(&self, id: &acp::SessionId) -> Result<(), Error> {
         let session = self.session(id).await?;
         if let Some(active) = &session.state.lock().await.active {
-            active.cancel();
+            active.cancel.cancel();
         }
         Ok(())
     }
 
-    async fn close(&self, id: &acp::SessionId) -> Result<acp::CloseSessionResponse, Error> {
+    async fn close(
+        self: &Arc<Self>,
+        id: &acp::SessionId,
+    ) -> Result<acp::CloseSessionResponse, Error> {
         let session = self.session(id).await?;
-        {
+        let active = {
             let mut state = session.state.lock().await;
             if state.closing {
                 return Err(Error::new(-32000, "session is closing"));
             }
             state.closing = true;
-            if let Some(active) = &state.active {
-                active.cancel();
-            }
+            state.active.take()
+        };
+        if let Some(active) = &active {
+            active.cancel.cancel();
         }
-        let closed = tokio::time::timeout(CLOSE_TIMEOUT, async {
-            loop {
-                let idle = session.idle.notified();
-                if session.state.lock().await.active.is_none() {
-                    break;
-                }
-                idle.await;
+
+        let server = Arc::clone(self);
+        let id = id.clone();
+        // The cleanup task owns the closing session until both the prompt and
+        // runtime close have settled, even if the request's deadline expires.
+        let cleanup = tokio::spawn(async move {
+            if let Some(active) = active {
+                let _ = active.task.await;
             }
-            session.runtime.close().await
-        })
-        .await;
-        self.sessions.lock().await.remove(id);
-        match closed {
-            Ok(Ok(())) => Ok(acp::CloseSessionResponse::new()),
-            Ok(Err(_)) => Err(Error::new(-32000, "session close failed")),
-            Err(_) => Err(Error::new(-32000, "session close timed out")),
+            match session.runtime.close().await {
+                Ok(()) => {
+                    server.sessions.lock().await.remove(&id);
+                    Ok(acp::CloseSessionResponse::new())
+                }
+                Err(_) => {
+                    session.state.lock().await.closing = false;
+                    Err(Error::new(-32000, "session close failed"))
+                }
+            }
+        });
+        match tokio::time::timeout(CLOSE_TIMEOUT, cleanup).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(Error::new(-32000, "session cleanup failed")),
+            Err(_) => Err(Error::new(
+                -32000,
+                "session close timed out; cleanup continues",
+            )),
         }
     }
 }
@@ -339,7 +363,7 @@ impl TurnOutput {
                 self.emit(update(acp::ContentChunk::new(delta.into())));
                 previous.push_str(delta);
             }
-        } else if !current.is_empty() && !previous.starts_with(current) {
+        } else {
             // ACP updates append text. A provider retry cannot replace what was
             // already sent to the client.
             self.delivery_failed.store(true, Ordering::Release);

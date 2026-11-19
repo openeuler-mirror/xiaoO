@@ -83,6 +83,12 @@ impl AppRuntimeFactory {
         cancel_token: Option<CancellationToken>,
         controlled: bool,
     ) -> Result<AppRuntimeAssembly, AppRuntimeFactoryError> {
+        let llm_provider = match cancel_token.as_ref() {
+            Some(cancel) if controlled => {
+                Arc::new(resolved.llm_provider.with_completion_cancel(cancel.clone()))
+            }
+            _ => Arc::clone(&resolved.llm_provider),
+        };
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl);
         // Defense-in-depth: every code path that resolves a session runtime
         // should have already injected a real `ContextManager` (daemon:
@@ -95,7 +101,7 @@ impl AppRuntimeFactory {
         let compression_pipeline: Arc<dyn CompressionPipeline> =
             match resolved.compression_pipeline.clone() {
                 Some(pipeline) => pipeline,
-                None => build_context_manager(None, Arc::clone(&resolved.llm_provider))?,
+                None => build_context_manager(None, Arc::clone(&llm_provider))?,
             };
         let tool_registry: Arc<dyn ToolRegistry> = resolved
             .tool_registry
@@ -196,7 +202,7 @@ impl AppRuntimeFactory {
         };
 
         let mut builder = Runtime::builder()
-            .llm_provider(Arc::clone(&resolved.llm_provider))
+            .llm_provider(llm_provider)
             .compression_pipeline(compression_pipeline)
             .prompt_builder(prompt_builder)
             .system_prompt(resolved.descriptor.system_prompt.clone())

@@ -134,6 +134,28 @@ fn contents(path: &Path) -> Vec<(String, Vec<u8>)> {
     entries
 }
 
+fn spawn_agent(config: &Path, cwd: &Path, home: &Path) -> Agent {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_xiaoo-acp"))
+        .arg("--config")
+        .arg(config)
+        .current_dir(cwd)
+        .env_clear()
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("ACP_TEST_KEY", "isolated-test-token")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    Agent {
+        input: child.stdin.take().unwrap(),
+        output: BufReader::new(child.stdout.take().unwrap()),
+        child,
+    }
+}
+
 #[tokio::test]
 async fn controlled_text_session_over_stdio() {
     let root = tempfile::tempdir().unwrap();
@@ -178,25 +200,7 @@ async fn controlled_text_session_over_stdio() {
     assert!(verbose.status.success());
     let verbose = std::str::from_utf8(&verbose.stdout).unwrap().trim();
 
-    let mut child = Command::new(binary)
-        .arg("--config")
-        .arg(config)
-        .current_dir(&cwd)
-        .env_clear()
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", &home)
-        .env("ACP_TEST_KEY", "isolated-test-token")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut agent = Agent {
-        input: child.stdin.take().unwrap(),
-        output: BufReader::new(child.stdout.take().unwrap()),
-        child,
-    };
+    let mut agent = spawn_agent(&config, &cwd, &home);
     let setup = json!({"cwd":"/client-workspace", "mcpServers":[]});
     let pre_init = agent.request(1, "session/new", setup.clone()).await;
     assert_eq!(pre_init["error"]["code"], -32600);
@@ -401,4 +405,150 @@ async fn controlled_text_session_over_stdio() {
     provider.await.unwrap();
     assert_eq!(contents(&cwd), cwd_before);
     assert_eq!(contents(&home), home_before);
+}
+
+async fn start_text_fixture(provider: &TcpListener, root: &Path) -> (Agent, String) {
+    let config = root.join("acp.toml");
+    let endpoint = format!(
+        "http://{}/v1/chat/completions",
+        provider.local_addr().unwrap()
+    );
+    std::fs::write(
+        &config,
+        format!(
+            "default_model = \"test\"\n{}context_window = 4096\n",
+            profile("test", "test-model", &endpoint, "ACP_TEST_KEY"),
+        ),
+    )
+    .unwrap();
+    let mut agent = spawn_agent(&config, root, root);
+    assert_eq!(
+        agent
+            .request(1, "initialize", json!({"protocolVersion": 1}))
+            .await["result"]["protocolVersion"],
+        1
+    );
+    let opened = agent
+        .request(2, "session/new", json!({"cwd":"/client","mcpServers":[]}))
+        .await;
+    let id = opened["result"]["sessionId"]
+        .as_str()
+        .expect("session ID")
+        .to_owned();
+    (agent, id)
+}
+
+#[tokio::test]
+async fn close_cancels_in_flight_compaction_before_releasing_session() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (mut agent, session) = start_text_fixture(&listener, root.path()).await;
+    let (compacting, wait_for_compaction) = oneshot::channel();
+
+    let provider = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = receive_request(&mut socket).await;
+            assert_eq!(request["stream"], true);
+            reply(&mut socket, "test-model", "reply", None).await;
+        }
+
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = receive_request(&mut socket).await;
+        assert_ne!(request["stream"], true);
+        assert!(request["messages"]
+            .to_string()
+            .contains("covered_message_count"));
+        compacting.send(()).unwrap();
+        // The compaction request remains blocked until the Agent drops it.
+        let mut buf = [0];
+        assert_eq!(socket.read(&mut buf).await.unwrap(), 0);
+    });
+
+    for call in 3..6 {
+        let reply = agent
+            .request(
+                call,
+                "session/prompt",
+                json!({"sessionId":session,"prompt":[{"type":"text","text":"seed history"}]}),
+            )
+            .await;
+        assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+    }
+
+    agent
+        .send(
+            Some(6),
+            "session/prompt",
+            json!({"sessionId":session,"prompt":[{"type":"text","text":"context token ".repeat(1200)}]}),
+        )
+        .await;
+    tokio::time::timeout(DEADLINE, wait_for_compaction)
+        .await
+        .unwrap()
+        .unwrap();
+    agent
+        .send(Some(7), "session/close", json!({"sessionId":session}))
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(4), async {
+        assert_eq!(
+            agent.response(6).await.0["result"]["stopReason"],
+            "cancelled"
+        );
+        assert_eq!(agent.response(7).await.0["result"], json!({}));
+        provider.await.unwrap();
+    })
+    .await
+    .expect("close must cancel the active compaction before returning success");
+}
+
+#[tokio::test]
+async fn retry_cannot_succeed_after_restarting_published_text() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (mut agent, session) = start_text_fixture(&listener, root.path()).await;
+    let (fail_first, wait_for_publication) = oneshot::channel();
+    let prefix = "the first reply has already been published";
+    let provider = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        receive_request(&mut socket).await;
+        let chunk = json!({
+            "id":"first","object":"chat.completion.chunk","created":0,"model":"test-model",
+            "choices":[{"index":0,"delta":{"content":prefix}}]
+        });
+        let body = format!("data: {chunk}\n\n");
+        socket.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n",
+            body.len()
+        ).as_bytes()).await.unwrap();
+        wait_for_publication.await.unwrap();
+        // End the first attempt without the HTTP chunk terminator. A retry
+        // would otherwise return the shortened prefix as a successful answer.
+        drop(socket);
+        let (mut retry, _) = listener.accept().await.unwrap();
+        receive_request(&mut retry).await;
+        reply(&mut retry, "test-model", "the first reply", None).await;
+    });
+
+    agent
+        .send(
+            Some(3),
+            "session/prompt",
+            json!({"sessionId":session,"prompt":[{"type":"text","text":"reply once"}]}),
+        )
+        .await;
+    let update = agent.next().await;
+    assert_eq!(update["method"], "session/update");
+    assert_eq!(update["params"]["update"]["content"]["text"], prefix);
+    fail_first.send(()).unwrap();
+
+    let (response, remaining_text) = agent.response(3).await;
+    assert_eq!(
+        response["error"]["message"], "prompt output could not be delivered in order",
+        "{response}"
+    );
+    assert!(remaining_text.is_empty());
+    provider.abort();
+    let _ = provider.await;
 }

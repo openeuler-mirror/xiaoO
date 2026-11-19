@@ -40,7 +40,11 @@ returned `protocolVersion: 1`. Agent capabilities advertise the
 | `session/set_config_option` | Set the `model` option to a configured profile ID while the session is idle. Subsequent turns keep the history and use the selected model. |
 | `session/prompt` | Accepts text and resource links as context. Resource links contribute their name and URI as text. Agent text and reasoning deltas are sent through `session/update` before the final response. One prompt may be active per session. |
 | `session/cancel` | Cancels the current prompt for the given session. A cancelled prompt finishes with `stopReason: "cancelled"`. |
-| `session/close` | Cancels any active prompt and releases the session. End of stdin closes the connection and its sessions. |
+| `session/close` | Cancels any active prompt and releases the session. If the close deadline expires, cleanup continues and new prompts are rejected during cleanup. End of stdin closes the connection and its sessions. |
+
+If the provider restarts or replaces text already queued for delivery, the
+prompt returns an error. Clients should discard the failed prompt's partial
+updates.
 
 The controlled profile has an empty tool registry. All nonempty MCP server
 lists are rejected, including the stdio MCP configuration that general ACP v1
@@ -65,5 +69,6 @@ The release build supplies `XIAOO_RELEASE_VERSION` (SemVer) and
 Building without release inputs reports the workspace version with a
 `-dev` suffix and an unknown commit.
 
-The Rust ACP SDK and schema are distributed under Apache-2.0. See the
-[SDK license](https://github.com/agentclientprotocol/rust-sdk/blob/main/LICENSE).
+The Rust ACP dependencies are distributed under Apache-2.0. See the
+[third-party notice](../License/Third_Party_Open_Source_Software_Notice.md)
+for the versions and copyright notices.

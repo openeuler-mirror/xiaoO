@@ -116,6 +116,22 @@ struct TurnUsage {
     incomplete: bool,
 }
 
+impl TurnUsage {
+    fn report(&self, interrupted: bool) -> ControlledTurnUsage {
+        let status = match (self.reported, self.incomplete || interrupted) {
+            (false, _) => "unavailable",
+            (true, true) => "partial",
+            (true, false) => "complete",
+        };
+        ControlledTurnUsage {
+            version: 1,
+            input_tokens: self.reported.then_some(self.input),
+            output_tokens: self.reported.then_some(self.output),
+            status,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlledTurnUsage {
@@ -130,8 +146,14 @@ struct MeteredProvider {
     usage: Arc<Mutex<TurnUsage>>,
 }
 
-impl MeteredProvider {
-    fn observe(&self, result: &Result<LlmResponse, LlmError>) {
+struct UsageAttempt<'a> {
+    usage: &'a Mutex<TurnUsage>,
+    finished: bool,
+}
+
+impl UsageAttempt<'_> {
+    fn finish(mut self, result: &Result<LlmResponse, LlmError>) {
+        self.finished = true;
         let mut meter = self.usage.lock().unwrap_or_else(|error| error.into_inner());
         if let Ok(response) = result {
             let usage = &response.message.usage;
@@ -147,11 +169,33 @@ impl MeteredProvider {
     }
 }
 
+impl Drop for UsageAttempt<'_> {
+    fn drop(&mut self) {
+        // A request deadline can drop the future before the provider reports usage.
+        if !self.finished {
+            self.usage
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .incomplete = true;
+        }
+    }
+}
+
+impl MeteredProvider {
+    fn attempt(&self) -> UsageAttempt<'_> {
+        UsageAttempt {
+            usage: &self.usage,
+            finished: false,
+        }
+    }
+}
+
 #[async_trait]
 impl LlmProvider for MeteredProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        let attempt = self.attempt();
         let result = self.inner.complete(request).await;
-        self.observe(&result);
+        attempt.finish(&result);
         result
     }
 
@@ -160,8 +204,9 @@ impl LlmProvider for MeteredProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
+        let attempt = self.attempt();
         let result = self.inner.complete_stream(request, on_chunk).await;
-        self.observe(&result);
+        attempt.finish(&result);
         result
     }
 
@@ -347,25 +392,16 @@ impl ControlledTextSession {
                 Some(events),
                 None,
                 None,
-                Some(cancel),
+                Some(cancel.clone()),
                 None,
             )
             .await
             .map(|turn| turn.outcome);
         let usage = self.usage.lock().unwrap_or_else(|error| error.into_inner());
-        let status = match (
-            usage.reported,
-            usage.incomplete || result.is_err() || matches!(result, Ok(TurnOutcome::Cancelled)),
-        ) {
-            (false, _) => "unavailable",
-            (true, true) => "partial",
-            (true, false) => "complete",
-        };
-        let usage = ControlledTurnUsage {
-            version: 1,
-            input_tokens: usage.reported.then_some(usage.input),
-            output_tokens: usage.reported.then_some(usage.output),
-            status,
+        let usage = usage.report(result.is_err() || matches!(result, Ok(TurnOutcome::Cancelled)));
+        let result = match result {
+            Err(_) if cancel.is_cancelled() => Ok(TurnOutcome::Cancelled),
+            result => result,
         };
         (result, usage)
     }
