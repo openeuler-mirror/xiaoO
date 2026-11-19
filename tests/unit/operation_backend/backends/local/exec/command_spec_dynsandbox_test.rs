@@ -164,40 +164,28 @@ fn linux_dynsandbox_exec_with_auth(
 }
 
 #[test]
-fn linux_dynsandbox_streaming_allows_blocked_path() {
-    let root = test_workspace_root("xiaoo-dyn-sandbox-", "allow");
-    let workspace = root.join("workspace");
-    let (result, prompts) = linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", true);
+fn linux_dynsandbox_streaming_auth_respects_the_user_choice() {
+    for (allow, verdict) in [(true, "ALLOW"), (false, "DENY")] {
+        let root = test_workspace_root("xiaoo-dyn-sandbox-", if allow { "allow" } else { "deny" });
+        let workspace = root.join("workspace");
+        let (result, prompts) =
+            linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", allow);
 
-    assert_eq!(result.exit_code, Some(0));
-    assert!(
-        String::from_utf8_lossy(result.stdout.as_slice()).contains("verdict:ALLOW"),
-        "stdout was: {:?}",
-        String::from_utf8_lossy(result.stdout.as_slice())
-    );
-    assert_eq!(prompts.len(), 1, "prompts: {prompts:?}");
-    assert!(
-        prompts[0].contains("/etc/shadow"),
-        "prompt was: {:?}",
-        prompts[0]
-    );
-    let _ = std::fs::remove_dir_all(root.as_path());
-}
-
-#[test]
-fn linux_dynsandbox_streaming_denies_on_user_choice() {
-    let root = test_workspace_root("xiaoo-dyn-sandbox-", "deny");
-    let workspace = root.join("workspace");
-    let (result, prompts) = linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", false);
-
-    assert_eq!(result.exit_code, Some(0));
-    assert!(
-        String::from_utf8_lossy(result.stdout.as_slice()).contains("verdict:DENY"),
-        "stdout was: {:?}",
-        String::from_utf8_lossy(result.stdout.as_slice())
-    );
-    assert_eq!(prompts.len(), 1);
-    let _ = std::fs::remove_dir_all(root.as_path());
+        assert_eq!(result.exit_code, Some(0));
+        assert!(
+            String::from_utf8_lossy(result.stdout.as_slice())
+                .contains(&format!("verdict:{verdict}")),
+            "stdout was: {:?}",
+            String::from_utf8_lossy(result.stdout.as_slice())
+        );
+        assert_eq!(prompts.len(), 1, "prompts: {prompts:?}");
+        assert!(
+            prompts[0].contains("/etc/shadow"),
+            "prompt was: {:?}",
+            prompts[0]
+        );
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
 }
 
 /// Regression test for the UFCS recursion bug in `exec_streaming`:

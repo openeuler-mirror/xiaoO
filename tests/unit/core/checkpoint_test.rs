@@ -42,24 +42,57 @@ fn push(state: &mut LoopState, text: &str) {
 async fn setup() -> (Arc<dyn CheckpointBackend>, CheckpointDriver, LoopState) {
     let backend = create(Default::default()).unwrap();
     let session_id = uuid::Uuid::new_v4().to_string();
-    let binding = backend
-        .init(
-            SnapshotContext {
-                session_id: session_id.clone(),
-            },
-            serde_json::json!({}),
-        )
+    let binding = init(&*backend, &ctx(&session_id), serde_json::json!({}))
         .await
         .unwrap();
     (backend, binding.driver.unwrap(), LoopState::new(session_id))
 }
 
+fn ctx(session_id: &str) -> SnapshotContext {
+    SnapshotContext {
+        session_id: session_id.to_string(),
+    }
+}
+
+/// The shared backend command call shapes: every test issues the same
+/// restore/delete/init requests, differing only in id, mode and config.
+async fn restore(
+    backend: &dyn CheckpointBackend,
+    context: &SnapshotContext,
+    snapshot_id: &SnapshotId,
+    mode: RestoreMode,
+) -> Result<(), CheckpointError> {
+    backend
+        .restore(
+            context.clone(),
+            RestoreRequest {
+                snapshot_id: snapshot_id.clone(),
+                mode,
+            },
+        )
+        .await
+}
+
+async fn delete(
+    backend: &dyn CheckpointBackend,
+    context: &SnapshotContext,
+    snapshot_id: &SnapshotId,
+) -> Result<(), CheckpointError> {
+    backend.delete_snapshot(context.clone(), snapshot_id).await
+}
+
+async fn init(
+    backend: &dyn CheckpointBackend,
+    context: &SnapshotContext,
+    config: serde_json::Value,
+) -> Result<CheckpointBinding, CheckpointError> {
+    backend.init(context.clone(), config).await
+}
+
 #[tokio::test]
 async fn snapshot_readiness_and_restore_preserve_shared_history_and_cancel() {
     let (backend, driver, mut state) = setup().await;
-    let context = SnapshotContext {
-        session_id: state.session_id.clone(),
-    };
+    let context = ctx(&state.session_id);
     push(&mut state, "base");
     state.plan_nudged = true;
     state.repeated_failure_count = 3;
@@ -70,15 +103,13 @@ async fn snapshot_readiness_and_restore_preserve_shared_history_and_cancel() {
     let mut turn = 4;
     let snapshot = backend.save(context.clone()).unwrap();
     assert!(matches!(
-        backend
-            .restore(
-                context.clone(),
-                RestoreRequest {
-                    mode: RestoreMode::EnsureSafeMode,
-                    snapshot_id: snapshot.id.clone()
-                }
-            )
-            .await,
+        restore(
+            &*backend,
+            &context,
+            &snapshot.id,
+            RestoreMode::EnsureSafeMode
+        )
+        .await,
         Err(CheckpointError::SnapshotNotReadyOrNotFound(_))
     ));
     driver.process_pending(&mut state, &mut turn, false).await;
@@ -87,16 +118,14 @@ async fn snapshot_readiness_and_restore_preserve_shared_history_and_cancel() {
     state.repeated_failure_count = 0;
     state.turn_count = 11;
     turn = 7;
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: snapshot.id,
-            },
-        )
-        .await
-        .unwrap();
+    restore(
+        &*backend,
+        &context,
+        &snapshot.id,
+        RestoreMode::EnsureSafeMode,
+    )
+    .await
+    .unwrap();
     assert_eq!(shared_messages.read().len(), 2, "restore only enqueues");
     driver.process_pending(&mut state, &mut turn, false).await;
     assert!(Arc::ptr_eq(&shared_messages, &state.messages));
@@ -113,100 +142,52 @@ async fn snapshot_readiness_and_restore_preserve_shared_history_and_cancel() {
 #[tokio::test]
 async fn restore_then_delete_executes_in_order_and_delete_rejects_new_restores() {
     let (backend, driver, mut state) = setup().await;
-    let context = SnapshotContext {
-        session_id: state.session_id.clone(),
-    };
+    let context = ctx(&state.session_id);
     push(&mut state, "base");
     let mut turn = 1;
     let a = backend.save(context.clone()).unwrap();
     driver.process_pending(&mut state, &mut turn, false).await;
     push(&mut state, "future");
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: a.id.clone(),
-            },
-        )
+    restore(&*backend, &context, &a.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
-    backend
-        .delete_snapshot(context.clone(), &a.id)
-        .await
-        .unwrap();
-    assert!(backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: a.id.clone()
-            }
-        )
-        .await
-        .is_err());
+    delete(&*backend, &context, &a.id).await.unwrap();
+    assert!(
+        restore(&*backend, &context, &a.id, RestoreMode::EnsureSafeMode)
+            .await
+            .is_err()
+    );
     driver.process_pending(&mut state, &mut turn, false).await;
     assert_eq!(state.messages.read().len(), 1);
-    assert!(backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: a.id
-            }
-        )
-        .await
-        .is_err());
+    assert!(
+        restore(&*backend, &context, &a.id, RestoreMode::EnsureSafeMode)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
 async fn one_boundary_keeps_independent_snapshots_in_command_order() {
     let (backend, driver, mut state) = setup().await;
-    let context = SnapshotContext {
-        session_id: state.session_id.clone(),
-    };
+    let context = ctx(&state.session_id);
     push(&mut state, "A");
     let mut turn = 1;
     let a = backend.save(context.clone()).unwrap();
     driver.process_pending(&mut state, &mut turn, false).await;
     push(&mut state, "B");
     let b = backend.save(context.clone()).unwrap();
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: a.id.clone(),
-            },
-        )
+    restore(&*backend, &context, &a.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
     let c = backend.save(context.clone()).unwrap();
     driver.process_pending(&mut state, &mut turn, false).await;
-    backend
-        .delete_snapshot(context.clone(), &a.id)
-        .await
-        .unwrap();
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: b.id,
-            },
-        )
+    delete(&*backend, &context, &a.id).await.unwrap();
+    restore(&*backend, &context, &b.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
     driver.process_pending(&mut state, &mut turn, false).await;
     assert_eq!(state.messages.read().len(), 2);
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: c.id,
-            },
-        )
+    restore(&*backend, &context, &c.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
     driver.process_pending(&mut state, &mut turn, false).await;
@@ -220,9 +201,7 @@ async fn one_boundary_keeps_independent_snapshots_in_command_order() {
 #[tokio::test]
 async fn release_reinit_reuses_driver_and_preserves_accepted_commands() {
     let (backend, driver, mut state) = setup().await;
-    let context = SnapshotContext {
-        session_id: state.session_id.clone(),
-    };
+    let context = ctx(&state.session_id);
     let mut turn = 1;
     push(&mut state, "base");
     let a = backend.save(context.clone()).unwrap();
@@ -233,19 +212,11 @@ async fn release_reinit_reuses_driver_and_preserves_accepted_commands() {
         Err(CheckpointError::Released)
     ));
     assert!(matches!(
-        backend
-            .restore(
-                context.clone(),
-                RestoreRequest {
-                    mode: RestoreMode::EnsureSafeMode,
-                    snapshot_id: a.id.clone()
-                }
-            )
-            .await,
+        restore(&*backend, &context, &a.id, RestoreMode::EnsureSafeMode).await,
         Err(CheckpointError::Released)
     ));
     assert!(matches!(
-        backend.delete_snapshot(context.clone(), &a.id).await,
+        delete(&*backend, &context, &a.id).await,
         Err(CheckpointError::Released)
     ));
     assert!(!driver.is_hot().await);
@@ -255,23 +226,10 @@ async fn release_reinit_reuses_driver_and_preserves_accepted_commands() {
         "queued snapshot runs before cooling"
     );
     assert!(matches!(
-        backend
-            .init(
-                SnapshotContext {
-                    session_id: "another-session".into()
-                },
-                serde_json::json!({})
-            )
-            .await,
+        init(&*backend, &ctx("another-session"), serde_json::json!({})).await,
         Err(CheckpointError::SessionMismatch)
     ));
-    let binding = backend
-        .init(
-            SnapshotContext {
-                session_id: state.session_id.clone(),
-            },
-            serde_json::json!({}),
-        )
+    let binding = init(&*backend, &ctx(&state.session_id), serde_json::json!({}))
         .await
         .unwrap();
     assert!(
@@ -279,53 +237,25 @@ async fn release_reinit_reuses_driver_and_preserves_accepted_commands() {
         "re-init must reuse the agent's driver"
     );
     assert!(matches!(
-        backend
-            .init(
-                SnapshotContext {
-                    session_id: state.session_id.clone()
-                },
-                serde_json::json!({})
-            )
-            .await,
+        init(&*backend, &ctx(&state.session_id), serde_json::json!({})).await,
         Err(CheckpointError::AlreadyInitialized)
     ));
     push(&mut state, "future");
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: a.id.clone(),
-            },
-        )
+    restore(&*backend, &context, &a.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
-    backend
-        .delete_snapshot(context.clone(), &a.id)
-        .await
-        .unwrap();
+    delete(&*backend, &context, &a.id).await.unwrap();
     backend.release(context.clone());
     // Re-init BEFORE the prior Release reaches the driver.
-    assert!(backend
-        .init(
-            SnapshotContext {
-                session_id: state.session_id.clone()
-            },
-            serde_json::json!({})
-        )
-        .await
-        .unwrap()
-        .driver
-        .is_none());
     assert!(
-        backend
-            .restore(
-                context.clone(),
-                RestoreRequest {
-                    mode: RestoreMode::EnsureSafeMode,
-                    snapshot_id: a.id.clone()
-                }
-            )
+        init(&*backend, &ctx(&state.session_id), serde_json::json!({}))
+            .await
+            .unwrap()
+            .driver
+            .is_none()
+    );
+    assert!(
+        restore(&*backend, &context, &a.id, RestoreMode::EnsureSafeMode)
             .await
             .is_err(),
         "logical deletion survives re-init"
@@ -341,25 +271,13 @@ async fn release_reinit_reuses_driver_and_preserves_accepted_commands() {
         1,
         "accepted restore survives release"
     );
-    assert!(backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: a.id
-            }
-        )
-        .await
-        .is_err());
+    assert!(
+        restore(&*backend, &context, &a.id, RestoreMode::EnsureSafeMode)
+            .await
+            .is_err()
+    );
     push(&mut state, "later");
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: b.id,
-            },
-        )
+    restore(&*backend, &context, &b.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
     driver.process_pending(&mut state, &mut turn, false).await;
@@ -414,9 +332,7 @@ async fn unix_socket_routes_requests_and_reactivates_same_driver() {
         serde_json::from_str(&response).unwrap()
     }
     let session_id = uuid::Uuid::new_v4().to_string();
-    let context = SnapshotContext {
-        session_id: session_id.clone(),
-    };
+    let context = ctx(&session_id);
     let endpoint = UnixCheckpointEndpoint::bind(session_id.clone(), socket_config())
         .await
         .unwrap();
@@ -606,62 +522,33 @@ async fn failed_save_does_not_make_snapshot_restorable() {
             Ok(())
         }
     }
-    let context = SnapshotContext {
-        session_id: "failed-save".into(),
-    };
-    let backend = QueuedCheckpointBackend::new(
+    let context = ctx("failed-save");
+    let backend = Arc::new(QueuedCheckpointBackend::new(
         Arc::new(FailedStorage),
         CheckpointConfig {
             save_mode: SaveMode::Next,
             ..Default::default()
         },
-    );
-    let driver = backend
-        .init(
-            SnapshotContext {
-                session_id: "failed-save".into(),
-            },
-            serde_json::json!({}),
-        )
+    ));
+    let driver = init(&*backend, &ctx("failed-save"), serde_json::json!({}))
         .await
         .unwrap()
         .driver
         .unwrap();
     let snapshot = backend.save(context.clone()).unwrap();
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                snapshot_id: snapshot.id.clone(),
-                mode: RestoreMode::PromiseMode,
-            },
-        )
+    restore(&*backend, &context, &snapshot.id, RestoreMode::PromiseMode)
         .await
         .unwrap();
     let mut state = LoopState::new("failed-save".into());
     push(&mut state, "unchanged");
     driver.process_pending(&mut state, &mut 1, false).await;
     assert!(backend
-        .list_checkpoint(
-            SnapshotContext {
-                session_id: "failed-save".into()
-            },
-            AccessMode::LastN,
-            None,
-        )
+        .list_checkpoint(ctx("failed-save"), AccessMode::LastN, None,)
         .unwrap()
         .is_empty());
     for mode in [RestoreMode::EnsureSafeMode, RestoreMode::PromiseMode] {
         assert!(matches!(
-            backend
-                .restore(
-                    context.clone(),
-                    RestoreRequest {
-                        mode,
-                        snapshot_id: snapshot.id.clone()
-                    }
-                )
-                .await,
+            restore(&*backend, &context, &snapshot.id, mode).await,
             Err(CheckpointError::SnapshotFailed(_))
         ));
     }
@@ -676,69 +563,43 @@ async fn failed_save_does_not_make_snapshot_restorable() {
 async fn release_barrier_keeps_pending_save_and_physical_delete() {
     use super::{backend::QueuedCheckpointBackend, storage::StorageFactory};
     let storage = storage::factory().create(StorageConfig::default()).unwrap();
-    let backend = QueuedCheckpointBackend::new(
+    let backend = Arc::new(QueuedCheckpointBackend::new(
         storage.clone(),
         CheckpointConfig {
             save_mode: SaveMode::Next,
             ..Default::default()
         },
-    );
-    let driver = backend
-        .init(
-            SnapshotContext {
-                session_id: "release-storage".into(),
-            },
-            serde_json::json!({}),
-        )
+    ));
+    let driver = init(&*backend, &ctx("release-storage"), serde_json::json!({}))
         .await
         .unwrap()
         .driver
         .unwrap();
-    let context = SnapshotContext {
-        session_id: "release-storage".into(),
-    };
+    let context = ctx("release-storage");
     let mut state = LoopState::new("release-storage".into());
     let saved = backend.save(context.clone()).unwrap();
     let deleted = backend.save(context.clone()).unwrap();
-    backend
-        .delete_snapshot(context.clone(), &deleted.id)
-        .await
-        .unwrap();
+    delete(&*backend, &context, &deleted.id).await.unwrap();
     backend.release(context.clone());
     assert!(storage.load(&saved.id).await.unwrap().is_none());
     driver.process_pending(&mut state, &mut 1, false).await;
     assert!(storage.load(&saved.id).await.unwrap().is_some());
     assert!(storage.load(&deleted.id).await.unwrap().is_none());
     assert!(!driver.is_hot().await);
-    backend
-        .init(
-            SnapshotContext {
-                session_id: state.session_id.clone(),
-            },
-            serde_json::json!({}),
-        )
+    init(&*backend, &ctx(&state.session_id), serde_json::json!({}))
         .await
         .unwrap();
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: saved.id,
-            },
-        )
+    restore(&*backend, &context, &saved.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
-    assert!(backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                mode: RestoreMode::EnsureSafeMode,
-                snapshot_id: deleted.id
-            }
-        )
-        .await
-        .is_err());
+    assert!(restore(
+        &*backend,
+        &context,
+        &deleted.id,
+        RestoreMode::EnsureSafeMode
+    )
+    .await
+    .is_err());
 }
 
 #[test]
@@ -759,9 +620,7 @@ fn restore_mode_is_required_in_request_json() {
 #[tokio::test]
 async fn restore_modes_accept_only_their_id_states_and_preserve_fifo() {
     let (backend, driver, mut state) = setup().await;
-    let context = SnapshotContext {
-        session_id: state.session_id.clone(),
-    };
+    let context = ctx(&state.session_id);
     let mut turn = 1;
     push(&mut state, "base");
     let base = backend.save(context.clone()).unwrap();
@@ -769,35 +628,19 @@ async fn restore_modes_accept_only_their_id_states_and_preserve_fifo() {
     push(&mut state, "future");
     let pending = backend.save(context.clone()).unwrap();
     assert!(matches!(
-        backend
-            .restore(
-                context.clone(),
-                RestoreRequest {
-                    snapshot_id: pending.id.clone(),
-                    mode: RestoreMode::EnsureSafeMode
-                }
-            )
-            .await,
+        restore(
+            &*backend,
+            &context,
+            &pending.id,
+            RestoreMode::EnsureSafeMode
+        )
+        .await,
         Err(CheckpointError::SnapshotNotReadyOrNotFound(_))
     ));
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                snapshot_id: base.id,
-                mode: RestoreMode::EnsureSafeMode,
-            },
-        )
+    restore(&*backend, &context, &base.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                snapshot_id: pending.id.clone(),
-                mode: RestoreMode::PromiseMode,
-            },
-        )
+    restore(&*backend, &context, &pending.id, RestoreMode::PromiseMode)
         .await
         .unwrap();
     driver.process_pending(&mut state, &mut turn, false).await;
@@ -807,24 +650,13 @@ async fn restore_modes_accept_only_their_id_states_and_preserve_fifo() {
         "promise restores the new snapshot after the intervening restore of base"
     );
     for mode in [RestoreMode::EnsureSafeMode, RestoreMode::PromiseMode] {
-        backend
-            .restore(
-                context.clone(),
-                RestoreRequest {
-                    snapshot_id: pending.id.clone(),
-                    mode,
-                },
-            )
+        restore(&*backend, &context, &pending.id, mode)
             .await
             .unwrap();
     }
-    backend
-        .delete_snapshot(context.clone(), &pending.id)
-        .await
-        .unwrap();
+    delete(&*backend, &context, &pending.id).await.unwrap();
     let deleted_while_pending = backend.save(context.clone()).unwrap();
-    backend
-        .delete_snapshot(context.clone(), &deleted_while_pending.id)
+    delete(&*backend, &context, &deleted_while_pending.id)
         .await
         .unwrap();
     for mode in [RestoreMode::EnsureSafeMode, RestoreMode::PromiseMode] {
@@ -834,15 +666,7 @@ async fn restore_modes_accept_only_their_id_states_and_preserve_fifo() {
             &SnapshotId("unknown".into()),
         ] {
             assert!(matches!(
-                backend
-                    .restore(
-                        context.clone(),
-                        RestoreRequest {
-                            snapshot_id: snapshot_id.clone(),
-                            mode
-                        }
-                    )
-                    .await,
+                restore(&*backend, &context, &snapshot_id, mode).await,
                 Err(CheckpointError::SnapshotNotReadyOrNotFound(_))
             ));
         }
@@ -851,16 +675,11 @@ async fn restore_modes_accept_only_their_id_states_and_preserve_fifo() {
     // deleted pending snapshot must not make its ID valid again.
     driver.process_pending(&mut state, &mut turn, false).await;
     for mode in [RestoreMode::EnsureSafeMode, RestoreMode::PromiseMode] {
-        assert!(backend
-            .restore(
-                context.clone(),
-                RestoreRequest {
-                    snapshot_id: deleted_while_pending.id.clone(),
-                    mode
-                }
-            )
-            .await
-            .is_err());
+        assert!(
+            restore(&*backend, &context, &deleted_while_pending.id, mode)
+                .await
+                .is_err()
+        );
     }
 }
 
@@ -875,20 +694,12 @@ async fn session_close_invalidates_retained_handles_and_closes_storage() {
             ..Default::default()
         },
     ));
-    let driver = backend
-        .init(
-            SnapshotContext {
-                session_id: "closing-session".into(),
-            },
-            serde_json::json!({}),
-        )
+    let driver = init(&*backend, &ctx("closing-session"), serde_json::json!({}))
         .await
         .unwrap()
         .driver
         .unwrap();
-    let context = SnapshotContext {
-        session_id: "closing-session".into(),
-    };
+    let context = ctx("closing-session");
     let mut state = LoopState::new("closing-session".into());
     let saved = backend.save(context.clone()).unwrap();
     driver.process_pending(&mut state, &mut 1, false).await;
@@ -901,26 +712,12 @@ async fn session_close_invalidates_retained_handles_and_closes_storage() {
         Err(CheckpointError::QueueClosed)
     ));
     assert!(matches!(
-        backend
-            .init(
-                SnapshotContext {
-                    session_id: state.session_id.clone()
-                },
-                serde_json::json!({})
-            )
-            .await,
+        init(&*backend, &ctx(&state.session_id), serde_json::json!({})).await,
         Err(CheckpointError::QueueClosed)
     ));
     backend.release(context.clone());
     assert!(matches!(
-        backend
-            .init(
-                SnapshotContext {
-                    session_id: state.session_id.clone()
-                },
-                serde_json::json!({})
-            )
-            .await,
+        init(&*backend, &ctx(&state.session_id), serde_json::json!({})).await,
         Err(CheckpointError::QueueClosed)
     ));
     assert!(matches!(
@@ -1065,9 +862,7 @@ async fn failed_socket_bind_is_not_retried_on_every_frame_and_recovers_after_mod
 #[tokio::test]
 async fn list_checkpoints_filters_states_and_preserves_save_order_across_release() {
     let (backend, driver, mut state) = setup().await;
-    let context = SnapshotContext {
-        session_id: state.session_id.clone(),
-    };
+    let context = ctx(&state.session_id);
     let list = |count| backend.list_checkpoint(context.clone(), AccessMode::LastN, count);
     assert!(list(None).unwrap().is_empty());
     let mut ids = Vec::new();
@@ -1083,44 +878,22 @@ async fn list_checkpoints_filters_states_and_preserves_save_order_across_release
     assert_eq!(list(Some(100)).unwrap(), newest);
     driver.process_pending(&mut state, &mut 1, false).await;
     assert_eq!(list(Some(-1)).unwrap(), newest);
-    backend
-        .delete_snapshot(context.clone(), &ids[10])
-        .await
-        .unwrap();
+    delete(&*backend, &context, &ids[10]).await.unwrap();
     let remaining: Vec<_> = newest.into_iter().filter(|id| id != &ids[10]).collect();
     assert_eq!(list(None).unwrap(), remaining[..10]);
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                snapshot_id: ids[0].clone(),
-                mode: RestoreMode::EnsureSafeMode,
-            },
-        )
+    restore(&*backend, &context, &ids[0], RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
     assert_eq!(list(Some(-1)).unwrap(), remaining);
     backend.release(context.clone());
     assert!(matches!(list(None), Err(CheckpointError::Released)));
     driver.process_pending(&mut state, &mut 1, false).await;
-    backend
-        .init(
-            SnapshotContext {
-                session_id: context.session_id.clone(),
-            },
-            serde_json::json!({}),
-        )
+    init(&*backend, &ctx(&context.session_id), serde_json::json!({}))
         .await
         .unwrap();
     assert_eq!(list(Some(-1)).unwrap(), remaining);
     assert!(matches!(
-        backend.list_checkpoint(
-            SnapshotContext {
-                session_id: "other-session".into()
-            },
-            AccessMode::LastN,
-            None,
-        ),
+        backend.list_checkpoint(ctx("other-session"), AccessMode::LastN, None,),
         Err(CheckpointError::SessionMismatch)
     ));
 }
@@ -1176,14 +949,13 @@ async fn snapshot_context_from_json_scopes_backend_operations() {
         .is_empty());
     assert!(SnapshotContext::from_json(r#"{"session_id":123}"#).is_err());
     assert!(SnapshotContext::from_json("invalid json").is_err());
-    let binding = backend
-        .init(context.clone(), serde_json::json!({}))
+    let binding = init(&*backend, &context, serde_json::json!({}))
         .await
         .unwrap();
     let snapshot = backend.save(context.clone()).unwrap();
     let other = SnapshotContext::from_json(r#"{"session_id":"other"}"#).unwrap();
     assert!(matches!(
-        backend.init(other.clone(), serde_json::json!({})).await,
+        init(&*backend, &other, serde_json::json!({})).await,
         Err(CheckpointError::SessionMismatch)
     ));
     assert!(matches!(
@@ -1191,19 +963,11 @@ async fn snapshot_context_from_json_scopes_backend_operations() {
         Err(CheckpointError::SessionMismatch)
     ));
     assert!(matches!(
-        backend
-            .restore(
-                other.clone(),
-                RestoreRequest {
-                    snapshot_id: snapshot.id.clone(),
-                    mode: RestoreMode::PromiseMode,
-                }
-            )
-            .await,
+        restore(&*backend, &other, &snapshot.id, RestoreMode::PromiseMode).await,
         Err(CheckpointError::SessionMismatch)
     ));
     assert!(matches!(
-        backend.delete_snapshot(other.clone(), &snapshot.id).await,
+        delete(&*backend, &other, &snapshot.id).await,
         Err(CheckpointError::SessionMismatch)
     ));
     backend.release(other);
@@ -1380,18 +1144,15 @@ async fn socket_bind_preserves_regular_files_and_symlinks() {
 async fn current_boundary_saves_pin_versions_and_restore_publishes_current() {
     use super::{backend::QueuedCheckpointBackend, storage::StorageFactory};
     let storage = storage::factory().create(StorageConfig::default()).unwrap();
-    let backend = QueuedCheckpointBackend::new(
+    let backend = Arc::new(QueuedCheckpointBackend::new(
         storage.clone(),
         CheckpointConfig {
             save_mode: SaveMode::Current,
             ..Default::default()
         },
-    );
-    let context = SnapshotContext {
-        session_id: "current-boundary".into(),
-    };
-    let driver = backend
-        .init(context.clone(), serde_json::json!({}))
+    ));
+    let context = ctx("current-boundary");
+    let driver = init(&*backend, &context, serde_json::json!({}))
         .await
         .unwrap()
         .driver
@@ -1413,15 +1174,7 @@ async fn current_boundary_saves_pin_versions_and_restore_publishes_current() {
     let a2 = backend.save(context.clone()).unwrap();
     assert_ne!(a1.id, a2.id);
     assert!(matches!(
-        backend
-            .restore(
-                context.clone(),
-                RestoreRequest {
-                    snapshot_id: a1.id.clone(),
-                    mode: RestoreMode::EnsureSafeMode,
-                }
-            )
-            .await,
+        restore(&*backend, &context, &a1.id, RestoreMode::EnsureSafeMode).await,
         Err(CheckpointError::SnapshotNotReadyOrNotFound(_))
     ));
     driver.process_pending(&mut state, &mut turn, false).await;
@@ -1429,14 +1182,7 @@ async fn current_boundary_saves_pin_versions_and_restore_publishes_current() {
     let stored_a2 = storage.load(&a2.id).await.unwrap().unwrap();
     assert!(Arc::ptr_eq(&stored_a1.context, &stored_a2.context));
     // Restore queued before save does not change which version save selects.
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                snapshot_id: a1.id.clone(),
-                mode: RestoreMode::EnsureSafeMode,
-            },
-        )
+    restore(&*backend, &context, &a1.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
     let b = backend.save(context.clone()).unwrap();
@@ -1444,34 +1190,22 @@ async fn current_boundary_saves_pin_versions_and_restore_publishes_current() {
     assert_eq!(state.messages.read().len(), 1);
     assert_eq!(state.messages.read()[0].text_content(), Some("A"));
     let restored_current = backend.save(context.clone()).unwrap();
-    backend
-        .delete_snapshot(context.clone(), &a1.id)
-        .await
-        .unwrap();
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                snapshot_id: b.id,
-                mode: RestoreMode::EnsureSafeMode,
-            },
-        )
+    delete(&*backend, &context, &a1.id).await.unwrap();
+    restore(&*backend, &context, &b.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
     driver.process_pending(&mut state, &mut turn, false).await;
     assert_eq!(state.messages.read().len(), 2);
     assert!(storage.load(&a1.id).await.unwrap().is_none());
     assert!(storage.load(&a2.id).await.unwrap().is_some());
-    backend
-        .restore(
-            context,
-            RestoreRequest {
-                snapshot_id: restored_current.id,
-                mode: RestoreMode::EnsureSafeMode,
-            },
-        )
-        .await
-        .unwrap();
+    restore(
+        &*backend,
+        &context,
+        &restored_current.id,
+        RestoreMode::EnsureSafeMode,
+    )
+    .await
+    .unwrap();
     driver.process_pending(&mut state, &mut turn, false).await;
     assert_eq!(state.messages.read().len(), 1);
     let encoded = serde_json::to_string(&stored_a2).unwrap();
@@ -1484,18 +1218,15 @@ async fn current_boundary_saves_pin_versions_and_restore_publishes_current() {
 async fn current_boundary_release_discards_current_but_keeps_accepted_saves() {
     use super::{backend::QueuedCheckpointBackend, storage::StorageFactory};
     let storage = storage::factory().create(StorageConfig::default()).unwrap();
-    let backend = QueuedCheckpointBackend::new(
+    let backend = Arc::new(QueuedCheckpointBackend::new(
         storage.clone(),
         CheckpointConfig {
             save_mode: SaveMode::Current,
             ..Default::default()
         },
-    );
-    let context = SnapshotContext {
-        session_id: "release-current".into(),
-    };
-    let driver = backend
-        .init(context.clone(), serde_json::json!({}))
+    ));
+    let context = ctx("release-current");
+    let driver = init(&*backend, &context, serde_json::json!({}))
         .await
         .unwrap()
         .driver
@@ -1510,8 +1241,7 @@ async fn current_boundary_release_discards_current_but_keeps_accepted_saves() {
     let stored = storage.load(&saved.id).await.unwrap().unwrap();
     stored.context.apply(&mut state, &mut 1);
     assert_eq!(state.messages.read().len(), 1);
-    backend
-        .init(context.clone(), serde_json::json!({}))
+    init(&*backend, &context, serde_json::json!({}))
         .await
         .unwrap();
     assert!(matches!(
@@ -1521,14 +1251,7 @@ async fn current_boundary_release_discards_current_but_keeps_accepted_saves() {
     push(&mut state, "new boundary");
     driver.process_pending(&mut state, &mut 2, false).await;
     let pending = backend.save(context.clone()).unwrap();
-    backend
-        .restore(
-            context,
-            RestoreRequest {
-                snapshot_id: pending.id,
-                mode: RestoreMode::PromiseMode,
-            },
-        )
+    restore(&*backend, &context, &pending.id, RestoreMode::PromiseMode)
         .await
         .unwrap();
     state.messages.write().clear();
@@ -1598,9 +1321,7 @@ fn checkpoint_tail_flag_survives_serialization_and_distinguishes_tool_calls() {
 async fn checkpoint_classifies_boundary_once_before_restoring_turn_and_history() {
     for (mut turn, append, keep_input) in [(1, true, true), (1, false, false), (2, true, false)] {
         let (backend, driver, mut state) = setup().await;
-        let context = SnapshotContext {
-            session_id: state.session_id.clone(),
-        };
+        let context = ctx(&state.session_id);
         let saved = vec![
             ChatMessage::user("A"),
             ChatMessage::text(MessageRole::Assistant, "answer", 0),
@@ -1612,16 +1333,14 @@ async fn checkpoint_classifies_boundary_once_before_restoring_turn_and_history()
         state.messages.write().push(input.clone());
         // Both restores must use entry state, even after the first rewinds to turn 7.
         for _ in 0..2 {
-            backend
-                .restore(
-                    context.clone(),
-                    RestoreRequest {
-                        snapshot_id: snapshot.id.clone(),
-                        mode: RestoreMode::EnsureSafeMode,
-                    },
-                )
-                .await
-                .unwrap();
+            restore(
+                &*backend,
+                &context,
+                &snapshot.id,
+                RestoreMode::EnsureSafeMode,
+            )
+            .await
+            .unwrap();
         }
         driver.process_pending(&mut state, &mut turn, append).await;
         let expected = if keep_input {
@@ -1654,18 +1373,15 @@ async fn checkpoint_load_failure_leaves_context_unchanged() {
             Ok(())
         }
     }
-    let context = SnapshotContext {
-        session_id: uuid::Uuid::new_v4().to_string(),
-    };
-    let backend = QueuedCheckpointBackend::new(
+    let context = ctx(&uuid::Uuid::new_v4().to_string());
+    let backend = Arc::new(QueuedCheckpointBackend::new(
         Arc::new(FailedLoad),
         CheckpointConfig {
             save_mode: SaveMode::Next,
             ..Default::default()
         },
-    );
-    let driver = backend
-        .init(context.clone(), serde_json::json!({}))
+    ));
+    let driver = init(&*backend, &context, serde_json::json!({}))
         .await
         .unwrap()
         .driver
@@ -1675,16 +1391,14 @@ async fn checkpoint_load_failure_leaves_context_unchanged() {
     let original = serde_json::to_value(state::ContextState::capture(&state, 1)).unwrap();
     let snapshot = backend.save(context.clone()).unwrap();
     driver.process_pending(&mut state, &mut 1, true).await;
-    backend
-        .restore(
-            context,
-            RestoreRequest {
-                snapshot_id: snapshot.id,
-                mode: RestoreMode::EnsureSafeMode,
-            },
-        )
-        .await
-        .unwrap();
+    restore(
+        &*backend,
+        &context,
+        &snapshot.id,
+        RestoreMode::EnsureSafeMode,
+    )
+    .await
+    .unwrap();
     driver.process_pending(&mut state, &mut 1, true).await;
     assert_eq!(
         serde_json::to_value(state::ContextState::capture(&state, 1)).unwrap(),
@@ -1743,11 +1457,8 @@ async fn memory_capacity_eviction_updates_checkpoint_ids_in_both_save_modes() {
                 ..Default::default()
             })
             .unwrap();
-            let context = SnapshotContext {
-                session_id: uuid::Uuid::new_v4().to_string(),
-            };
-            let driver = backend
-                .init(context.clone(), serde_json::json!({}))
+            let context = ctx(&uuid::Uuid::new_v4().to_string());
+            let driver = init(&*backend, &context, serde_json::json!({}))
                 .await
                 .unwrap()
                 .driver
@@ -1771,15 +1482,7 @@ async fn memory_capacity_eviction_updates_checkpoint_ids_in_both_save_modes() {
             );
             for id in &ids {
                 for mode in [RestoreMode::EnsureSafeMode, RestoreMode::PromiseMode] {
-                    let result = backend
-                        .restore(
-                            context.clone(),
-                            RestoreRequest {
-                                snapshot_id: id.clone(),
-                                mode,
-                            },
-                        )
-                        .await;
+                    let result = restore(&*backend, &context, &id, mode).await;
                     if expected.contains(id) {
                         result.unwrap();
                     } else {
@@ -1793,8 +1496,7 @@ async fn memory_capacity_eviction_updates_checkpoint_ids_in_both_save_modes() {
             driver.flush(&mut state, &mut 1).await;
             backend.release(context.clone());
             driver.flush(&mut state, &mut 1).await;
-            backend
-                .init(context.clone(), serde_json::json!({}))
+            init(&*backend, &context, serde_json::json!({}))
                 .await
                 .unwrap();
             assert_eq!(
@@ -1819,11 +1521,8 @@ async fn memory_fifo_middle_delete_frees_capacity_without_evicting_oldest() {
             ..Default::default()
         })
         .unwrap();
-        let context = SnapshotContext {
-            session_id: uuid::Uuid::new_v4().to_string(),
-        };
-        let driver = backend
-            .init(context.clone(), serde_json::json!({}))
+        let context = ctx(&uuid::Uuid::new_v4().to_string());
+        let driver = init(&*backend, &context, serde_json::json!({}))
             .await
             .unwrap()
             .driver
@@ -1837,10 +1536,7 @@ async fn memory_fifo_middle_delete_frees_capacity_without_evicting_oldest() {
             driver.flush(&mut state, &mut 1).await;
         }
         // A, B, C -> delete B -> save D: A must remain, even in the same batch.
-        backend
-            .delete_snapshot(context.clone(), &ids[1])
-            .await
-            .unwrap();
+        delete(&*backend, &context, &ids[1]).await.unwrap();
         let d = backend.save(context.clone()).unwrap();
         driver.flush(&mut state, &mut 1).await;
         assert_eq!(
@@ -1849,14 +1545,7 @@ async fn memory_fifo_middle_delete_frees_capacity_without_evicting_oldest() {
                 .unwrap(),
             vec![d.id.clone(), ids[2].clone(), ids[0].clone()]
         );
-        backend
-            .restore(
-                context.clone(),
-                RestoreRequest {
-                    snapshot_id: ids[0].clone(),
-                    mode: RestoreMode::EnsureSafeMode,
-                },
-            )
+        restore(&*backend, &context, &ids[0], RestoreMode::EnsureSafeMode)
             .await
             .unwrap();
         driver.flush(&mut state, &mut 1).await;
@@ -1878,25 +1567,23 @@ async fn init_save_mode_overrides_startup_and_defaults() {
     for startup in [SaveMode::Next, SaveMode::Current] {
         for override_mode in [None, Some(SaveMode::Next), Some(SaveMode::Current)] {
             let storage = storage::factory().create(StorageConfig::default()).unwrap();
-            let backend = QueuedCheckpointBackend::new(
+            let backend = Arc::new(QueuedCheckpointBackend::new(
                 storage.clone(),
                 CheckpointConfig {
                     save_mode: startup,
                     ..Default::default()
                 },
-            );
-            let context = SnapshotContext {
-                session_id: "init-options".into(),
-            };
-            let driver = backend
-                .init(
-                    context.clone(),
-                    serde_json::json!({"save_mode": override_mode}),
-                )
-                .await
-                .unwrap()
-                .driver
-                .unwrap();
+            ));
+            let context = ctx("init-options");
+            let driver = init(
+                &*backend,
+                &context,
+                serde_json::json!({"save_mode": override_mode}),
+            )
+            .await
+            .unwrap()
+            .driver
+            .unwrap();
             let mut state = LoopState::new(context.session_id.clone());
             push(&mut state, "published");
             driver.process_pending(&mut state, &mut 1, false).await;
@@ -1920,44 +1607,41 @@ async fn init_save_mode_overrides_startup_and_defaults() {
 async fn reinit_resolves_options_without_changing_accepted_saves() {
     use super::{backend::QueuedCheckpointBackend, storage::StorageFactory};
     let storage = storage::factory().create(StorageConfig::default()).unwrap();
-    let backend = QueuedCheckpointBackend::new(
+    let backend = Arc::new(QueuedCheckpointBackend::new(
         storage.clone(),
         CheckpointConfig {
             save_mode: SaveMode::Next,
             ..Default::default()
         },
-    );
-    let context = SnapshotContext {
-        session_id: "reinit-options".into(),
-    };
-    let driver = backend
-        .init(
-            context.clone(),
-            serde_json::json!({"save_mode": Some(SaveMode::Current)}),
-        )
-        .await
-        .unwrap()
-        .driver
-        .unwrap();
+    ));
+    let context = ctx("reinit-options");
+    let driver = init(
+        &*backend,
+        &context,
+        serde_json::json!({"save_mode": Some(SaveMode::Current)}),
+    )
+    .await
+    .unwrap()
+    .driver
+    .unwrap();
     let mut state = LoopState::new(context.session_id.clone());
     push(&mut state, "published");
     driver.process_pending(&mut state, &mut 1, false).await;
     let current = backend.save(context.clone()).unwrap();
     backend.release(context.clone());
     // Omission restores the startup mode, even before Release is processed.
-    backend
-        .init(context.clone(), serde_json::json!({}))
+    init(&*backend, &context, serde_json::json!({}))
         .await
         .unwrap();
     let next = backend.save(context.clone()).unwrap();
     backend.release(context.clone());
-    backend
-        .init(
-            context.clone(),
-            serde_json::json!({"save_mode": Some(SaveMode::Current)}),
-        )
-        .await
-        .unwrap();
+    init(
+        &*backend,
+        &context,
+        serde_json::json!({"save_mode": Some(SaveMode::Current)}),
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         backend.save(context.clone()),
         Err(CheckpointError::NoCurrentCheckpoint)
@@ -2021,9 +1705,7 @@ async fn socket_init_accepts_save_mode_override_and_rejects_invalid_options() {
 #[tokio::test]
 async fn invalid_init_json_does_not_bind_backend() {
     let backend = create(Default::default()).unwrap();
-    let context = SnapshotContext {
-        session_id: "invalid-config".into(),
-    };
+    let context = ctx("invalid-config");
     for config in [
         serde_json::json!({"save_mode": "invalid"}),
         serde_json::json!({"unknown": true}),
@@ -2031,7 +1713,7 @@ async fn invalid_init_json_does_not_bind_backend() {
         serde_json::json!(42),
     ] {
         assert!(matches!(
-            backend.init(context.clone(), config).await,
+            init(&*backend, &context, config).await,
             Err(CheckpointError::InvalidConfig(_))
         ));
         assert!(matches!(
@@ -2039,8 +1721,7 @@ async fn invalid_init_json_does_not_bind_backend() {
             Err(CheckpointError::NotInitialized)
         ));
     }
-    let _binding = backend
-        .init(context.clone(), serde_json::json!({}))
+    let _binding = init(&*backend, &context, serde_json::json!({}))
         .await
         .unwrap();
     assert!(backend.save(context).is_ok());
@@ -2049,15 +1730,12 @@ async fn invalid_init_json_does_not_bind_backend() {
 #[tokio::test]
 async fn snapshot_id_suffix_cycles_and_survives_reinit() {
     let (backend, _driver, state) = setup().await;
-    let context = SnapshotContext {
-        session_id: state.session_id.clone(),
-    };
+    let context = ctx(&state.session_id);
     let mut ids = std::collections::HashSet::new();
     for index in 0..28 {
         if index == 25 {
             backend.release(context.clone());
-            backend
-                .init(context.clone(), serde_json::json!({}))
+            init(&*backend, &context, serde_json::json!({}))
                 .await
                 .unwrap();
         }
@@ -2070,11 +1748,7 @@ async fn snapshot_id_suffix_cycles_and_survives_reinit() {
         assert!(ids.insert(snapshot.id));
     }
     let (other, _other_driver, other_state) = setup().await;
-    let snapshot = other
-        .save(SnapshotContext {
-            session_id: other_state.session_id,
-        })
-        .unwrap();
+    let snapshot = other.save(ctx(&other_state.session_id)).unwrap();
     assert!(snapshot.id.0.ends_with("_a"));
 }
 
@@ -2093,9 +1767,7 @@ async fn restore_notification_contains_the_saved_todos() {
         }
     }
     let (backend, driver, mut state) = setup().await;
-    let context = SnapshotContext {
-        session_id: state.session_id.clone(),
-    };
+    let context = ctx(&state.session_id);
     let todos: Vec<CheckpointTodoItem> = serde_json::from_value(serde_json::json!([
         {"content":"saved todo", "status":"pending"}
     ]))
@@ -2106,16 +1778,14 @@ async fn restore_notification_contains_the_saved_todos() {
     tool::restore_checkpoint_todos(&state.session_id, Vec::new());
     let sink = Arc::new(Sink::default());
     driver.set_update_sink(sink.clone());
-    backend
-        .restore(
-            context,
-            RestoreRequest {
-                snapshot_id: snapshot.id,
-                mode: RestoreMode::EnsureSafeMode,
-            },
-        )
-        .await
-        .unwrap();
+    restore(
+        &*backend,
+        &context,
+        &snapshot.id,
+        RestoreMode::EnsureSafeMode,
+    )
+    .await
+    .unwrap();
     driver.flush(&mut state, &mut 1).await;
     assert_eq!(*sink.0.lock().unwrap(), todos);
     assert_eq!(tool::checkpoint_todos(&state.session_id), todos);
@@ -2126,9 +1796,7 @@ async fn restore_notification_contains_the_saved_todos() {
 async fn checkpoint_defers_save_and_restore_until_all_tool_results_arrive() {
     use agent_types::ContentBlock;
     let (backend, driver, mut state) = setup().await;
-    let context = SnapshotContext {
-        session_id: state.session_id.clone(),
-    };
+    let context = ctx(&state.session_id);
     push(&mut state, "base");
     let base = backend.save(context.clone()).unwrap();
     driver.flush(&mut state, &mut 1).await;
@@ -2147,14 +1815,7 @@ async fn checkpoint_defers_save_and_restore_until_all_tool_results_arrive() {
         None,
     ));
     let saved = backend.save(context.clone()).unwrap();
-    backend
-        .restore(
-            context.clone(),
-            RestoreRequest {
-                snapshot_id: base.id,
-                mode: RestoreMode::EnsureSafeMode,
-            },
-        )
+    restore(&*backend, &context, &base.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
     for id in ["first", "second"] {
@@ -2163,15 +1824,7 @@ async fn checkpoint_defers_save_and_restore_until_all_tool_results_arrive() {
         driver.process_pending(&mut state, &mut 2, false).await;
         assert_eq!(*state.messages.read(), before);
         assert!(matches!(
-            backend
-                .restore(
-                    context.clone(),
-                    RestoreRequest {
-                        snapshot_id: saved.id.clone(),
-                        mode: RestoreMode::EnsureSafeMode,
-                    }
-                )
-                .await,
+            restore(&*backend, &context, &saved.id, RestoreMode::EnsureSafeMode).await,
             Err(CheckpointError::SnapshotNotReadyOrNotFound(_))
         ));
         state
@@ -2182,14 +1835,7 @@ async fn checkpoint_defers_save_and_restore_until_all_tool_results_arrive() {
     let completed = state.messages.read().clone();
     assert!(driver.flush(&mut state, &mut 2).await);
     assert_eq!(state.messages.read().len(), 1);
-    backend
-        .restore(
-            context,
-            RestoreRequest {
-                snapshot_id: saved.id,
-                mode: RestoreMode::EnsureSafeMode,
-            },
-        )
+    restore(&*backend, &context, &saved.id, RestoreMode::EnsureSafeMode)
         .await
         .unwrap();
     assert!(driver.flush(&mut state, &mut 2).await);

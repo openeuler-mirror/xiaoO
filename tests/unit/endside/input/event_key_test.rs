@@ -126,115 +126,88 @@ fn copy_and_cut_chords() {
 }
 
 #[test]
-fn plain_left_leaves_subagent_view() {
-    assert!(is_leave_subagent_view_key(&KeyEvent::new(
-        KeyCode::Left,
-        event::KeyModifiers::empty()
-    )));
+fn leave_subagent_view_key_is_plain_left_only() {
+    // Plain Left leaves the subagent view; a modified Left and the former
+    // Shift+Up shortcut must not (modifier bits are compared exactly).
+    for (code, modifiers, expected) in [
+        (KeyCode::Left, event::KeyModifiers::empty(), true),
+        (KeyCode::Left, event::KeyModifiers::SHIFT, false),
+        (KeyCode::Up, event::KeyModifiers::SHIFT, false),
+    ] {
+        assert_eq!(
+            is_leave_subagent_view_key(&KeyEvent::new(code, modifiers)),
+            expected,
+            "{code:?} with {modifiers:?}"
+        );
+    }
 }
 
 #[test]
-fn modified_left_does_not_leave_subagent_view() {
-    assert!(!is_leave_subagent_view_key(&KeyEvent::new(
-        KeyCode::Left,
-        event::KeyModifiers::SHIFT
-    )));
-}
-
-#[test]
-fn former_shift_up_shortcut_does_not_leave_subagent_view() {
-    assert!(!is_leave_subagent_view_key(&KeyEvent::new(
-        KeyCode::Up,
-        event::KeyModifiers::SHIFT
-    )));
-}
-
-#[test]
-fn alt_left_and_right_pan_the_wide_table() {
-    assert_eq!(
-        wide_table_pan_direction(&KeyEvent::new(KeyCode::Left, event::KeyModifiers::ALT)),
-        Some(-1)
-    );
-    assert_eq!(
-        wide_table_pan_direction(&KeyEvent::new(KeyCode::Right, event::KeyModifiers::ALT)),
-        Some(1)
-    );
-}
-
-#[test]
-fn unmodified_arrows_never_pan_the_wide_table() {
+fn only_alt_left_and_right_pan_the_wide_table() {
     // Bare Left/Right must stay on the caret and on "leave subagent view":
     // they are the primary editing keys and must not depend on whether a
     // wide table happens to be on screen.
+    for (code, modifiers, expected) in [
+        (KeyCode::Left, event::KeyModifiers::ALT, Some(-1)),
+        (KeyCode::Right, event::KeyModifiers::ALT, Some(1)),
+        // Unrelated keys, even with Alt, never pan.
+        (KeyCode::Up, event::KeyModifiers::ALT, None),
+        (KeyCode::Char('h'), event::KeyModifiers::ALT, None),
+    ] {
+        assert_eq!(
+            wide_table_pan_direction(&KeyEvent::new(code, modifiers)),
+            expected,
+            "{code:?} with {modifiers:?}"
+        );
+    }
+    // No other modifier combination on Left/Right pans either.
     for modifiers in [
         event::KeyModifiers::empty(),
         event::KeyModifiers::SHIFT,
         event::KeyModifiers::CONTROL,
         event::KeyModifiers::ALT | event::KeyModifiers::SHIFT,
     ] {
-        assert_eq!(
-            wide_table_pan_direction(&KeyEvent::new(KeyCode::Left, modifiers)),
-            None,
-            "modifiers {modifiers:?} must not pan"
-        );
-        assert_eq!(
-            wide_table_pan_direction(&KeyEvent::new(KeyCode::Right, modifiers)),
-            None,
-            "modifiers {modifiers:?} must not pan"
-        );
+        for code in [KeyCode::Left, KeyCode::Right] {
+            assert_eq!(
+                wide_table_pan_direction(&KeyEvent::new(code, modifiers)),
+                None,
+                "{code:?} with {modifiers:?} must not pan"
+            );
+        }
     }
 }
 
 #[test]
-fn alt_arrows_on_unrelated_keys_do_not_pan() {
-    assert_eq!(
-        wide_table_pan_direction(&KeyEvent::new(KeyCode::Up, event::KeyModifiers::ALT)),
-        None
-    );
-    assert_eq!(
-        wide_table_pan_direction(&KeyEvent::new(KeyCode::Char('h'), event::KeyModifiers::ALT)),
-        None
-    );
-}
-
-#[test]
-fn external_command_exact_match_expands_to_body() {
-    assert_eq!(
-        expand_external_command("/review", &external_commands()),
-        Some((
-            "Review this carefully.".to_string(),
-            xiaoo_api::chat::CommandContext {
-                command: "review".to_string(),
-                arguments: "".to_string()
-            }
-        ))
-    );
-}
-
-#[test]
-fn external_command_appends_user_input_after_command_token() {
-    assert_eq!(
-        expand_external_command("/review src/main.rs 看一下边界条件", &external_commands()),
-        Some((
-            "Review this carefully.\n\nsrc/main.rs 看一下边界条件".to_string(),
-            xiaoo_api::chat::CommandContext {
-                command: "review".to_string(),
-                arguments: "src/main.rs 看一下边界条件".to_string()
-            }
-        ))
-    );
-}
-
-#[test]
-fn external_command_match_only_uses_first_token() {
-    assert_eq!(
-        expand_external_command("/review-extra input", &external_commands()),
-        None
-    );
-    assert_eq!(
-        expand_external_command("/reviewer input", &external_commands()),
-        None
-    );
+fn external_command_expands_exact_first_token_and_appends_user_input() {
+    // The first token must match the command name exactly ("/review-extra"
+    // and "/reviewer" do not expand); user input after the token is
+    // appended to the body after a blank line.
+    for (input, expected) in [
+        ("/review", Some(("Review this carefully.", ""))),
+        (
+            "/review src/main.rs 看一下边界条件",
+            Some((
+                "Review this carefully.\n\nsrc/main.rs 看一下边界条件",
+                "src/main.rs 看一下边界条件",
+            )),
+        ),
+        ("/review-extra input", None),
+        ("/reviewer input", None),
+    ] {
+        assert_eq!(
+            expand_external_command(input, &external_commands()),
+            expected.map(|(body, arguments)| {
+                (
+                    body.to_string(),
+                    xiaoo_api::chat::CommandContext {
+                        command: "review".to_string(),
+                        arguments: arguments.to_string(),
+                    },
+                )
+            }),
+            "input {input:?}"
+        );
+    }
 }
 
 #[test]
@@ -344,95 +317,58 @@ async fn ctrl_x_without_selection_is_a_noop_through_dispatch() {
     assert!(!app.state.should_quit);
 }
 
+/// Ctrl+Insert and Ctrl+Shift+Insert both copy the selection through the
+/// real dispatch (`is_copy_chord` accepts either modifier set).
 #[tokio::test]
-async fn ctrl_insert_copies_selection_through_real_dispatch() {
+async fn ctrl_insert_variants_copy_selection_through_real_dispatch() {
     force_deterministic_clipboard_path();
-    let mut app = test_app();
-    let mut input = Input::from("hello world");
-    select_text(&mut input, 6, 11);
-    app.state.chat_state.input = input;
+    for event in [
+        KeyEvent::new(KeyCode::Insert, KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Insert, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+    ] {
+        let mut app = test_app();
+        let mut input = Input::from("hello world");
+        select_text(&mut input, 6, 11); // "world"
+        app.state.chat_state.input = input;
 
-    app.handle_key_event(KeyEvent::new(KeyCode::Insert, KeyModifiers::CONTROL))
-        .await
-        .expect("dispatch Ctrl+Insert");
+        app.handle_key_event(event)
+            .await
+            .expect("dispatch copy chord");
 
-    // Copy never mutates the line…
-    assert_eq!(app.state.chat_state.input.value(), "hello world");
-    // …the copy path actually ran (not swallowed by another action):
-    assert!(
-        copy_feedback(&app),
-        "Ctrl+Insert must route to the copy path"
-    );
-    assert!(!app.state.should_quit);
+        // Copy never mutates the line…
+        assert_eq!(app.state.chat_state.input.value(), "hello world");
+        // …the copy path actually ran (not swallowed by another action):
+        assert!(
+            copy_feedback(&app),
+            "copy chord {event:?} must route to the copy path"
+        );
+        assert!(!app.state.should_quit);
+    }
 }
 
+/// Ctrl+J / Alt+Enter / Ctrl+Enter all insert a newline at the caret
+/// through the real dispatch instead of submitting.
 #[tokio::test]
-async fn ctrl_shift_insert_copies_selection_too() {
-    force_deterministic_clipboard_path();
-    let mut app = test_app();
-    let mut input = Input::from("hello world");
-    select_text(&mut input, 6, 11);
-    app.state.chat_state.input = input;
+async fn newline_chords_insert_newline_through_real_dispatch() {
+    for event in [
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+    ] {
+        let mut app = test_app();
+        let mut input = Input::from("hello world");
+        input.set_cursor(6);
+        app.state.chat_state.input = input;
 
-    app.handle_key_event(KeyEvent::new(
-        KeyCode::Insert,
-        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-    ))
-    .await
-    .expect("dispatch Ctrl+Shift+Insert");
+        app.handle_key_event(event)
+            .await
+            .expect("dispatch newline chord");
 
-    assert_eq!(app.state.chat_state.input.value(), "hello world");
-    assert!(copy_feedback(&app), "Ctrl+Shift+Insert must route to copy");
-    assert!(!app.state.should_quit);
-}
-
-#[tokio::test]
-async fn ctrl_j_inserts_newline_through_real_dispatch() {
-    let mut app = test_app();
-    let mut input = Input::from("hello world");
-    input.set_cursor(6);
-    app.state.chat_state.input = input;
-
-    app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
-        .await
-        .expect("dispatch Ctrl+J");
-
-    assert_eq!(app.state.chat_state.input.value(), "hello \nworld");
-    assert_eq!(app.state.chat_state.input.cursor(), 7);
-    // A newline is not a submit: still editing, nothing sent.
-    assert!(app.state.input_mode == InputMode::Editing);
-}
-
-#[tokio::test]
-async fn alt_enter_inserts_newline_through_real_dispatch() {
-    let mut app = test_app();
-    let mut input = Input::from("hi");
-    input.set_cursor(2);
-    app.state.chat_state.input = input;
-
-    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT))
-        .await
-        .expect("dispatch Alt+Enter");
-
-    assert_eq!(app.state.chat_state.input.value(), "hi\n");
-    assert_eq!(app.state.chat_state.input.cursor(), 3);
-    assert!(app.state.input_mode == InputMode::Editing);
-}
-
-#[tokio::test]
-async fn ctrl_enter_inserts_newline_through_real_dispatch() {
-    let mut app = test_app();
-    let mut input = Input::from("hi");
-    input.set_cursor(2);
-    app.state.chat_state.input = input;
-
-    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
-        .await
-        .expect("dispatch Ctrl+Enter");
-
-    assert_eq!(app.state.chat_state.input.value(), "hi\n");
-    assert_eq!(app.state.chat_state.input.cursor(), 3);
-    assert!(app.state.input_mode == InputMode::Editing);
+        assert_eq!(app.state.chat_state.input.value(), "hello \nworld");
+        assert_eq!(app.state.chat_state.input.cursor(), 7);
+        // A newline is not a submit: still editing, nothing sent.
+        assert!(app.state.input_mode == InputMode::Editing);
+    }
 }
 
 #[tokio::test]

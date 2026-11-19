@@ -1,8 +1,8 @@
 use super::*;
 use crate::backend::GatewayBackendConfig;
 use crate::gateway::{
-    AppBootstrap, GatewayEntryContext, InMemorySessionStore, ReaperPolicy, SessionInput,
-    SessionInputKind, SessionRuntimeBindings, SessionRuntimeDescriptor, TurnOutcome,
+    AppBootstrap, AppDependencies, GatewayEntryContext, InMemorySessionStore, ReaperPolicy,
+    SessionInput, SessionInputKind, SessionRuntimeBindings, SessionRuntimeDescriptor, TurnOutcome,
     ORPHAN_SESSION_THRESHOLD_MS, STALE_LEASE_THRESHOLD_MS,
 };
 use agent_contracts::backend::BackendLifecycleState;
@@ -34,107 +34,71 @@ use std::collections::HashSet;
 type RecordedInvocations = Arc<StdMutex<Vec<(String, String, Option<String>)>>>;
 
 #[test]
-fn runtime_exec_shell_prefers_explicit_shell() {
-    assert_eq!(
-        resolve_runtime_exec_shell(Some("/bin/zsh".to_string()), Some("/bin/bash")),
-        "/bin/zsh"
-    );
-}
-
-#[test]
-fn runtime_exec_shell_uses_backend_default() {
-    assert_eq!(
-        resolve_runtime_exec_shell(None, Some("/bin/bash")),
-        "/bin/bash"
-    );
-}
-
-#[test]
-fn runtime_exec_shell_falls_back_to_posix_shell() {
-    assert_eq!(resolve_runtime_exec_shell(None, None), "/bin/sh");
-}
-
-#[test]
-fn stamp_and_cap_stamps_send_prompt_with_next_depth() {
-    // A plugin omits `chain_depth` (parses to 0); the daemon overwrites
-    // it with `emitting_turn_depth + 1` regardless of the plugin value.
-    let actions = vec![HookAction::SendPrompt {
-        session_id: "s1".into(),
-        text: "hi".into(),
-        chain_depth: 0,
-    }];
-    let stamped = stamp_and_cap_send_prompt_actions(actions, 5, 128);
-    assert_eq!(stamped.len(), 1);
-    match &stamped[0] {
-        HookAction::SendPrompt { chain_depth, .. } => assert_eq!(*chain_depth, 6),
-        _ => panic!("expected SendPrompt"),
+fn resolve_runtime_exec_shell_prefers_explicit_then_backend_default_then_posix() {
+    // Priority: per-request explicit shell > backend-configured default > POSIX fallback.
+    for (explicit, backend_default, expected) in [
+        (Some("/bin/zsh".to_string()), Some("/bin/bash"), "/bin/zsh"),
+        (None, Some("/bin/bash"), "/bin/bash"),
+        (None, None, "/bin/sh"),
+    ] {
+        assert_eq!(
+            resolve_runtime_exec_shell(explicit, backend_default),
+            expected
+        );
     }
 }
 
 #[test]
-fn stamp_and_cap_overwrites_plugin_supplied_depth() {
-    // A plugin cannot forge a low depth to bypass the cap: the daemon
-    // ignores any plugin-supplied value and stamps the real next depth.
-    // Here `next_depth = 129 >= 128` → dropped regardless of the plugin
-    // value (emitting depth 128 is itself only reachable if the cap were
-    // higher; the point of this test is the override + drop, not the
-    // reachability of the emitting depth).
-    let actions = vec![HookAction::SendPrompt {
-        session_id: "s1".into(),
-        text: "hi".into(),
-        chain_depth: 0, // plugin tries to look like a depth-0 turn
-    }];
-    let stamped = stamp_and_cap_send_prompt_actions(actions, 128, 128);
-    // next = 129 >= 128 cap → dropped, not forwarded.
-    assert!(stamped.is_empty());
-}
-
-#[test]
-fn stamp_and_cap_drops_send_prompt_above_cap() {
-    let actions = vec![HookAction::SendPrompt {
-        session_id: "s1".into(),
-        text: "hi".into(),
-        chain_depth: 0,
-    }];
-    // emitting depth = cap (3) → next = 4 >= 3 → dropped (way above cap).
-    assert!(stamp_and_cap_send_prompt_actions(actions, 3, 3).is_empty());
-}
-
-#[test]
-fn stamp_and_cap_drops_send_prompt_at_boundary() {
-    // Cap is an EXCLUSIVE upper bound: a `send_prompt` whose next-turn
-    // depth would equal `max_depth` is dropped. `max_depth = N` permits
-    // turns at depths `0..=N-1` (N turns total); the `N`-th-turn-after-
-    // user (depth `N`) must not start.
+fn stamp_and_cap_covers_stamping_plugin_override_and_boundary_drops() {
+    // All cases send a plugin-supplied `send_prompt` whose parsed
+    // `chain_depth` is 0 (omitted or forged): the daemon overwrites it
+    // with `emitting_turn_depth + 1` regardless of the plugin value — a
+    // plugin cannot forge a low depth to bypass the cap, because the
+    // drop decision uses the stamped depth.
     //
-    // emitting depth = cap - 1 = 2 → next = 3 == cap → dropped.
-    let actions = vec![HookAction::SendPrompt {
-        session_id: "s1".into(),
-        text: "hi".into(),
-        chain_depth: 0,
-    }];
-    let stamped = stamp_and_cap_send_prompt_actions(actions, 2, 3);
-    assert!(
-        stamped.is_empty(),
-        "next_depth == max_depth must be dropped (exclusive cap)"
-    );
-}
-
-#[test]
-fn stamp_and_cap_keeps_send_prompt_just_below_boundary() {
-    // emitting depth = cap - 2 = 1 → next = 2 = cap - 1 < cap → the
-    // last allowed turn (depth `max - 1`) is permitted to run. With
-    // max=3 this is the 3rd turn in the chain (depths 0, 1, 2).
-    let actions = vec![HookAction::SendPrompt {
-        session_id: "s1".into(),
-        text: "hi".into(),
-        chain_depth: 0,
-    }];
-    let stamped = stamp_and_cap_send_prompt_actions(actions, 1, 3);
-    assert_eq!(stamped.len(), 1);
-    match &stamped[0] {
-        HookAction::SendPrompt { chain_depth, .. } => assert_eq!(*chain_depth, 2),
-        _ => panic!("expected SendPrompt"),
+    // The cap is an EXCLUSIVE upper bound: a `send_prompt` whose
+    // next-turn depth would equal `max_depth` is dropped. `max_depth = N`
+    // permits turns at depths `0..=N-1` (N turns total); the `N`-th-turn-
+    // after-user (depth `N`) must not start.
+    let cases: &[(usize, usize, Option<usize>)] = &[
+        // Stamps the real next depth over the plugin-supplied value.
+        (5, 128, Some(6)),
+        // Plugin-forge protection: next = 129 >= cap 128 → dropped even
+        // though the plugin-supplied value is below the cap (emitting
+        // depth 128 is itself only reachable if the cap were higher; the
+        // point is the override + drop, not the reachability).
+        (128, 128, None),
+        // Way above cap: emitting 3, cap 3 → next 4 >= 3 → dropped.
+        (3, 3, None),
+        // Boundary: emitting 2, cap 3 → next 3 == cap → dropped.
+        (2, 3, None),
+        // Just below: emitting 1, cap 3 → next 2 = cap - 1 < cap → the
+        // last allowed turn (depths 0, 1, 2) is permitted to run.
+        (1, 3, Some(2)),
+    ];
+    for &(emitting_depth, cap, expected_depth) in cases {
+        let actions = vec![HookAction::SendPrompt {
+            session_id: "s1".into(),
+            text: "hi".into(),
+            chain_depth: 0, // plugin tries to look like a depth-0 turn
+        }];
+        let stamped = stamp_and_cap_send_prompt_actions(actions, emitting_depth, cap);
+        match expected_depth {
+            Some(expected) => {
+                assert_eq!(stamped.len(), 1, "emitting={emitting_depth}, cap={cap}");
+                match &stamped[0] {
+                    HookAction::SendPrompt { chain_depth, .. } => {
+                        assert_eq!(*chain_depth, expected)
+                    }
+                    _ => panic!("expected SendPrompt"),
+                }
+            }
+            None => assert!(
+                stamped.is_empty(),
+                "next_depth >= max_depth must be dropped (exclusive cap); \
+                 emitting={emitting_depth}, cap={cap}"
+            ),
+        }
     }
 }
 
@@ -286,12 +250,66 @@ fn stub_llm_provider() -> Arc<LlmProviderWrapper> {
     ))
 }
 
+/// Build a `StubRuntimeResolver` whose `backend_options` points
+/// `temp_root` at `workspace`, so the stub backend writes into the
+/// test's tempdir instead of the real workspace. Centralises the
+/// `{ workspace_root, backend_options, llm_provider }` triple shared
+/// by the turn / reaper / checkpoint / fork / hook tests.
+fn make_stub_resolver(workspace: &std::path::Path) -> Arc<StubRuntimeResolver> {
+    Arc::new(StubRuntimeResolver {
+        workspace_root: workspace.to_path_buf(),
+        backend_options: json!({"temp_root": workspace.to_string_lossy().to_string()}),
+        llm_provider: stub_llm_provider(),
+        cancel_token: None,
+    })
+}
+
+/// Same as [`make_stub_resolver`], but with the replying LLM provider —
+/// for tests whose turns must actually complete.
+fn make_replying_resolver(
+    workspace: &std::path::Path,
+    seen_requests: Arc<StdMutex<Vec<LlmRequest>>>,
+) -> Arc<StubRuntimeResolver> {
+    Arc::new(StubRuntimeResolver {
+        workspace_root: workspace.to_path_buf(),
+        backend_options: json!({"temp_root": workspace.to_string_lossy().to_string()}),
+        llm_provider: replying_llm_provider(seen_requests),
+        cancel_token: None,
+    })
+}
+
+/// Assemble the short-form `AppDependencies` used by most tests
+/// (default hooker config, fresh backend manager, reaper disabled).
+fn make_dependencies(
+    store: &Arc<InMemorySessionStore>,
+    resolver: Arc<dyn SessionRuntimeResolver>,
+) -> AppDependencies {
+    make_dependencies_with_backend_manager(store, resolver, &Arc::new(BackendManager::new()))
+}
+
+/// Same as [`make_dependencies`], but with a caller-owned backend manager
+/// (for tests that inspect the manager afterwards).
+fn make_dependencies_with_backend_manager(
+    store: &Arc<InMemorySessionStore>,
+    resolver: Arc<dyn SessionRuntimeResolver>,
+    backend_manager: &Arc<BackendManager>,
+) -> AppDependencies {
+    let store: Arc<dyn SessionStore> = store.clone();
+    AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+        store,
+        resolver,
+        HookerRegistryConfig::default(),
+        Arc::clone(backend_manager),
+    )
+    .expect("dependencies")
+}
+
 /// Resolver decorator that parks in `resolve` before delegating, letting
 /// tests submit a cancel while a turn is still inside `run_turn_inner`'s
 /// resolution phase (submitted, but not yet queued in the session
 /// actor).
 struct DelayedResolver {
-    inner: StubRuntimeResolver,
+    inner: Arc<StubRuntimeResolver>,
     delay: std::time::Duration,
 }
 
@@ -474,17 +492,23 @@ async fn save_session_without_backend(
     session
 }
 
+/// The no-frills checkpoint request (null metadata, no name) shared by
+/// the checkpoint / checkout / cascade tests.
+fn null_checkpoint_request(runtime_id: String) -> RuntimeCheckpointRequest {
+    RuntimeCheckpointRequest {
+        runtime_id,
+        metadata: Value::Null,
+        name: None,
+        client_id: None,
+    }
+}
+
 #[tokio::test]
 async fn memory_automation_failed_recall_keeps_user_text_and_turn_execution_unchanged() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
     let seen_requests = Arc::new(StdMutex::new(Vec::new()));
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: replying_llm_provider(Arc::clone(&seen_requests)),
-        cancel_token: None,
-    });
+    let resolver = make_replying_resolver(workspace.path(), Arc::clone(&seen_requests));
     let automation = Arc::new(FailingRecallAutomation {
         context_messages: 2,
         ..FailingRecallAutomation::default()
@@ -551,37 +575,12 @@ async fn memory_automation_failed_recall_keeps_user_text_and_turn_execution_unch
 async fn open_session_persists_active_backend_instance() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let resolver = make_stub_resolver(workspace.path());
+    let dependencies = make_dependencies(&store, resolver);
 
     let record = dependencies
         .session_control_plane
-        .open_session(SessionOpenRequest {
-            session_id: "s1".to_string(),
-            conversation_id: "c1".to_string(),
-            sender_id: "u1".to_string(),
-            entry: GatewayEntryContext::tui(None),
-            channel: None,
-            channel_instance_id: None,
-            llm: None,
-            workspace: None,
-            skills: None,
-
-            client_id: None,
-            client_pid: None,
-            client_hostname: None,
-        })
+        .open_session(test_open_request("s1"))
         .await
         .expect("open session");
     let instance = record.backend_instance.expect("backend instance");
@@ -600,19 +599,8 @@ async fn open_session_persists_active_backend_instance() {
 async fn existing_handle_does_not_bypass_bootstrap_binding_validation() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let resolver = make_stub_resolver(workspace.path());
+    let dependencies = make_dependencies(&store, resolver);
 
     dependencies
         .session_control_plane
@@ -641,19 +629,8 @@ async fn open_session_preserves_imported_loop_state() {
     // chat messages.
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver.clone(),
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let resolver = make_stub_resolver(workspace.path());
+    let dependencies = make_dependencies(&store, resolver.clone());
 
     // Simulate `/load`: seed the store with an Idle record carrying a
     // non-empty loop_state (two ChatMessages).
@@ -700,21 +677,7 @@ async fn open_session_preserves_imported_loop_state() {
     // Now the user sends a new prompt -> `open_session` runs.
     let opened = dependencies
         .session_control_plane
-        .open_session(SessionOpenRequest {
-            session_id: "s-import".to_string(),
-            conversation_id: "c-import".to_string(),
-            sender_id: "u1".to_string(),
-            entry: GatewayEntryContext::tui(None),
-            channel: None,
-            channel_instance_id: None,
-            llm: None,
-            workspace: None,
-            skills: None,
-
-            client_id: None,
-            client_pid: None,
-            client_hostname: None,
-        })
+        .open_session(test_open_request("s-import"))
         .await
         .expect("open imported session");
 
@@ -759,37 +722,12 @@ async fn open_session_preserves_imported_loop_state() {
 async fn submit_cancel_active_turn_routes_through_session_handle() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let resolver = make_stub_resolver(workspace.path());
+    let dependencies = make_dependencies(&store, resolver);
 
     dependencies
         .session_control_plane
-        .open_session(SessionOpenRequest {
-            session_id: "s-cancel".to_string(),
-            conversation_id: "c1".to_string(),
-            sender_id: "u1".to_string(),
-            entry: GatewayEntryContext::tui(None),
-            channel: None,
-            channel_instance_id: None,
-            llm: None,
-            workspace: None,
-            skills: None,
-
-            client_id: None,
-            client_pid: None,
-            client_hostname: None,
-        })
+        .open_session(test_open_request("s-cancel"))
         .await
         .expect("open session");
 
@@ -821,13 +759,7 @@ async fn resolver_bound_cancel_token_reaches_agent_loop() {
         llm_provider: stub_llm_provider(),
         cancel_token: Some(token),
     });
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
 
     let result = dependencies
         .session_service
@@ -854,13 +786,7 @@ async fn caller_cancel_token_overrides_resolver_bound_token() {
         llm_provider: stub_llm_provider(),
         cancel_token: Some(tokio_util::sync::CancellationToken::new()),
     });
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
 
     let caller_token = tokio_util::sync::CancellationToken::new();
     caller_token.cancel();
@@ -891,19 +817,8 @@ async fn cancel_while_session_idle_does_not_cancel_later_turn() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
     let seen_requests = Arc::new(StdMutex::new(Vec::new()));
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: replying_llm_provider(Arc::clone(&seen_requests)),
-        cancel_token: None,
-    });
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let resolver = make_replying_resolver(workspace.path(), Arc::clone(&seen_requests));
+    let dependencies = make_dependencies(&store, resolver);
 
     dependencies
         .session_control_plane
@@ -943,23 +858,10 @@ async fn cancel_racing_turn_startup_cancels_in_flight_turn() {
     // Slow resolver so the cancel can be submitted while the turn is
     // parked in `run_turn_inner`'s resolution phase.
     let resolver = Arc::new(DelayedResolver {
-        inner: StubRuntimeResolver {
-            workspace_root: workspace.path().to_path_buf(),
-            backend_options: json!({
-                "temp_root": workspace.path().to_string_lossy().to_string()
-            }),
-            llm_provider: stub_llm_provider(),
-            cancel_token: None,
-        },
+        inner: make_stub_resolver(workspace.path()),
         delay: std::time::Duration::from_millis(300),
     });
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
 
     dependencies
         .session_control_plane
@@ -999,37 +901,12 @@ async fn cancel_racing_turn_startup_cancels_in_flight_turn() {
 async fn force_close_session_removes_session_record() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let resolver = make_stub_resolver(workspace.path());
+    let dependencies = make_dependencies(&store, resolver);
 
     dependencies
         .session_control_plane
-        .open_session(SessionOpenRequest {
-            session_id: "s-close".to_string(),
-            conversation_id: "c1".to_string(),
-            sender_id: "u1".to_string(),
-            entry: GatewayEntryContext::tui(None),
-            channel: None,
-            channel_instance_id: None,
-            llm: None,
-            workspace: None,
-            skills: None,
-
-            client_id: None,
-            client_pid: None,
-            client_hostname: None,
-        })
+        .open_session(test_open_request("s-close"))
         .await
         .expect("open session");
 
@@ -1052,20 +929,9 @@ async fn force_close_session_removes_session_record() {
 async fn pause_runtime_releases_backend_and_marks_runtime_paused() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     let backend_manager = Arc::new(BackendManager::new());
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver,
-        HookerRegistryConfig::default(),
-        backend_manager.clone(),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies_with_backend_manager(&store, resolver, &backend_manager);
 
     dependencies
         .session_control_plane
@@ -1100,12 +966,7 @@ async fn pause_runtime_releases_backend_and_marks_runtime_paused() {
 async fn resume_runtime_reuses_same_runtime_id_for_paused_runtime_without_backend() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     save_session_without_backend(
         &store,
         &resolver,
@@ -1113,13 +974,7 @@ async fn resume_runtime_reuses_same_runtime_id_for_paused_runtime_without_backen
         SessionLifecycleStatus::Idle,
     )
     .await;
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
 
     dependencies
         .session_control_plane
@@ -1154,12 +1009,7 @@ async fn resume_runtime_reuses_same_runtime_id_for_paused_runtime_without_backen
 async fn close_paused_runtime_removes_session_record() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     save_session_without_backend(
         &store,
         &resolver,
@@ -1167,13 +1017,7 @@ async fn close_paused_runtime_removes_session_record() {
         SessionLifecycleStatus::Paused,
     )
     .await;
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
 
     let closed = dependencies
         .session_control_plane
@@ -1189,12 +1033,7 @@ async fn close_paused_runtime_removes_session_record() {
 async fn run_turn_paused_runtime_without_checkpoint_is_busy() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     save_session_without_backend(
         &store,
         &resolver,
@@ -1202,13 +1041,7 @@ async fn run_turn_paused_runtime_without_checkpoint_is_busy() {
         SessionLifecycleStatus::Paused,
     )
     .await;
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
 
     let result = dependencies
         .session_service
@@ -1228,20 +1061,9 @@ async fn run_turn_paused_runtime_without_checkpoint_is_busy() {
 async fn hibernated_mcp_runtime_keeps_record_and_rehydrates_local_backend() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     let backend_manager = Arc::new(BackendManager::new());
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver,
-        HookerRegistryConfig::default(),
-        backend_manager.clone(),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies_with_backend_manager(&store, resolver, &backend_manager);
     let mut open = test_open_request("mcp-hibernate");
     open.entry = GatewayEntryContext {
         kind: Some(crate::gateway::GatewayEntryKind::Mcp),
@@ -1288,21 +1110,10 @@ async fn hibernated_mcp_runtime_keeps_record_and_rehydrates_local_backend() {
 async fn checkpoint_runtime_idle_session_without_backend_succeeds() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     save_session_without_backend(&store, &resolver, "runtime-1", SessionLifecycleStatus::Idle)
         .await;
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
 
     let result = dependencies
         .session_control_plane
@@ -1327,30 +1138,13 @@ async fn checkpoint_runtime_idle_session_without_backend_succeeds() {
 async fn delete_checkpoint_snapshot_without_backend_snapshot_is_noop() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     save_session_without_backend(&store, &resolver, "runtime-1", SessionLifecycleStatus::Idle)
         .await;
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
     let checkpoint = dependencies
         .session_control_plane
-        .checkpoint_runtime(RuntimeCheckpointRequest {
-            runtime_id: "runtime-1".to_string(),
-            metadata: Value::Null,
-            name: None,
-
-            client_id: None,
-        })
+        .checkpoint_runtime(null_checkpoint_request("runtime-1".to_string()))
         .await
         .expect("checkpoint runtime");
 
@@ -1373,12 +1167,7 @@ async fn delete_checkpoint_snapshot_without_backend_snapshot_is_noop() {
 async fn checkout_runtime_creates_new_runtime_from_checkpoint() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     let parent = save_session_without_backend(
         &store,
         &resolver,
@@ -1386,22 +1175,10 @@ async fn checkout_runtime_creates_new_runtime_from_checkpoint() {
         SessionLifecycleStatus::Idle,
     )
     .await;
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
     let checkpoint = dependencies
         .session_control_plane
-        .checkpoint_runtime(RuntimeCheckpointRequest {
-            runtime_id: parent.session_id.clone(),
-            metadata: Value::Null,
-            name: None,
-
-            client_id: None,
-        })
+        .checkpoint_runtime(null_checkpoint_request(parent.session_id.clone()))
         .await
         .expect("checkpoint runtime");
 
@@ -1442,12 +1219,7 @@ async fn checkout_runtime_creates_new_runtime_from_checkpoint() {
 async fn checkpoint_runtime_rejects_running_session() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     save_session_without_backend(
         &store,
         &resolver,
@@ -1455,23 +1227,11 @@ async fn checkpoint_runtime_rejects_running_session() {
         SessionLifecycleStatus::Running,
     )
     .await;
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store,
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
 
     let result = dependencies
         .session_control_plane
-        .checkpoint_runtime(RuntimeCheckpointRequest {
-            runtime_id: "runtime-running".to_string(),
-            metadata: Value::Null,
-            name: None,
-
-            client_id: None,
-        })
+        .checkpoint_runtime(null_checkpoint_request("runtime-running".to_string()))
         .await;
 
     assert!(matches!(
@@ -1485,12 +1245,7 @@ async fn checkpoint_runtime_rejects_running_session() {
 async fn checkout_runtime_rejects_running_source_runtime() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     let mut parent = save_session_without_backend(
         &store,
         &resolver,
@@ -1498,22 +1253,10 @@ async fn checkout_runtime_rejects_running_source_runtime() {
         SessionLifecycleStatus::Idle,
     )
     .await;
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver,
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver);
     let checkpoint = dependencies
         .session_control_plane
-        .checkpoint_runtime(RuntimeCheckpointRequest {
-            runtime_id: "runtime-source".to_string(),
-            metadata: Value::Null,
-            name: None,
-
-            client_id: None,
-        })
+        .checkpoint_runtime(null_checkpoint_request("runtime-source".to_string()))
         .await
         .expect("checkpoint runtime");
     parent.status = SessionLifecycleStatus::Running;
@@ -1541,33 +1284,16 @@ async fn checkout_runtime_rejects_running_source_runtime() {
 async fn force_close_session_cascades_to_descendants() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     let parent =
         save_session_without_backend(&store, &resolver, "rt-parent", SessionLifecycleStatus::Idle)
             .await;
-    let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver.clone(),
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("dependencies");
+    let dependencies = make_dependencies(&store, resolver.clone());
 
     // parent -> checkpoint -> child
     let checkpoint = dependencies
         .session_control_plane
-        .checkpoint_runtime(RuntimeCheckpointRequest {
-            runtime_id: parent.session_id.clone(),
-            metadata: Value::Null,
-            name: None,
-
-            client_id: None,
-        })
+        .checkpoint_runtime(null_checkpoint_request(parent.session_id.clone()))
         .await
         .expect("checkpoint runtime");
     let checkout = dependencies
@@ -1647,20 +1373,6 @@ async fn force_close_session_cascades_to_descendants() {
 // test above (the `mark_closing` race-fix by the handle's own re-queue
 // path in `next_runnable_turn`).
 
-/// Build a `StubRuntimeResolver` whose `backend_options` points
-/// `temp_root` at `workspace`, so the stub backend writes into the
-/// test's tempdir instead of the real workspace. Centralises the
-/// `{ workspace_root, backend_options, llm_provider }` triple shared
-/// by the reaper / checkpoint / fork tests.
-fn make_stub_resolver(workspace: &std::path::Path) -> Arc<StubRuntimeResolver> {
-    Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.to_path_buf(),
-        backend_options: json!({"temp_root": workspace.to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    })
-}
-
 fn make_reaper_service(
     store: Arc<InMemorySessionStore>,
     resolver: Arc<StubRuntimeResolver>,
@@ -1692,15 +1404,7 @@ async fn save_orphan_candidate(
     status: SessionLifecycleStatus,
     updated_at_ms: u64,
 ) -> SessionRecord {
-    let request = test_open_request(session_id);
-    let runtime_input = SessionRuntimeBuildInput::from_open_request(&request);
-    let resolved = resolver
-        .resolve(&runtime_input, None)
-        .await
-        .expect("resolve runtime");
-    let mut session = CoreBackedSessionService::build_session_for_open(&request, &resolved);
-    session.status = status;
-    session.backend_instance = None;
+    let mut session = save_session_without_backend(store, resolver, session_id, status).await;
     session.updated_at_ms = updated_at_ms;
     store.save(session.clone()).await;
     session
@@ -1718,13 +1422,7 @@ async fn reaper_policy_controls_whether_bootstrap_spawns_the_reaper() {
     let store = Arc::new(InMemorySessionStore::default());
     let resolver = make_stub_resolver(workspace.path());
 
-    let local_deps = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        store.clone(),
-        resolver.clone(),
-        HookerRegistryConfig::default(),
-        Arc::new(BackendManager::new()),
-    )
-    .expect("short-form dependencies");
+    let local_deps = make_dependencies(&store, resolver.clone());
     assert!(
         local_deps.reaper_handle.is_none(),
         "local-mode assembly must not spawn the orphan reaper"
@@ -2437,12 +2135,7 @@ where
 async fn fire_session_state_hook_background_dispatches_failed_state() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     let invocations = Arc::new(StdMutex::new(Vec::new()));
     let registry = recording_state_hooker_registry(invocations.clone(), HashMap::new());
     let service = build_service_with_hooker_registry(store, resolver, registry);
@@ -2553,12 +2246,7 @@ impl Hooker for RecordingLifecycleHooker {
 async fn open_session_fires_created_hook_with_workspace() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     let invocations = Arc::new(StdMutex::new(Vec::new()));
     let registry = RecordingLifecycleHooker::registry(RecordingLifecycleHooker::new(
         "recording-created-hooker",
@@ -2660,12 +2348,7 @@ impl Hooker for PolicyProbeHooker {
 async fn open_session_created_hook_resolves_configured_policy() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     let invocations = Arc::new(StdMutex::new(Vec::new()));
     let registry = PolicyProbeHooker::registry_with_policy(
         PolicyProbeHooker::new("policy-probe-created", invocations.clone()),
@@ -2691,12 +2374,7 @@ async fn open_session_created_hook_resolves_configured_policy() {
 async fn close_session_fires_closed_hook_with_workspace() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: stub_llm_provider(),
-        cancel_token: None,
-    });
+    let resolver = make_stub_resolver(workspace.path());
     let invocations = Arc::new(StdMutex::new(Vec::new()));
     let registry = RecordingLifecycleHooker::registry(RecordingLifecycleHooker::new(
         "recording-closed-hooker",
@@ -2734,12 +2412,7 @@ async fn run_turn_dispatches_idle_state_hook_with_workspace() {
     let workspace = TempDir::new().expect("workspace");
     let store = Arc::new(InMemorySessionStore::default());
     let seen_requests = Arc::new(StdMutex::new(Vec::new()));
-    let resolver = Arc::new(StubRuntimeResolver {
-        workspace_root: workspace.path().to_path_buf(),
-        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
-        llm_provider: replying_llm_provider(Arc::clone(&seen_requests)),
-        cancel_token: None,
-    });
+    let resolver = make_replying_resolver(workspace.path(), Arc::clone(&seen_requests));
     let invocations = Arc::new(StdMutex::new(Vec::new()));
     let registry = recording_state_hooker_registry(invocations.clone(), HashMap::new());
     let service = build_service_with_hooker_registry(store, resolver, registry);

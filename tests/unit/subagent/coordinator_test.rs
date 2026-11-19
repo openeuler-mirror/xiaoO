@@ -27,18 +27,36 @@ fn make_coordinator(max: usize) -> SubagentCoordinator {
     })
 }
 
+/// Spawn `count` children ("child-0".."child-{count}") from one parent; used
+/// to fill the concurrent-limit budget before the interesting spawn/join.
+fn spawn_children(
+    coordinator: &SubagentCoordinator,
+    state: &mut SubagentSessionState,
+    parent_id: &AgentId,
+    count: usize,
+) {
+    for i in 0..count {
+        let request = make_request(parent_id, &format!("task-{i}"));
+        coordinator
+            .spawn(state, &request, AgentId(format!("child-{i}")), 1000)
+            .expect("budget-filling spawn should succeed");
+    }
+}
+
+fn completed_terminal(reply: &str, completed_at_ms: u64) -> SubagentTerminalSnapshot {
+    SubagentTerminalSnapshot {
+        status: SubagentTerminalKind::Completed,
+        reply: Some(reply.to_string()),
+        error: None,
+        completed_at_ms,
+    }
+}
+
 #[test]
 fn concurrent_limit_allows_spawn_when_under_limit() {
     let coordinator = make_coordinator(3);
     let mut state = SubagentSessionState::default();
-    let parent_id = make_parent_agent_id();
-
-    for i in 0..3 {
-        let child_id = AgentId(format!("child-{}", i));
-        let request = make_request(&parent_id, &format!("task-{}", i));
-        let result = coordinator.spawn(&mut state, &request, child_id, 1000);
-        assert!(result.is_ok(), "spawn {} should succeed", i);
-    }
+    spawn_children(&coordinator, &mut state, &make_parent_agent_id(), 3);
 
     assert_eq!(state.agents.len(), 3);
 }
@@ -48,13 +66,7 @@ fn concurrent_limit_rejects_when_all_running() {
     let coordinator = make_coordinator(2);
     let mut state = SubagentSessionState::default();
     let parent_id = make_parent_agent_id();
-
-    for i in 0..2 {
-        let child_id = AgentId(format!("child-{}", i));
-        let request = make_request(&parent_id, &format!("task-{}", i));
-        let result = coordinator.spawn(&mut state, &request, child_id, 1000);
-        assert!(result.is_ok(), "spawn {} should succeed", i);
-    }
+    spawn_children(&coordinator, &mut state, &parent_id, 2);
 
     let child_id = AgentId("child-2".to_string());
     let request = make_request(&parent_id, "task-2");
@@ -70,23 +82,15 @@ fn concurrent_limit_allows_spawn_after_one_completes() {
     let coordinator = make_coordinator(2);
     let mut state = SubagentSessionState::default();
     let parent_id = make_parent_agent_id();
-
-    for i in 0..2 {
-        let child_id = AgentId(format!("child-{}", i));
-        let request = make_request(&parent_id, &format!("task-{}", i));
-        let result = coordinator.spawn(&mut state, &request, child_id, 1000);
-        assert!(result.is_ok(), "spawn {} should succeed", i);
-    }
+    spawn_children(&coordinator, &mut state, &parent_id, 2);
 
     // child-0 completes
-    let terminal = SubagentTerminalSnapshot {
-        status: SubagentTerminalKind::Completed,
-        reply: Some("done".to_string()),
-        error: None,
-        completed_at_ms: 2000,
-    };
     coordinator
-        .on_terminal(&mut state, &AgentId("child-0".to_string()), terminal)
+        .on_terminal(
+            &mut state,
+            &AgentId("child-0".to_string()),
+            completed_terminal("done", 2000),
+        )
         .expect("on_terminal should succeed");
 
     // Now a new spawn should succeed because only 1 is still Running
@@ -104,24 +108,15 @@ fn concurrent_limit_rejects_again_after_all_spots_refilled() {
     let coordinator = make_coordinator(2);
     let mut state = SubagentSessionState::default();
     let parent_id = make_parent_agent_id();
-
-    for i in 0..2 {
-        let child_id = AgentId(format!("child-{}", i));
-        let request = make_request(&parent_id, &format!("task-{}", i));
-        coordinator
-            .spawn(&mut state, &request, child_id, 1000)
-            .unwrap();
-    }
+    spawn_children(&coordinator, &mut state, &parent_id, 2);
 
     // child-0 completes
-    let terminal = SubagentTerminalSnapshot {
-        status: SubagentTerminalKind::Completed,
-        reply: Some("done".to_string()),
-        error: None,
-        completed_at_ms: 2000,
-    };
     coordinator
-        .on_terminal(&mut state, &AgentId("child-0".to_string()), terminal)
+        .on_terminal(
+            &mut state,
+            &AgentId("child-0".to_string()),
+            completed_terminal("done", 2000),
+        )
         .unwrap();
 
     // child-2 fills the freed spot
@@ -179,14 +174,7 @@ fn allows_concurrent_pending_joins_from_same_waiter() {
     let coordinator = SubagentCoordinator::default();
     let mut state = SubagentSessionState::default();
     let parent_id = make_parent_agent_id();
-
-    for i in 0..3 {
-        let child_id = AgentId(format!("child-{}", i));
-        let request = make_request(&parent_id, &format!("task-{}", i));
-        coordinator
-            .spawn(&mut state, &request, child_id, 1000)
-            .unwrap();
-    }
+    spawn_children(&coordinator, &mut state, &parent_id, 3);
 
     for i in 0..3 {
         let child_id = AgentId(format!("child-{}", i));
@@ -223,14 +211,7 @@ fn multiple_joins_resolved_when_subagent_completes() {
     let coordinator = SubagentCoordinator::default();
     let mut state = SubagentSessionState::default();
     let parent_id = make_parent_agent_id();
-
-    for i in 0..2 {
-        let child_id = AgentId(format!("child-{}", i));
-        let request = make_request(&parent_id, &format!("task-{}", i));
-        coordinator
-            .spawn(&mut state, &request, child_id, 1000)
-            .unwrap();
-    }
+    spawn_children(&coordinator, &mut state, &parent_id, 2);
 
     for i in 0..2 {
         let child_id = AgentId(format!("child-{}", i));
@@ -242,14 +223,12 @@ fn multiple_joins_resolved_when_subagent_completes() {
         coordinator.join(&mut state, &join_request, 2000).unwrap();
     }
 
-    let terminal = SubagentTerminalSnapshot {
-        status: SubagentTerminalKind::Completed,
-        reply: Some("child-0 done".to_string()),
-        error: None,
-        completed_at_ms: 3000,
-    };
     let actions = coordinator
-        .on_terminal(&mut state, &AgentId("child-0".to_string()), terminal)
+        .on_terminal(
+            &mut state,
+            &AgentId("child-0".to_string()),
+            completed_terminal("child-0 done", 3000),
+        )
         .unwrap();
 
     // 2 = mailbox item + wake waiter

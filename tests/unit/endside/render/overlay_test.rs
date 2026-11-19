@@ -13,27 +13,22 @@ use ratatui::Terminal;
 use std::path::PathBuf;
 
 #[test]
-fn cursor_position_tracks_plain_text() {
-    let (row, col) = calculate_visual_cursor_position("hello", 3, 10);
-    assert_eq!((row, col), (0, 3));
-}
-
-#[test]
-fn cursor_position_resets_column_after_newline() {
-    let (row, col) = calculate_visual_cursor_position("hello\nworld", 6, 10);
-    assert_eq!((row, col), (1, 0));
-}
-
-#[test]
-fn cursor_position_at_trailing_newline_starts_next_row() {
-    let (row, col) = calculate_visual_cursor_position("hello\n", 6, 10);
-    assert_eq!((row, col), (1, 0));
-}
-
-#[test]
-fn cursor_position_of_empty_input_is_origin() {
-    let (row, col) = calculate_visual_cursor_position("", 0, 10);
-    assert_eq!((row, col), (0, 0));
+fn cursor_position_maps_basic_offsets() {
+    // (value, cursor, width) → (row, col): plain text, the column reset
+    // after a newline, a trailing newline starting the next row, and the
+    // empty input at the origin.
+    for (value, cursor, width, expected) in [
+        ("hello", 3, 10, (0, 3)),
+        ("hello\nworld", 6, 10, (1, 0)),
+        ("hello\n", 6, 10, (1, 0)),
+        ("", 0, 10, (0, 0)),
+    ] {
+        assert_eq!(
+            calculate_visual_cursor_position(value, cursor, width),
+            expected,
+            "value={value:?} cursor={cursor} width={width}"
+        );
+    }
 }
 
 #[test]
@@ -112,57 +107,30 @@ fn assert_matches_ratatui(value: &str, width: usize) {
     }
 }
 
+/// Differential matrix: the ratatui-agreement invariant above across the
+/// wrap shapes the predictor must handle — basic words, a long single
+/// word breaking mid-word, word wrap with spaces, multiple spaces at the
+/// boundary, cursors in trailing whitespace, newlines (single, after
+/// spaces, consecutive), CJK wide chars and a long paragraph.
 #[test]
-fn diff_basic_word() {
-    assert_matches_ratatui("hello", 10);
-}
-
-#[test]
-fn diff_long_single_word_wraps_mid_word() {
-    assert_matches_ratatui("aaaaaaaa", 4);
-}
-
-#[test]
-fn diff_word_wrap_with_spaces() {
-    assert_matches_ratatui("aa bb cc dd", 4);
-}
-
-#[test]
-fn diff_multiple_spaces_boundary() {
-    assert_matches_ratatui("aa   bb", 4);
-}
-
-#[test]
-fn diff_cursor_in_trailing_whitespace() {
-    assert_matches_ratatui("aaaa ", 4);
-}
-
-#[test]
-fn diff_newline_then_wrap() {
-    assert_matches_ratatui("hello\naaaaaaa", 4);
-}
-
-#[test]
-fn diff_cjk_wrap() {
-    assert_matches_ratatui("中文测试一二三四五六", 6);
-}
-
-#[test]
-fn diff_spaces_then_newline() {
-    assert_matches_ratatui("aa  \nbb", 4);
-}
-
-#[test]
-fn diff_long_paragraph() {
-    assert_matches_ratatui(
-        "The quick brown fox jumps over the lazy dog and keeps going",
-        12,
-    );
-}
-
-#[test]
-fn diff_consecutive_newlines() {
-    assert_matches_ratatui("a\n\nb", 4);
+fn cursor_position_matches_ratatui_across_wrap_shapes() {
+    for (value, width) in [
+        ("hello", 10),               // basic word
+        ("aaaaaaaa", 4),             // long single word wraps mid-word
+        ("aa bb cc dd", 4),          // word wrap with spaces
+        ("aa   bb", 4),              // multiple spaces boundary
+        ("aaaa ", 4),                // cursor in trailing whitespace
+        ("hello\naaaaaaa", 4),       // newline then wrap
+        ("中文测试一二三四五六", 6), // CJK wrap
+        ("aa  \nbb", 4),             // spaces then newline
+        (
+            "The quick brown fox jumps over the lazy dog and keeps going",
+            12,
+        ), // long paragraph
+        ("a\n\nb", 4),               // consecutive newlines
+    ] {
+        assert_matches_ratatui(value, width);
+    }
 }
 
 // ── Provider/model dialog: page height measured at render time ─────────────

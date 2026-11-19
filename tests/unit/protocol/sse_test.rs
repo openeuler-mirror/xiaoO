@@ -52,79 +52,54 @@ fn assert_returns_none(json: &str) {
 // ===========================================================================
 
 #[test]
-fn turn_start_round_trip() {
-    assert_round_trip(
-        r#"{"type":"turn_start","agent_id":"root","turn":1}"#,
-        "TurnStart",
-    );
-}
-
-#[test]
-fn text_delta_round_trip() {
-    assert_round_trip(
-        r#"{"type":"text_delta","agent_id":"root","delta":"Hello","snapshot":"Hello"}"#,
-        "TextDelta",
-    );
-}
-
-#[test]
-fn thinking_delta_round_trip() {
-    assert_round_trip(
-        r#"{"type":"thinking_delta","agent_id":"root","delta":"Hmm","snapshot":"Hmm"}"#,
-        "ThinkingDelta",
-    );
-}
-
-#[test]
-fn tool_result_round_trip() {
-    assert_round_trip(
-        r#"{"type":"tool_result","agent_id":"root","call_id":"c1","tool_name":"bash","output_preview":"ok","is_error":false,"args_preview":"{}"}"#,
-        "ToolResult",
-    );
-}
-
-#[test]
-fn tool_file_change_round_trip() {
-    assert_round_trip(
-        r#"{"type":"tool_file_change","call_id":"c1","file_path":"a.txt","additions":1,"deletions":0}"#,
-        "ToolFileChange",
-    );
-}
-
-#[test]
-fn plan_update_round_trip() {
-    assert_round_trip(
-        r#"{"type":"plan_update","title":"Plan","items":[{"status":"pending","content":"do thing"}]}"#,
-        "PlanUpdate",
-    );
-}
-
-#[test]
-fn subagent_spawn_round_trip() {
-    assert_round_trip(
-        r#"{"type":"subagent_spawn","agent_id":"child","parent_agent_id":"root","title":"Sub","description":"desc","task_goal":"goal"}"#,
-        "SubagentSpawn",
-    );
-    assert_round_trip(
-        r#"{"type":"subagent_spawn","agent_id":"child","parent_agent_id":null,"title":"Sub","description":"desc","task_goal":"goal"}"#,
-        "SubagentSpawn (no parent)",
-    );
-}
-
-#[test]
-fn tool_call_round_trip() {
-    assert_round_trip(
-        r#"{"type":"tool_call","agent_id":"root","call_id":"c1","tool_name":"bash","args_preview":"{}","status":"running","detail":""}"#,
-        "ToolCall",
-    );
-}
-
-#[test]
-fn loop_end_round_trip() {
-    assert_round_trip(
-        r#"{"type":"loop_end","agent_id":"root","turn_count":1,"total_tokens":100,"stop_reason":"end_turn"}"#,
-        "LoopEnd",
-    );
+fn event_variants_round_trip() {
+    // One table-driven pass over the per-variant JSON samples; the panic
+    // message of `assert_round_trip` names the offending variant.
+    for (json, variant) in [
+        (
+            r#"{"type":"turn_start","agent_id":"root","turn":1}"#,
+            "TurnStart",
+        ),
+        (
+            r#"{"type":"text_delta","agent_id":"root","delta":"Hello","snapshot":"Hello"}"#,
+            "TextDelta",
+        ),
+        (
+            r#"{"type":"thinking_delta","agent_id":"root","delta":"Hmm","snapshot":"Hmm"}"#,
+            "ThinkingDelta",
+        ),
+        (
+            r#"{"type":"tool_result","agent_id":"root","call_id":"c1","tool_name":"bash","output_preview":"ok","is_error":false,"args_preview":"{}"}"#,
+            "ToolResult",
+        ),
+        (
+            r#"{"type":"tool_file_change","call_id":"c1","file_path":"a.txt","additions":1,"deletions":0}"#,
+            "ToolFileChange",
+        ),
+        (
+            r#"{"type":"plan_update","title":"Plan","items":[{"status":"pending","content":"do thing"}]}"#,
+            "PlanUpdate",
+        ),
+        (
+            r#"{"type":"subagent_spawn","agent_id":"child","parent_agent_id":"root","title":"Sub","description":"desc","task_goal":"goal"}"#,
+            "SubagentSpawn",
+        ),
+        (
+            r#"{"type":"subagent_spawn","agent_id":"child","parent_agent_id":null,"title":"Sub","description":"desc","task_goal":"goal"}"#,
+            "SubagentSpawn (no parent)",
+        ),
+        (
+            r#"{"type":"tool_call","agent_id":"root","call_id":"c1","tool_name":"bash","args_preview":"{}","status":"running","detail":""}"#,
+            "ToolCall",
+        ),
+        (
+            r#"{"type":"loop_end","agent_id":"root","turn_count":1,"total_tokens":100,"stop_reason":"end_turn"}"#,
+            "LoopEnd",
+        ),
+        (r#"{"type":"error","error":"boom"}"#, "Error"),
+    ] {
+        assert_round_trip(json, variant);
+    }
 }
 
 #[test]
@@ -173,11 +148,6 @@ fn done_round_trip() {
         value.get("session_id").is_none(),
         "session_id field should NOT appear in serialized Done (only runtime_id)"
     );
-}
-
-#[test]
-fn error_round_trip() {
-    assert_round_trip(r#"{"type":"error","error":"boom"}"#, "Error");
 }
 
 #[test]

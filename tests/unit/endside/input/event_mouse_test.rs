@@ -1,7 +1,7 @@
 use super::input_char_index_at;
 use super::mouse_to_line_col;
 use super::wide_table_at;
-use crate::app_state::{CachedMessageRender, WideTableScrollRegion};
+use crate::app_state::{CachedMessageRender, TranscriptRenderCache, WideTableScrollRegion};
 use crate::render::transcript::build_transcript_cache;
 use crate::render::wrap_line_to_visual_lines;
 use crate::selection::TranscriptSelection;
@@ -71,6 +71,24 @@ fn cached(lines: Vec<Line<'static>>, width: u16) -> CachedMessageRender {
     }
 }
 
+/// Transcript cache of a System message whose content (logical line 1) is
+/// a long synthetic path — no dependency on any developer's home dir or
+/// filesystem layout; the path (in parens) is 45 chars > width 40, so
+/// textwrap splits it at the width boundary. Layout: header row 0,
+/// content rows 1..=3, spacer row 4.
+fn snapshot_cache_with_long_path() -> TranscriptRenderCache {
+    let content = "Session snapshot saved: name (/tmp/xiaoo-test/sessions/snapshot-name.json)";
+    let render = cached(
+        vec![
+            Line::from("  ▎ System  12:00:00"),
+            Line::from(format!("  {content}")),
+            Line::raw(""),
+        ],
+        40,
+    );
+    build_transcript_cache(None, vec![Some(render)])
+}
+
 /// Regression test for the "click lands on the wrong line/char" bug.
 ///
 /// Before the fix, `mouse_to_line_col` recomputed wrapping via
@@ -93,20 +111,7 @@ fn mouse_to_line_col_maps_click_on_wrapped_path_tail_correctly() {
     //              textwrap at width 40 → 3 visual rows (path is one long
     //              unbreakable token that textwrap splits at the boundary)
     //   empty   → ""                     (1 visual row)
-    // Synthetic long path — no dependency on any developer's home dir or
-    // filesystem layout. The path (in parens) is 45 chars > width 40, so
-    // textwrap splits it at the width boundary.
-    let content = "Session snapshot saved: name (/tmp/xiaoo-test/sessions/snapshot-name.json)";
-    let render = cached(
-        vec![
-            Line::from("  ▎ System  12:00:00"),
-            Line::from(format!("  {content}")),
-            Line::raw(""),
-        ],
-        40,
-    );
-
-    let cache = build_transcript_cache(None, vec![Some(render)]);
+    let cache = snapshot_cache_with_long_path();
 
     // The content logical line is index 1, starting at visual row 1
     // (header is row 0). It wraps to 3 visual rows (rows 1, 2, 3),
@@ -240,19 +245,9 @@ fn mouse_to_line_col_maps_click_on_cjk_wrapped_line() {
 /// is empty (visual_row == line_start_visual) and char_offset stays 0.
 #[test]
 fn mouse_to_line_col_maps_click_on_first_visual_row_of_wrapped_line() {
-    // Reuse the long-path content from the tail-click test, but click on
+    // Reuse the long-path cache from the tail-click test, but click on
     // visual row 1 (v0 of content) instead of row 3 (v2).
-    let content = "Session snapshot saved: name (/tmp/xiaoo-test/sessions/snapshot-name.json)";
-    let render = cached(
-        vec![
-            Line::from("  ▎ System  12:00:00"),
-            Line::from(format!("  {content}")),
-            Line::raw(""),
-        ],
-        40,
-    );
-
-    let cache = build_transcript_cache(None, vec![Some(render)]);
+    let cache = snapshot_cache_with_long_path();
 
     let logical_text: String = cache.line_texts[1].chars().collect();
     let area = Rect::new(0, 0, 42, 10);
@@ -343,17 +338,7 @@ fn mouse_to_line_col_on_header_line_does_not_panic() {
 /// within the same logical line and ordered correctly.
 #[test]
 fn mouse_to_line_col_drag_across_wrapped_visual_rows() {
-    let content = "Session snapshot saved: name (/tmp/xiaoo-test/sessions/snapshot-name.json)";
-    let render = cached(
-        vec![
-            Line::from("  ▎ System  12:00:00"),
-            Line::from(format!("  {content}")),
-            Line::raw(""),
-        ],
-        40,
-    );
-
-    let cache = build_transcript_cache(None, vec![Some(render)]);
+    let cache = snapshot_cache_with_long_path();
 
     let area = Rect::new(0, 0, 42, 10);
 

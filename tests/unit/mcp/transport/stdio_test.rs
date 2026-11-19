@@ -23,26 +23,11 @@ fn parent_env() -> Vec<(String, String)> {
 }
 
 #[test]
-fn stdio_child_does_not_inherit_provider_credentials() {
-    let env = child_env(parent_env(), &HashMap::new());
-    let names: Vec<&str> = env.iter().map(|(key, _)| key.as_str()).collect();
-
-    assert!(
-        !names.contains(&"ANTHROPIC_API_KEY"),
-        "provider API keys must not reach a stdio MCP server: {names:?}"
-    );
-    assert!(
-        !names.contains(&"XIAOO_TEST_TOKEN"),
-        "non-allowlisted host variables must not reach a stdio MCP server: {names:?}"
-    );
-    assert!(
-        !names.contains(&"SSH_AUTH_SOCK"),
-        "the ssh agent socket must not reach a stdio MCP server: {names:?}"
-    );
-}
-
-#[test]
 fn stdio_child_keeps_only_the_launcher_allowlist() {
+    // Exact-set pinning subsumes the per-secret absence checks: provider
+    // credentials (ANTHROPIC_API_KEY), non-allowlisted host variables
+    // (XIAOO_TEST_TOKEN) and the ssh agent socket (SSH_AUTH_SOCK) must
+    // never reach a stdio MCP server.
     let env = child_env(parent_env(), &HashMap::new());
     let mut pairs: Vec<(String, String)> = env;
     pairs.sort();

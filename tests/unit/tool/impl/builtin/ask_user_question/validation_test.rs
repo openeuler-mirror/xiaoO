@@ -22,72 +22,42 @@ fn choice(prompt: &str, options: &[&str]) -> QuestionItem {
     }
 }
 
+/// Each invalid question shape is rejected with its specific error code:
+/// (questions, expected error_code).
 #[test]
-fn empty_questions_are_rejected() {
-    let input = AskUserQuestionInput { questions: vec![] };
-    let r = validate_input(&input);
-    assert!(!r.result);
-    assert_eq!(r.error_code, Some(error_code::QUESTIONS_EMPTY));
-}
-
-#[test]
-fn more_than_four_questions_are_rejected() {
-    let input = AskUserQuestionInput {
-        questions: (0..5).map(|i| confirm(&format!("q{}", i))).collect(),
-    };
-    let r = validate_input(&input);
-    assert!(!r.result);
-    assert_eq!(r.error_code, Some(error_code::QUESTIONS_TOO_MANY));
-}
-
-#[test]
-fn blank_prompt_is_rejected() {
-    let input = AskUserQuestionInput {
-        questions: vec![confirm("  ")],
-    };
-    let r = validate_input(&input);
-    assert!(!r.result);
-    assert_eq!(r.error_code, Some(error_code::PROMPT_EMPTY));
-}
-
-#[test]
-fn choice_with_fewer_than_two_options_is_rejected() {
-    let input = AskUserQuestionInput {
-        questions: vec![choice("pick one?", &["only one"])],
-    };
-    let r = validate_input(&input);
-    assert!(!r.result);
-    assert_eq!(r.error_code, Some(error_code::CHOICE_TOO_FEW_OPTIONS));
-}
-
-#[test]
-fn choice_with_blank_option_is_rejected() {
-    let input = AskUserQuestionInput {
-        questions: vec![choice("pick?", &["a", ""])],
-    };
-    let r = validate_input(&input);
-    assert!(!r.result);
-    assert_eq!(r.error_code, Some(error_code::CHOICE_OPTION_EMPTY));
-}
-
-#[test]
-fn duplicate_prompts_are_rejected() {
-    let input = AskUserQuestionInput {
-        questions: vec![confirm("same?"), text_input("same?")],
-    };
-    let r = validate_input(&input);
-    assert!(!r.result);
-    assert_eq!(r.error_code, Some(error_code::DUPLICATE_PROMPT));
-}
-
-#[test]
-fn duplicate_choice_options_are_rejected() {
-    let input = AskUserQuestionInput {
-        questions: vec![choice("pick?", &["a", "a"])],
-    };
-    let r = validate_input(&input);
-    assert!(!r.result);
-    assert_eq!(r.error_code, Some(error_code::DUPLICATE_CHOICE_OPTION));
+fn invalid_question_sets_are_rejected_with_specific_error_codes() {
+    let cases: Vec<(Vec<QuestionItem>, u32)> = vec![
+        (vec![], error_code::QUESTIONS_EMPTY),
+        // (0..5) confirms: more than four questions.
+        (
+            (0..5).map(|i| confirm(&format!("q{i}"))).collect(),
+            error_code::QUESTIONS_TOO_MANY,
+        ),
+        (vec![confirm("  ")], error_code::PROMPT_EMPTY),
+        (
+            vec![choice("pick one?", &["only one"])],
+            error_code::CHOICE_TOO_FEW_OPTIONS,
+        ),
+        (
+            vec![choice("pick?", &["a", ""])],
+            error_code::CHOICE_OPTION_EMPTY,
+        ),
+        (
+            vec![confirm("same?"), text_input("same?")],
+            error_code::DUPLICATE_PROMPT,
+        ),
+        (
+            vec![choice("pick?", &["a", "a"])],
+            error_code::DUPLICATE_CHOICE_OPTION,
+        ),
+    ];
+    for (questions, expected) in cases {
+        let r = validate_input(&AskUserQuestionInput {
+            questions: questions.clone(),
+        });
+        assert!(!r.result, "questions: {questions:?}");
+        assert_eq!(r.error_code, Some(expected), "questions: {questions:?}");
+    }
 }
 
 #[test]

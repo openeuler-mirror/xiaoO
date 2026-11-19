@@ -11,25 +11,20 @@ fn sample_external() -> Vec<ExternalCommand> {
 }
 
 #[test]
-fn con_to_connect() {
-    let mut i: Input = "/con".into();
-    assert!(apply_slash_tab(&mut i, NO_EXT));
-    assert_eq!(i.value(), "/connect");
-}
-
-#[test]
-fn c_has_multiple_matches() {
-    let mut i: Input = "/c".into();
-    // /c now matches both /connect and /cron, so tab cannot expand uniquely
-    assert!(!apply_slash_tab(&mut i, NO_EXT));
-    assert_eq!(i.value(), "/c");
-}
-
-#[test]
-fn leading_spaces() {
-    let mut i = Input::default().with_value("  /con".to_string());
-    assert!(apply_slash_tab(&mut i, NO_EXT));
-    assert_eq!(i.value(), "  /connect");
+fn apply_slash_tab_expands_only_unique_prefixes() {
+    // "/con" expands uniquely to /connect; "/c" matches both /connect and
+    // /cron so it cannot expand; leading spaces before the slash are
+    // allowed.
+    for (before, expands, after) in [
+        ("/con", true, "/connect"),
+        // /c now matches both /connect and /cron, so tab cannot expand uniquely
+        ("/c", false, "/c"),
+        ("  /con", true, "  /connect"),
+    ] {
+        let mut i: Input = before.into();
+        assert_eq!(apply_slash_tab(&mut i, NO_EXT), expands, "{before:?}");
+        assert_eq!(i.value(), after, "{before:?}");
+    }
 }
 
 #[test]
@@ -126,7 +121,7 @@ fn chinese_external(name: &str) -> ExternalCommand {
 /// Regression: 一 (E4 B8 80) 与 二 (E4 BA 8C) 共享首字节，逐字节求公共前缀会停在
 /// 字符中间（`end byte index 5 is not a char boundary` -> panic）。
 #[test]
-fn longest_common_prefix_stops_on_a_char_boundary() {
+fn longest_common_prefix_stops_on_char_boundaries_and_keeps_ascii_semantics() {
     assert_eq!(longest_common_prefix(&["/测一分享", "/测二分享"]), "/测");
     assert_eq!(
         longest_common_prefix(&["/测试甲分享", "/测试乙分享"]),
@@ -134,10 +129,6 @@ fn longest_common_prefix_stops_on_a_char_boundary() {
     );
     assert_eq!(longest_common_prefix(&["😀a", "😀b"]), "😀");
     assert_eq!(longest_common_prefix(&["中文", "中英"]), "中");
-}
-
-#[test]
-fn longest_common_prefix_keeps_ascii_semantics() {
     assert_eq!(longest_common_prefix(&["abc", "abd"]), "ab");
     assert_eq!(longest_common_prefix(&["abc", "abcd"]), "abc");
     assert_eq!(longest_common_prefix(&["abc", "xyz"]), "");

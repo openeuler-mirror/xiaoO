@@ -11,58 +11,54 @@ fn plain_base_expands_to_v1_and_v4_variants() {
 
 #[test]
 fn final_candidates_list_bare_bases_before_endpoint_appended_urls() {
-    let bases = vec![
-        "http://api.test.com".to_string(),
-        "http://api.test.com/v1".to_string(),
-    ];
-    let final_urls = build_final_candidates(&bases);
+    for host in ["http://api.test.com", "http://example.com"] {
+        let bases = vec![host.to_string(), format!("{host}/v1")];
 
-    assert_eq!(final_urls.len(), 4);
-    assert_eq!(
-        final_urls[0], "http://api.test.com",
-        "original base, no endpoint appended"
-    );
-    assert_eq!(
-        final_urls[1], "http://api.test.com/v1",
-        "v1-patched base, no endpoint appended"
-    );
-    assert_eq!(
-        final_urls[2], "http://api.test.com/chat/completions",
-        "original base + endpoint"
-    );
-    assert_eq!(
-        final_urls[3], "http://api.test.com/v1/chat/completions",
-        "v1-patched base + endpoint"
-    );
+        let final_urls = build_final_candidates(&bases);
+
+        assert_eq!(final_urls.len(), 4);
+        assert_eq!(final_urls[0], host, "original base, no endpoint appended");
+        assert_eq!(
+            final_urls[1],
+            format!("{host}/v1"),
+            "v1-patched base, no endpoint appended"
+        );
+        assert_eq!(
+            final_urls[2],
+            format!("{host}/chat/completions"),
+            "original base + endpoint"
+        );
+        assert_eq!(
+            final_urls[3],
+            format!("{host}/v1/chat/completions"),
+            "v1-patched base + endpoint"
+        );
+    }
 }
 
 #[test]
-fn v1_base_is_used_as_is_without_duplication() {
-    let candidates = build_base_url_candidates("http://api.test.com/v1");
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0], "http://api.test.com/v1");
+fn versioned_bases_are_used_as_is_without_duplication() {
+    // Both a bare `/v1` suffix and a deeper `/api/v1` path count as
+    // already-versioned: no extra base candidates are generated.
+    for base in ["http://api.test.com/v1", "http://example.com/api/v1"] {
+        let candidates = build_base_url_candidates(base);
+        assert_eq!(candidates, vec![base]);
+    }
 }
 
 #[test]
-fn api_v1_base_is_used_as_is_without_duplication() {
-    let candidates = build_base_url_candidates("http://example.com/api/v1");
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0], "http://example.com/api/v1");
-}
-
-#[test]
-fn plain_base_gets_bare_and_v1_endpoint_paths() {
-    let paths = build_endpoint_paths("http://example.com");
-    assert_eq!(paths.len(), 2);
-    assert_eq!(paths[0], "/chat/completions");
-    assert_eq!(paths[1], "/v1/chat/completions");
-}
-
-#[test]
-fn v1_base_gets_only_the_bare_endpoint_path() {
-    let paths = build_endpoint_paths("http://example.com/v1");
-    assert_eq!(paths.len(), 1);
-    assert_eq!(paths[0], "/chat/completions");
+fn endpoint_paths_depend_on_the_version_suffix() {
+    // A plain base gets both the bare and the v1-prefixed endpoint path;
+    // an already-versioned base only gets the bare one.
+    for (base, expected) in [
+        (
+            "http://example.com",
+            vec!["/chat/completions", "/v1/chat/completions"],
+        ),
+        ("http://example.com/v1", vec!["/chat/completions"]),
+    ] {
+        assert_eq!(build_endpoint_paths(base), expected);
+    }
 }
 
 #[test]
@@ -76,22 +72,6 @@ fn no_v4_v1_combination() {
 
     let final_urls = build_final_candidates(&bases);
     assert!(!final_urls.iter().any(|url| url.contains("/v4/v1/")));
-}
-
-#[test]
-fn final_candidates_cross_every_base_with_endpoint_paths_in_order() {
-    let bases = vec![
-        "http://example.com".to_string(),
-        "http://example.com/v1".to_string(),
-    ];
-
-    let final_urls = build_final_candidates(&bases);
-
-    assert_eq!(final_urls.len(), 4);
-    assert_eq!(final_urls[0], "http://example.com");
-    assert_eq!(final_urls[1], "http://example.com/v1");
-    assert_eq!(final_urls[2], "http://example.com/chat/completions");
-    assert_eq!(final_urls[3], "http://example.com/v1/chat/completions");
 }
 
 #[test]
@@ -306,39 +286,23 @@ fn rate_limited_is_not_retryable() {
 }
 
 #[test]
-fn http_502_is_retryable() {
-    // HTTP 502 Bad Gateway - temporary server failure, should retry
-    let error_msg = "API error: HTTP 502 Bad Gateway";
-    let error = LlmError::ApiError(error_msg.to_string());
+fn only_gateway_status_codes_are_retryable_http_errors() {
+    // 502/503/504 are temporary server failures, safe to retry; 500 may
+    // be persistent, so it must not be retried here.
+    for (status, retryable) in [
+        ("502 Bad Gateway", true),
+        ("503 Service Unavailable", true),
+        ("504 Gateway Timeout", true),
+        ("500 Internal Server Error", false),
+    ] {
+        let error = LlmError::ApiError(format!("API error: HTTP {status}"));
 
-    assert!(is_retryable_network_error(&error));
-}
-
-#[test]
-fn http_503_is_retryable() {
-    // HTTP 503 Service Unavailable - temporary server failure, should retry
-    let error_msg = "API error: HTTP 503 Service Unavailable";
-    let error = LlmError::ApiError(error_msg.to_string());
-
-    assert!(is_retryable_network_error(&error));
-}
-
-#[test]
-fn http_504_is_retryable() {
-    // HTTP 504 Gateway Timeout - temporary server failure, should retry
-    let error_msg = "API error: HTTP 504 Gateway Timeout";
-    let error = LlmError::ApiError(error_msg.to_string());
-
-    assert!(is_retryable_network_error(&error));
-}
-
-#[test]
-fn http_500_is_not_retryable() {
-    // HTTP 500 Internal Server Error - might be persistent, not retryable here
-    let error_msg = "API error: HTTP 500 Internal Server Error";
-    let error = LlmError::ApiError(error_msg.to_string());
-
-    assert!(!is_retryable_network_error(&error));
+        assert_eq!(
+            is_retryable_network_error(&error),
+            retryable,
+            "HTTP {status}"
+        );
+    }
 }
 
 #[test]

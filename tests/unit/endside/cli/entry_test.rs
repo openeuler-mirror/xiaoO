@@ -18,35 +18,25 @@ fn parses_explicit_mcp_config_path() {
     );
 }
 
+/// Decision table for `generate_title_from_prompt`: long prompts truncate
+/// at ten words, short ones pass verbatim, blank ones yield no title.
 #[test]
-fn long_prompt_title_is_truncated_to_ten_words() {
-    let prompt = "Fix the bug in authentication module related to JWT token validation";
-    let title = generate_title_from_prompt(prompt);
-    assert_eq!(
-        title,
-        Some("Fix the bug in authentication module related to JWT token".to_string())
-    );
-}
-
-#[test]
-fn short_prompt_is_used_as_title_verbatim() {
-    let prompt = "Hello world";
-    let title = generate_title_from_prompt(prompt);
-    assert_eq!(title, Some("Hello world".to_string()));
-}
-
-#[test]
-fn empty_prompt_yields_no_title() {
-    let prompt = "";
-    let title = generate_title_from_prompt(prompt);
-    assert_eq!(title, None);
-}
-
-#[test]
-fn whitespace_only_prompt_yields_no_title() {
-    let prompt = "   ";
-    let title = generate_title_from_prompt(prompt);
-    assert_eq!(title, None);
+fn generate_title_truncates_long_prompts_and_rejects_blank_ones() {
+    for (prompt, expected) in [
+        (
+            "Fix the bug in authentication module related to JWT token validation",
+            Some("Fix the bug in authentication module related to JWT token"),
+        ),
+        ("Hello world", Some("Hello world")),
+        ("", None),
+        ("   ", None),
+    ] {
+        assert_eq!(
+            generate_title_from_prompt(prompt),
+            expected.map(str::to_string),
+            "prompt: {prompt:?}"
+        );
+    }
 }
 
 #[test]

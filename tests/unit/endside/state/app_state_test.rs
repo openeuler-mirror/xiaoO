@@ -177,19 +177,51 @@ fn toggle_theme_switches_between_dark_and_light() {
 }
 
 #[test]
-fn cycle_reasoning_effort_rotates_default_off_high_max() {
+fn cycle_reasoning_effort_is_state_independent() {
+    // The initial value comes from config.toml (`[llm] reasoning_effort`),
+    // so cycling must behave correctly from *any* starting state: four
+    // C-t presses visit all four states exactly once and return to the
+    // initial value. This mirrors the state-independence the E2E suites
+    // must not assume away (default is a state of its own, distinct from
+    // off).
     let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
         .expect("app state should initialize");
+    // A missing config leaves the effort at the provider default.
+    assert_eq!(state.reasoning_effort, ReasoningEffort::Default);
 
-    assert_eq!(state.reasoning_effort, ReasoningEffort::Default);
-    state.cycle_reasoning_effort();
-    assert_eq!(state.reasoning_effort, ReasoningEffort::Off);
-    state.cycle_reasoning_effort();
-    assert_eq!(state.reasoning_effort, ReasoningEffort::High);
-    state.cycle_reasoning_effort();
-    assert_eq!(state.reasoning_effort, ReasoningEffort::Max);
-    state.cycle_reasoning_effort();
-    assert_eq!(state.reasoning_effort, ReasoningEffort::Default);
+    let all = [
+        ReasoningEffort::Default,
+        ReasoningEffort::Off,
+        ReasoningEffort::High,
+        ReasoningEffort::Max,
+    ];
+    for initial in all {
+        state.reasoning_effort = initial;
+
+        let mut seen: Vec<&'static str> = Vec::new();
+        for _ in 0..all.len() {
+            state.cycle_reasoning_effort();
+            seen.push(state.reasoning_effort.as_str());
+        }
+
+        assert_eq!(
+            state.reasoning_effort, initial,
+            "four presses must return to the initial state"
+        );
+        let mut distinct = seen.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            all.len(),
+            "a full cycle must visit every state exactly once, saw {seen:?}"
+        );
+        assert_eq!(
+            seen.last(),
+            Some(&initial.as_str()),
+            "the last press returns to the initial state"
+        );
+    }
 }
 
 #[test]

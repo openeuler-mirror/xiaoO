@@ -25,64 +25,38 @@ fn typing_after_click_keeps_all_chars() {
 }
 
 #[test]
-fn backspace_key_deletes_previous_character() {
-    let mut input = Input::default().with_value("hello".to_string());
-    input.handle_event(&Event::Key(KeyEvent::new(
-        KeyCode::Backspace,
-        KeyModifiers::NONE,
-    )));
+fn backspace_variants_delete_previous_character() {
+    // Backspace, Ctrl+H (readline convention) and the raw DEL control
+    // character (0x7f, surfaced as `Char` by some terminals) all map to
+    // the same delete-previous-character edit.
+    for key in [
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('\u{7f}'), KeyModifiers::NONE),
+    ] {
+        let mut input = Input::default().with_value("hello".to_string());
+        input.handle_event(&Event::Key(key));
 
-    assert_eq!(input.value(), "hell");
-    assert_eq!(input.cursor(), 4);
+        assert_eq!(input.value(), "hell", "{key:?}");
+        assert_eq!(input.cursor(), 4, "{key:?}");
+    }
 }
 
 #[test]
-fn ctrl_h_is_treated_as_backspace() {
-    let mut input = Input::default().with_value("hello".to_string());
-    input.handle_event(&Event::Key(KeyEvent::new(
-        KeyCode::Char('h'),
-        KeyModifiers::CONTROL,
-    )));
+fn raw_control_chars_are_never_inserted() {
+    // Some terminals/forwarders surface raw ESC (0x1b) or NUL (0x0) as a
+    // `Char` event instead of a dedicated key code. Neither may ever
+    // reach the line.
+    for ch in ['\u{1b}', '\u{0}'] {
+        let mut input = Input::default().with_value("hello".to_string());
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::NONE,
+        )));
 
-    assert_eq!(input.value(), "hell");
-    assert_eq!(input.cursor(), 4);
-}
-
-#[test]
-fn del_control_character_is_treated_as_backspace() {
-    let mut input = Input::default().with_value("hello".to_string());
-    input.handle_event(&Event::Key(KeyEvent::new(
-        KeyCode::Char('\u{7f}'),
-        KeyModifiers::NONE,
-    )));
-
-    assert_eq!(input.value(), "hell");
-    assert_eq!(input.cursor(), 4);
-}
-
-#[test]
-fn esc_as_char_is_not_inserted() {
-    // Some terminals/forwarders surface raw ESC (0x1b) as a `Char`
-    // event instead of `KeyCode::Esc`. It must never reach the line.
-    let mut input = Input::default().with_value("hello".to_string());
-    input.handle_event(&Event::Key(KeyEvent::new(
-        KeyCode::Char('\u{1b}'),
-        KeyModifiers::NONE,
-    )));
-
-    assert_eq!(input.value(), "hello");
-    assert_eq!(input.cursor(), 5);
-}
-
-#[test]
-fn nul_as_char_is_not_inserted() {
-    let mut input = Input::default().with_value("hello".to_string());
-    input.handle_event(&Event::Key(KeyEvent::new(
-        KeyCode::Char('\u{0}'),
-        KeyModifiers::NONE,
-    )));
-
-    assert_eq!(input.value(), "hello");
+        assert_eq!(input.value(), "hello", "char {ch:?}");
+        assert_eq!(input.cursor(), 5, "char {ch:?}");
+    }
 }
 
 #[test]
@@ -109,17 +83,18 @@ fn printable_chars_still_insert() {
 // configuration.
 
 #[test]
-fn ctrl_a_moves_to_line_start() {
-    // readline convention: ^A = beginning of line, NOT select-all.
-    let mut input = Input::default().with_value("hello world".to_string());
-    input.set_cursor(8);
-    handle_input_key(
-        &mut input,
-        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
-    );
+fn ctrl_a_and_ctrl_e_move_to_line_edges() {
+    // readline convention: ^A = beginning of line, NOT select-all; ^E =
+    // end of line. Both are pure caret moves: no selection is created.
+    for (key, cursor_before, expected) in [(KeyCode::Char('a'), 8, 0), (KeyCode::Char('e'), 2, 11)]
+    {
+        let mut input = Input::default().with_value("hello world".to_string());
+        input.set_cursor(cursor_before);
+        handle_input_key(&mut input, KeyEvent::new(key, KeyModifiers::CONTROL));
 
-    assert_eq!(input.cursor(), 0);
-    assert!(input.selected_text().is_none());
+        assert_eq!(input.cursor(), expected, "{key:?}");
+        assert!(input.selected_text().is_none(), "{key:?}");
+    }
 }
 
 #[test]
@@ -133,18 +108,6 @@ fn multibyte_selection_reports_full_text() {
     input.set_cursor(8);
 
     assert_eq!(input.selected_text(), Some("你好 world"));
-}
-
-#[test]
-fn ctrl_e_moves_to_line_end() {
-    let mut input = Input::default().with_value("hello world".to_string());
-    input.set_cursor(2);
-    handle_input_key(
-        &mut input,
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
-    );
-
-    assert_eq!(input.cursor(), 11);
 }
 
 #[test]

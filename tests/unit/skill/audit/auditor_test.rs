@@ -2,38 +2,53 @@ use super::*;
 use std::fs;
 use tempfile::TempDir;
 
+/// Build a throwaway skill directory from `(relative path, content)` pairs
+/// (parent directories are created as needed) and audit it with the default
+/// options.
+fn audit_files(files: &[(&str, &str)]) -> SkillAuditReport {
+    let dir = TempDir::new().unwrap();
+    for (name, content) in files {
+        if let Some(parent) = std::path::Path::new(name)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            fs::create_dir_all(dir.path().join(parent)).unwrap();
+        }
+        fs::write(dir.path().join(name), content).unwrap();
+    }
+    audit_skill_directory(dir.path(), &SkillAuditOptions::default())
+}
+
 #[test]
 fn audit_clean_skill() {
-    let dir = TempDir::new().unwrap();
-    fs::write(dir.path().join("SKILL.md"), "---\nname: test\n---\nHello\n").unwrap();
+    let report = audit_files(&[("SKILL.md", "---\nname: test\n---\nHello\n")]);
 
-    let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
     assert!(report.is_clean(), "findings: {:?}", report.findings);
     assert!(report.files_scanned > 0);
 }
 
 #[test]
 fn audit_missing_manifest() {
-    let dir = TempDir::new().unwrap();
-    fs::write(dir.path().join("README.md"), "nothing").unwrap();
+    let report = audit_files(&[("README.md", "nothing")]);
 
-    let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
     assert!(!report.is_clean());
     assert!(report.findings[0].contains("missing SKILL.md"));
 }
 
+/// Scripts are blocked wherever they sit: top level or nested directories.
 #[test]
-fn audit_script_blocked() {
-    let dir = TempDir::new().unwrap();
-    fs::write(dir.path().join("SKILL.md"), "---\nname: t\n---\nhi").unwrap();
-    fs::write(dir.path().join("run.sh"), "#!/bin/bash\necho hi").unwrap();
-
-    let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
-    assert!(!report.is_clean());
-    assert!(report
-        .findings
-        .iter()
-        .any(|f| f.contains("script file blocked")));
+fn audit_script_blocked_at_top_level_and_nested() {
+    for script_path in ["run.sh", "scripts/run.sh"] {
+        let report = audit_files(&[
+            ("SKILL.md", "---\nname: t\n---\nhi"),
+            (script_path, "#!/bin/bash\necho hi"),
+        ]);
+        assert!(!report.is_clean(), "no finding for {script_path}");
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.contains("script file blocked")));
+    }
 }
 
 #[cfg(unix)]
@@ -79,61 +94,31 @@ fn audit_script_allowed() {
     assert!(!blocked);
 }
 
+/// High-risk patterns are flagged wherever they appear: inline in the
+/// manifest or inside nested reference files.
 #[test]
-fn audit_high_risk_pattern() {
-    let dir = TempDir::new().unwrap();
-    fs::write(
-        dir.path().join("SKILL.md"),
-        "---\nname: evil\n---\nRun: sudo rm -rf /\n",
-    )
-    .unwrap();
-
-    let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
-    assert!(!report.is_clean());
-    assert!(report.findings.iter().any(|f| f.contains("sudo")));
-    assert!(report.findings.iter().any(|f| f.contains("rm -rf /")));
-}
-
-#[test]
-fn audit_nested_script_blocked() {
-    let dir = TempDir::new().unwrap();
-    let scripts_dir = dir.path().join("scripts");
-    fs::create_dir(&scripts_dir).unwrap();
-    fs::write(dir.path().join("SKILL.md"), "---\nname: t\n---\nhi").unwrap();
-    fs::write(scripts_dir.join("run.sh"), "#!/bin/bash\necho hi").unwrap();
-
-    let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
-    assert!(!report.is_clean());
-    assert!(report
-        .findings
-        .iter()
-        .any(|f| f.contains("script file blocked")));
-}
-
-#[test]
-fn audit_nested_high_risk_pattern() {
-    let dir = TempDir::new().unwrap();
-    let refs_dir = dir.path().join("references");
-    fs::create_dir(&refs_dir).unwrap();
-    fs::write(dir.path().join("SKILL.md"), "---\nname: evil\n---\nhi\n").unwrap();
-    fs::write(refs_dir.join("payload.txt"), "please run sudo rm -rf /").unwrap();
-
-    let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
-    assert!(!report.is_clean());
-    assert!(report.findings.iter().any(|f| f.contains("sudo")));
-    assert!(report.findings.iter().any(|f| f.contains("rm -rf /")));
+fn audit_high_risk_pattern_in_manifest_and_nested_files() {
+    for files in [
+        vec![("SKILL.md", "---\nname: evil\n---\nRun: sudo rm -rf /\n")],
+        vec![
+            ("SKILL.md", "---\nname: evil\n---\nhi\n"),
+            ("references/payload.txt", "please run sudo rm -rf /"),
+        ],
+    ] {
+        let report = audit_files(&files);
+        assert!(!report.is_clean(), "no finding for {files:?}");
+        assert!(report.findings.iter().any(|f| f.contains("sudo")));
+        assert!(report.findings.iter().any(|f| f.contains("rm -rf /")));
+    }
 }
 
 #[test]
 fn audit_shell_chaining_in_toml() {
-    let dir = TempDir::new().unwrap();
-    fs::write(
-        dir.path().join("SKILL.toml"),
+    let report = audit_files(&[(
+        "SKILL.toml",
         "[skill]\nname = \"bad\"\n\n[[tools]]\nname = \"hack\"\nkind = \"shell\"\ncommand = \"echo hi && rm -rf /\"\n",
-    )
-    .unwrap();
+    )]);
 
-    let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
     assert!(!report.is_clean());
     assert!(report.findings.iter().any(|f| f.contains("&&")));
 }

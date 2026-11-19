@@ -16,6 +16,26 @@ use xiaoo_shared::gateway::{
     SessionRuntimeResolver,
 };
 
+/// Base `SessionRuntimeBuildInput` for resolver tests; callers override the
+/// fields their scenario exercises.
+fn build_input(entry: GatewayEntryContext) -> SessionRuntimeBuildInput {
+    SessionRuntimeBuildInput {
+        session_id: "session".to_string(),
+        conversation_id: "conversation".to_string(),
+        sender_id: "sender".to_string(),
+        channel: None,
+        channel_instance_id: None,
+        channel_identity_prompt: None,
+        entry,
+        agent_id_override: None,
+        max_turns_override: None,
+        subagent_role_id: None,
+        llm: None,
+        workspace: None,
+        skills: None,
+    }
+}
+
 #[test]
 fn token_budget_caps_output_to_preserve_prompt_budget() {
     let budget = build_token_budget(128_000, 150_000);
@@ -35,21 +55,8 @@ fn token_budget_with_explicit_window() {
 fn build_system_prompt_includes_workspace_agents_before_channel_rules() {
     let temp = tempdir().unwrap();
     fs::write(temp.path().join("AGENTS.md"), "repo rules").unwrap();
-    let request = SessionRuntimeBuildInput {
-        session_id: "session".to_string(),
-        conversation_id: "conversation".to_string(),
-        sender_id: "sender".to_string(),
-        channel: Some("feishu".to_string()),
-        channel_instance_id: None,
-        channel_identity_prompt: None,
-        entry: GatewayEntryContext::channel(None),
-        agent_id_override: None,
-        max_turns_override: None,
-        subagent_role_id: None,
-        llm: None,
-        workspace: None,
-        skills: None,
-    };
+    let mut request = build_input(GatewayEntryContext::channel(None));
+    request.channel = Some("feishu".to_string());
 
     let prompt = build_system_prompt(
         "base rules",
@@ -147,26 +154,14 @@ fn mcp_profiles_apply_strict_tool_boundaries() {
 fn local_runtime_uses_request_workspace() {
     let default_workspace = tempdir().expect("default workspace");
     let requested_workspace = tempdir().expect("requested workspace");
-    let request = SessionRuntimeBuildInput {
-        session_id: "mcp-agent-session".to_string(),
-        conversation_id: "conversation".to_string(),
-        sender_id: "sender".to_string(),
-        channel: None,
-        channel_instance_id: None,
-        channel_identity_prompt: None,
-        entry: GatewayEntryContext {
-            kind: Some(xiaoo_shared::gateway::GatewayEntryKind::Mcp),
-            instance_id: Some("agent".to_string()),
-            runtime_profile_id: None,
-            build_tags: Vec::new(),
-        },
-        agent_id_override: None,
-        max_turns_override: None,
-        subagent_role_id: None,
-        llm: None,
-        workspace: Some(requested_workspace.path().to_path_buf()),
-        skills: None,
-    };
+    let mut request = build_input(GatewayEntryContext {
+        kind: Some(xiaoo_shared::gateway::GatewayEntryKind::Mcp),
+        instance_id: Some("agent".to_string()),
+        runtime_profile_id: None,
+        build_tags: Vec::new(),
+    });
+    request.session_id = "mcp-agent-session".to_string();
+    request.workspace = Some(requested_workspace.path().to_path_buf());
 
     let resolved = resolve_local_workspace(&request, None, default_workspace.path())
         .expect("local workspace should resolve");
@@ -191,24 +186,11 @@ fn resolve_agent_role_uses_runtime_profile_id() {
             tools: BTreeMap::new(),
         },
     );
-    let request = SessionRuntimeBuildInput {
-        session_id: "session".to_string(),
-        conversation_id: "conversation".to_string(),
-        sender_id: "sender".to_string(),
-        channel: Some("http".to_string()),
-        channel_instance_id: None,
-        channel_identity_prompt: None,
-        entry: GatewayEntryContext {
-            runtime_profile_id: Some("code-reviewer".to_string()),
-            ..GatewayEntryContext::channel(None)
-        },
-        agent_id_override: None,
-        max_turns_override: None,
-        subagent_role_id: None,
-        llm: None,
-        workspace: None,
-        skills: None,
-    };
+    let mut request = build_input(GatewayEntryContext {
+        runtime_profile_id: Some("code-reviewer".to_string()),
+        ..GatewayEntryContext::channel(None)
+    });
+    request.channel = Some("http".to_string());
 
     let resolved = resolve_agent_role(&agent_roles, &request)
         .expect("agent role should resolve")
@@ -228,26 +210,14 @@ fn mcp_agent_role_applies_only_to_the_root_lane() {
             tools: BTreeMap::new(),
         },
     );
-    let request = SessionRuntimeBuildInput {
-        session_id: "mcp-agent-session".to_string(),
-        conversation_id: "conversation".to_string(),
-        sender_id: "mcp-user".to_string(),
-        channel: None,
-        channel_instance_id: None,
-        channel_identity_prompt: None,
-        entry: GatewayEntryContext {
-            kind: Some(xiaoo_shared::gateway::GatewayEntryKind::Mcp),
-            instance_id: Some("agent".to_string()),
-            runtime_profile_id: Some("xuanyuan".to_string()),
-            build_tags: Vec::new(),
-        },
-        agent_id_override: None,
-        max_turns_override: None,
-        subagent_role_id: None,
-        llm: None,
-        workspace: None,
-        skills: None,
-    };
+    let mut request = build_input(GatewayEntryContext {
+        kind: Some(xiaoo_shared::gateway::GatewayEntryKind::Mcp),
+        instance_id: Some("agent".to_string()),
+        runtime_profile_id: Some("xuanyuan".to_string()),
+        build_tags: Vec::new(),
+    });
+    request.session_id = "mcp-agent-session".to_string();
+    request.sender_id = "mcp-user".to_string();
 
     let root_role = resolve_profile_agent_role(
         &agent_roles,
@@ -288,21 +258,8 @@ fn existing_e2b_binding_inherits_omissions_and_rejects_changes() {
         skills: Vec::new(),
         manifest_version: xiaoo_shared::gateway::E2B_BOOTSTRAP_MANIFEST_VERSION,
     };
-    let mut request = SessionRuntimeBuildInput {
-        session_id: "runtime-1".to_string(),
-        conversation_id: "conversation".to_string(),
-        sender_id: "sender".to_string(),
-        channel: None,
-        channel_instance_id: None,
-        channel_identity_prompt: None,
-        entry: GatewayEntryContext::default(),
-        agent_id_override: None,
-        max_turns_override: None,
-        subagent_role_id: None,
-        llm: None,
-        workspace: None,
-        skills: None,
-    };
+    let mut request = build_input(GatewayEntryContext::default());
+    request.session_id = "runtime-1".to_string();
 
     validate_existing_e2b_binding(&request, None, None, &binding)
         .expect("omission inherits binding");
@@ -368,21 +325,11 @@ async fn resolve_honors_agent_id_override_for_subagent_lanes() {
 
     let subagent_agent_id = AgentId(uuid::Uuid::new_v4().to_string());
 
-    let request = SessionRuntimeBuildInput {
-        session_id: "test-session".to_string(),
-        conversation_id: "test-session".to_string(),
-        sender_id: "test-user".to_string(),
-        channel: None,
-        channel_instance_id: None,
-        channel_identity_prompt: None,
-        entry: GatewayEntryContext::tui(None),
-        agent_id_override: Some(subagent_agent_id.clone()),
-        max_turns_override: None,
-        subagent_role_id: None,
-        llm: None,
-        workspace: None,
-        skills: None,
-    };
+    let mut request = build_input(GatewayEntryContext::tui(None));
+    request.session_id = "test-session".to_string();
+    request.conversation_id = "test-session".to_string();
+    request.sender_id = "test-user".to_string();
+    request.agent_id_override = Some(subagent_agent_id.clone());
 
     let resolved = resolver
         .resolve(&request, None)
@@ -455,29 +402,19 @@ workspace = "{workspace_str}"
     let resolver = ConfiguredRuntimeResolver::from_config(&config)
         .await
         .expect("construct resolver");
-    let request = SessionRuntimeBuildInput {
-        session_id: "profile-session".to_string(),
-        conversation_id: "profile-session".to_string(),
-        sender_id: "test-user".to_string(),
-        channel: None,
-        channel_instance_id: None,
-        channel_identity_prompt: None,
-        entry: GatewayEntryContext::default(),
-        agent_id_override: None,
-        max_turns_override: None,
-        subagent_role_id: None,
-        llm: Some(LlmRuntimeConfig {
-            profile_id: Some("alternate".to_string()),
-            provider: None,
-            model: None,
-            api_base: None,
-            api_key_env: None,
-            api_key: None,
-            reasoning_effort: None,
-        }),
-        workspace: None,
-        skills: None,
-    };
+    let mut request = build_input(GatewayEntryContext::default());
+    request.session_id = "profile-session".to_string();
+    request.conversation_id = "profile-session".to_string();
+    request.sender_id = "test-user".to_string();
+    request.llm = Some(LlmRuntimeConfig {
+        profile_id: Some("alternate".to_string()),
+        provider: None,
+        model: None,
+        api_base: None,
+        api_key_env: None,
+        api_key: None,
+        reasoning_effort: None,
+    });
 
     let default_request = SessionRuntimeBuildInput {
         llm: None,

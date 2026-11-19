@@ -80,30 +80,18 @@ fn write_outside_writable_root_is_denied() {
 }
 
 #[cfg(unix)]
-async fn product_write_then_exec(mode: WriteMode) {
+fn spawn_concurrent_exec_loop(
+    backend: &Arc<dyn agent_contracts::backend::OperationBackend>,
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
     use agent_contracts::backend::capability::exec::ExecRequest;
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let temp = tempfile::tempdir().unwrap();
-    let backend = crate::local_backend(temp.path().to_path_buf(), None, None, None).unwrap();
-    let path = temp.path().join("product-executable.sh");
-    if !matches!(mode, WriteMode::Create) {
-        let seed = temp.path().join("seed");
-        backend
-            .files()
-            .write_bytes(WriteBytesRequest {
-                path: BackendPath::from_raw(seed.display().to_string()),
-                content: b"#!/bin/sh\nexit 0\n".to_vec(),
-                mode: WriteMode::Create,
-                extra: None,
-            })
-            .await
-            .unwrap();
-        std::fs::rename(seed, &path).unwrap();
-    }
-    let stopped = Arc::new(AtomicBool::new(false));
+    use std::sync::atomic::Ordering;
+
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let spawns = std::thread::spawn({
-        let backend = Arc::clone(&backend);
+        let backend = Arc::clone(backend);
         let stopped = Arc::clone(&stopped);
         move || {
             tokio::runtime::Builder::new_current_thread()
@@ -127,6 +115,32 @@ async fn product_write_then_exec(mode: WriteMode) {
                 })
         }
     });
+    (stopped, spawns)
+}
+
+#[cfg(unix)]
+async fn product_write_then_exec(mode: WriteMode) {
+    use agent_contracts::backend::capability::exec::ExecRequest;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().unwrap();
+    let backend = crate::local_backend(temp.path().to_path_buf(), None, None, None).unwrap();
+    let path = temp.path().join("product-executable.sh");
+    if !matches!(mode, WriteMode::Create) {
+        let seed = temp.path().join("seed");
+        backend
+            .files()
+            .write_bytes(WriteBytesRequest {
+                path: BackendPath::from_raw(seed.display().to_string()),
+                content: b"#!/bin/sh\nexit 0\n".to_vec(),
+                mode: WriteMode::Create,
+                extra: None,
+            })
+            .await
+            .unwrap();
+        std::fs::rename(seed, &path).unwrap();
+    }
+    let (stopped, spawns) = spawn_concurrent_exec_loop(&backend);
     tokio::task::yield_now().await;
     let outcome = backend
         .files()
@@ -182,35 +196,10 @@ async fn product_atomic_overwrite_then_exec_during_concurrent_spawns() {
 async fn product_temp_file_then_write_and_exec_during_concurrent_spawns() {
     use agent_contracts::backend::capability::exec::ExecRequest;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
     let temp = tempfile::tempdir().unwrap();
     let backend = crate::local_backend(temp.path().to_path_buf(), None, None, None).unwrap();
-    let stopped = Arc::new(AtomicBool::new(false));
-    let spawns = std::thread::spawn({
-        let backend = Arc::clone(&backend);
-        let stopped = Arc::clone(&stopped);
-        move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async move {
-                    for _ in 0..512 {
-                        if stopped.load(Ordering::Acquire) {
-                            break;
-                        }
-                        backend
-                            .exec()
-                            .exec(ExecRequest {
-                                command: "/bin/true".into(),
-                                ..Default::default()
-                            })
-                            .await
-                            .unwrap();
-                    }
-                })
-        }
-    });
+    let (stopped, spawns) = spawn_concurrent_exec_loop(&backend);
     let path = backend
         .files()
         .temp_path(TempPathRequest {

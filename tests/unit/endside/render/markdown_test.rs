@@ -518,37 +518,24 @@ fn chunk_spans(len: usize, chunk_size: usize) -> Vec<(usize, usize)> {
     spans
 }
 
+/// One content per markdown block shape (prose / headings+lists / code
+/// block / hr / table): the every-split-point harness must hold for each.
 #[test]
-fn incremental_matches_full_for_prose() {
-    assert_incremental_equals_full(
+fn incremental_matches_full_across_block_shapes() {
+    for content in [
+        // plain prose
         "Hello world, this is a streaming message.\nSecond line here.\nThird line.",
-    );
-}
-
-#[test]
-fn incremental_matches_full_for_headings_and_lists() {
-    assert_incremental_equals_full(
+        // headings and lists
         "# Title\n## Section\n### Subsection\n- item one\n- item two\n1. first\n2. second\nplain text line",
-    );
-}
-
-#[test]
-fn incremental_matches_full_for_code_block() {
-    assert_incremental_equals_full(
+        // fenced code block
         "Before the block.\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\nAfter the block.",
-    );
-}
-
-#[test]
-fn incremental_matches_full_for_hr() {
-    assert_incremental_equals_full("top\n---\nbottom\n***\nend");
-}
-
-#[test]
-fn incremental_matches_full_when_table_present() {
-    assert_incremental_equals_full(
+        // thematic breaks (also `---`, the table-separator lookalike)
+        "top\n---\nbottom\n***\nend",
+        // markdown table
         "| Name | Status |\n| --- | --- |\n| xiaoO | ready |\n\nAfter the table.",
-    );
+    ] {
+        assert_incremental_equals_full(content);
+    }
 }
 
 #[test]

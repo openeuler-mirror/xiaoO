@@ -696,130 +696,62 @@ async fn concurrent_writes_do_not_fail_with_database_locked() {
 async fn suspend_resume_chain_includes_previous_and_next_segments() {
     let storage = SqliteStorage::new(":memory:").unwrap();
 
-    storage
-        .insert_span(&span(
-            "root-a",
+    // Three traces sharing session-1: trace-a suspends after spawning a
+    // subagent (spawn_subagent + END marker), trace-b resumes it via
+    // join_subagent, trace-c is an unrelated bash call that must stay
+    // out of the chain.
+    for (trace, base, tool_name, end_extras) in [
+        (
             "trace-a",
-            None,
-            "USER",
             100,
-            None,
-            serde_json::json!({}),
-        ))
-        .await
-        .unwrap();
-    storage
-        .insert_span(&span(
-            "tool-a",
-            "trace-a",
-            Some("root-a"),
-            "TOOL_CALL",
-            110,
-            Some(120),
-            serde_json::json!({
-                "session_id": "session-1",
-                "agent_id": "main",
-                "tool_name": "spawn_subagent"
-            }),
-        ))
-        .await
-        .unwrap();
-    storage
-        .insert_span(&span(
-            "end-a",
-            "trace-a",
-            Some("root-a"),
-            "END",
-            130,
-            Some(130),
-            serde_json::json!({
-                "message": "suspended"
-            }),
-        ))
-        .await
-        .unwrap();
-
-    storage
-        .insert_span(&span(
-            "root-b",
-            "trace-b",
-            None,
-            "USER",
-            200,
-            None,
-            serde_json::json!({}),
-        ))
-        .await
-        .unwrap();
-    storage
-        .insert_span(&span(
-            "tool-b",
-            "trace-b",
-            Some("root-b"),
-            "TOOL_CALL",
-            210,
-            Some(220),
-            serde_json::json!({
-                "session_id": "session-1",
-                "agent_id": "main",
-                "tool_name": "join_subagent"
-            }),
-        ))
-        .await
-        .unwrap();
-    storage
-        .insert_span(&span(
-            "end-b",
-            "trace-b",
-            Some("root-b"),
-            "END",
-            230,
-            Some(230),
-            serde_json::json!({}),
-        ))
-        .await
-        .unwrap();
-
-    storage
-        .insert_span(&span(
-            "root-c",
-            "trace-c",
-            None,
-            "USER",
-            300,
-            None,
-            serde_json::json!({}),
-        ))
-        .await
-        .unwrap();
-    storage
-        .insert_span(&span(
-            "tool-c",
-            "trace-c",
-            Some("root-c"),
-            "TOOL_CALL",
-            310,
-            Some(320),
-            serde_json::json!({
-                "session_id": "session-1",
-                "agent_id": "main",
-                "tool_name": "bash"
-            }),
-        ))
-        .await
-        .unwrap();
-    storage
-        .insert_span(&span(
-            "end-c",
-            "trace-c",
-            Some("root-c"),
-            "END",
-            330,
-            Some(330),
-            serde_json::json!({}),
-        ))
-        .await
-        .unwrap();
+            "spawn_subagent",
+            serde_json::json!({"message": "suspended"}),
+        ),
+        ("trace-b", 200, "join_subagent", serde_json::json!({})),
+        ("trace-c", 300, "bash", serde_json::json!({})),
+    ] {
+        let root_id = format!("root-{trace}");
+        let tool_id = format!("tool-{trace}");
+        let end_id = format!("end-{trace}");
+        let rows = [
+            (
+                root_id.as_str(),
+                None,
+                "USER",
+                base,
+                None,
+                serde_json::json!({}),
+            ),
+            (
+                tool_id.as_str(),
+                Some(root_id.as_str()),
+                "TOOL_CALL",
+                base + 10,
+                Some(base + 20),
+                serde_json::json!({
+                    "session_id": "session-1",
+                    "agent_id": "main",
+                    "tool_name": tool_name
+                }),
+            ),
+            (
+                end_id.as_str(),
+                Some(root_id.as_str()),
+                "END",
+                base + 30,
+                Some(base + 30),
+                end_extras,
+            ),
+        ];
+        for (span_id, parent, span_type, start_time, end_time, extras) in rows {
+            storage
+                .insert_span(&span(
+                    span_id, trace, parent, span_type, start_time, end_time, extras,
+                ))
+                .await
+                .unwrap();
+        }
+    }
 
     let chain_from_first = storage
         .get_suspend_resume_trace_chain("trace-a")

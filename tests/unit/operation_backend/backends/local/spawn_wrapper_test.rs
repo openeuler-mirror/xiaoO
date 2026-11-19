@@ -14,7 +14,8 @@ fn none_when_extra_absent_or_empty() {
 }
 
 #[test]
-fn parses_prefix_and_defaults_externalize_flag() {
+fn parses_prefix_and_externalize_flag() {
+    // Prefix only: externalize_fs_writes defaults to false.
     let extra = extra_with_wrapper(json!({
         "prefix": ["/opt/wrap", "--session=s1", "--"]
     }));
@@ -24,10 +25,8 @@ fn parses_prefix_and_defaults_externalize_flag() {
         !wrapper.externalize_fs_writes,
         "externalize_fs_writes defaults to false"
     );
-}
 
-#[test]
-fn parses_externalize_fs_writes_true() {
+    // Explicit opt-in flips the flag.
     let extra = extra_with_wrapper(json!({
         "prefix": ["/opt/wrap"],
         "externalize_fs_writes": true

@@ -1,32 +1,23 @@
 use super::*;
 
 #[test]
-fn token_at_cursor() {
-    let token = file_mention_token("fix @src/ma", 11).unwrap();
-    assert_eq!(token.start, 4);
-    assert_eq!(token.typed, "src/ma");
-}
-
-#[test]
-fn token_at_line_start() {
-    let token = file_mention_token("@read", 5).unwrap();
-    assert_eq!(token.start, 0);
-    assert_eq!(token.typed, "read");
-}
-
-#[test]
-fn token_inside_word_is_ignored() {
-    assert!(file_mention_token("a@b", 3).is_none());
-}
-
-#[test]
-fn token_requires_at_sign() {
-    assert!(file_mention_token("hello", 5).is_none());
-}
-
-#[test]
-fn token_stops_at_space() {
-    assert!(file_mention_token("@src ma", 7).is_none());
+fn file_mention_token_extracts_typed_text_at_word_start() {
+    // (line, cursor) → expected (start, typed): the @-mention under the
+    // cursor is only recognized at a word start, and the scan stops at
+    // the first space.
+    for (line, cursor, expected) in [
+        ("fix @src/ma", 11, Some((4, "src/ma"))), // mid-line token
+        ("@read", 5, Some((0, "read"))),          // token at line start
+        ("a@b", 3, None),                         // @ inside a word: ignored
+        ("hello", 5, None),                       // no @ sign
+        ("@src ma", 7, None),                     // cursor past the space
+    ] {
+        assert_eq!(
+            file_mention_token(line, cursor).map(|token| (token.start, token.typed)),
+            expected.map(|(start, typed)| (start, typed.to_string())),
+            "line {line:?} cursor {cursor}"
+        );
+    }
 }
 
 #[test]

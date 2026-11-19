@@ -1,5 +1,19 @@
 use super::*;
 
+/// Backdate the recorded heartbeat for `session_id` past the staleness
+/// threshold so the next acquire can take the lease over via the stale
+/// path (live leases are never overridden).
+async fn backdate_lease_stale(table: &SessionLeaseTable, session_id: &str) {
+    table
+        .set_last_heartbeat_ms_for_test(
+            session_id,
+            current_time_ms()
+                .expect("wall clock")
+                .saturating_sub(STALE_LEASE_THRESHOLD_MS + 1_000),
+        )
+        .await;
+}
+
 #[tokio::test]
 async fn acquire_then_busy_for_other_client() {
     let table = SessionLeaseTable::new();
@@ -24,14 +38,7 @@ async fn stale_lease_taken_over_without_force() {
     let table = SessionLeaseTable::new();
     let _ = table.acquire("s1", "client-a", Some(1), None).await;
     // Manually backdate the heartbeat past the staleness threshold.
-    table
-        .set_last_heartbeat_ms_for_test(
-            "s1",
-            current_time_ms()
-                .expect("wall clock")
-                .saturating_sub(STALE_LEASE_THRESHOLD_MS + 1_000),
-        )
-        .await;
+    backdate_lease_stale(&table, "s1").await;
     let outcome = table.acquire("s1", "client-b", Some(2), None).await;
     assert!(matches!(outcome, LeaseAcquireOutcome::Acquired));
 }
@@ -45,14 +52,7 @@ async fn heartbeat_returns_error_when_taken_over() {
     assert!(table.heartbeat("s1", "client-a", None, None).await.is_ok());
     // Backdate client-a's lease so client-b can take it over via the
     // stale path (live leases are never overridden).
-    table
-        .set_last_heartbeat_ms_for_test(
-            "s1",
-            current_time_ms()
-                .expect("wall clock")
-                .saturating_sub(STALE_LEASE_THRESHOLD_MS + 1_000),
-        )
-        .await;
+    backdate_lease_stale(&table, "s1").await;
     let _ = table.acquire("s1", "client-b", Some(2), None).await;
     // client-a heartbeat now fails
     let result = table.heartbeat("s1", "client-a", None, None).await;
@@ -99,14 +99,7 @@ async fn check_holder_does_not_take_over_stale_lease() {
     let table = SessionLeaseTable::new();
     let _ = table.acquire("s1", "client-a", Some(1), None).await;
     // Backdate the lease past the staleness threshold.
-    table
-        .set_last_heartbeat_ms_for_test(
-            "s1",
-            current_time_ms()
-                .expect("wall clock")
-                .saturating_sub(STALE_LEASE_THRESHOLD_MS + 1_000),
-        )
-        .await;
+    backdate_lease_stale(&table, "s1").await;
     // Identified non-holder caller: Ok (stale → allow), but no takeover.
     assert!(table.check_holder("s1", Some("client-b")).await.is_ok());
     // client-a is STILL the recorded holder (stale): client-b's
@@ -128,14 +121,7 @@ async fn check_or_takeover_holder_takes_over_stale_lease_for_identified_caller()
     let table = SessionLeaseTable::new();
     let _ = table.acquire("s1", "client-a", Some(1), None).await;
     // Backdate the lease past the staleness threshold.
-    table
-        .set_last_heartbeat_ms_for_test(
-            "s1",
-            current_time_ms()
-                .expect("wall clock")
-                .saturating_sub(STALE_LEASE_THRESHOLD_MS + 1_000),
-        )
-        .await;
+    backdate_lease_stale(&table, "s1").await;
     // An identified caller's `check_or_takeover_holder` succeeds AND
     // takes over the lease: the new caller is now the holder.
     assert!(table
@@ -161,14 +147,7 @@ async fn check_or_takeover_holder_allows_anonymous_caller_through_stale_lease_wi
     // take it over, so an identified caller can still claim it later.
     let table = SessionLeaseTable::new();
     let _ = table.acquire("s1", "client-a", Some(1), None).await;
-    table
-        .set_last_heartbeat_ms_for_test(
-            "s1",
-            current_time_ms()
-                .expect("wall clock")
-                .saturating_sub(STALE_LEASE_THRESHOLD_MS + 1_000),
-        )
-        .await;
+    backdate_lease_stale(&table, "s1").await;
     assert!(table.check_or_takeover_holder("s1", None).await.is_ok());
     let snapshot = table.snapshot().await;
     let (_, holder, _) = snapshot

@@ -46,6 +46,22 @@ impl LineSink for ConsumeAll {
     }
 }
 
+/// Drive the trait's default `exec_streaming` (buffer-then-sink) for
+/// `backend` on a throwaway single-threaded runtime; the tests inspect
+/// the returned `ExecResult` directly.
+fn default_exec_streaming(backend: &impl OperationExec, sink: Arc<dyn LineSink>) -> ExecResult {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(OperationExec::exec_streaming(
+            backend,
+            ExecRequest::default(),
+            sink,
+        ))
+        .unwrap()
+}
+
 /// When the sink asks to stop early, the default impl must clear
 /// `result.stdout` so the full buffered output is not retained
 /// alongside the sink's bounded subset. Without this, non-streaming
@@ -61,17 +77,7 @@ fn default_exec_streaming_clears_stdout_on_early_stop() {
         seen: Mutex::new(0),
     });
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let result = runtime
-        .block_on(OperationExec::exec_streaming(
-            &backend,
-            ExecRequest::default(),
-            sink,
-        ))
-        .unwrap();
+    let result = default_exec_streaming(&backend, sink);
 
     assert!(
         result.stopped_early,
@@ -98,17 +104,7 @@ fn default_exec_streaming_clears_stdout_even_when_sink_consumes_all() {
     };
     let sink: Arc<dyn LineSink> = Arc::new(ConsumeAll);
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let result = runtime
-        .block_on(OperationExec::exec_streaming(
-            &backend,
-            ExecRequest::default(),
-            sink,
-        ))
-        .unwrap();
+    let result = default_exec_streaming(&backend, sink);
 
     assert!(!result.stopped_early);
     assert!(
@@ -129,17 +125,7 @@ fn default_exec_streaming_empty_stdout_no_panic() {
         seen: Mutex::new(0),
     });
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let result = runtime
-        .block_on(OperationExec::exec_streaming(
-            &backend,
-            ExecRequest::default(),
-            sink,
-        ))
-        .unwrap();
+    let result = default_exec_streaming(&backend, sink);
 
     assert!(
         !result.stopped_early,

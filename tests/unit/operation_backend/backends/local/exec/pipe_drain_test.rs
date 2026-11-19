@@ -5,6 +5,47 @@ use agent_contracts::backend::{capability::exec::ExecRequest, BackendPath};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Shared fixture for the pipe/streaming tests below: hold the process-group
+/// lock, create the workspace, and stand up a bash backend plus its
+/// single-thread runtime.
+#[allow(clippy::type_complexity)]
+fn locked_bash_backend(
+    prefix: &str,
+    name: &str,
+) -> (
+    std::sync::MutexGuard<'static, ()>,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    Arc<dyn agent_contracts::backend::OperationBackend>,
+    tokio::runtime::Runtime,
+) {
+    let guard = crate::test_support::process_group_test_lock()
+        .lock()
+        .unwrap();
+    let root = test_workspace_root(prefix, name);
+    let workspace = root.join("workspace");
+    let backend = local_backend(workspace.clone(), None, None, Some("bash".to_string())).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    (guard, root, workspace, backend, runtime)
+}
+
+/// Bash-shell exec request bound to the workspace cwd.
+fn bash_request(workspace: &std::path::Path, command: &str, timeout_ms: u64) -> ExecRequest {
+    ExecRequest {
+        command: command.to_string(),
+        args: vec![],
+        shell: Some("bash".to_string()),
+        cwd: Some(BackendPath::from_raw(
+            workspace.to_string_lossy().into_owned(),
+        )),
+        timeout_ms: Some(timeout_ms),
+        ..Default::default()
+    }
+}
+
 // Regression test for the stdout-pipe deadlock: a background process spawned
 // by the script (`sleep 3 &`) inherits bash's piped stdout and keeps its
 // write end open for longer than the exec timeout. The old implementation
@@ -15,36 +56,16 @@ use std::time::{Duration, Instant};
 // promptly with the partial output captured before the drain gave up.
 #[test]
 fn exec_returns_promptly_when_background_process_holds_stdout_pipe() {
-    let _guard = crate::test_support::process_group_test_lock()
-        .lock()
-        .unwrap();
-    let root = test_workspace_root("xiaoo-pipe-", "pipe");
-    let workspace = root.join("workspace");
+    let (_guard, root, workspace, backend, runtime) = locked_bash_backend("xiaoo-pipe-", "pipe");
 
-    let backend = local_backend(workspace.clone(), None, None, Some("bash".to_string())).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    let command = "echo main-output; sleep 3 &";
     let start = Instant::now();
-    let result = runtime.block_on(async {
-        backend
-            .exec()
-            .exec(ExecRequest {
-                command: command.to_string(),
-                args: vec![],
-                shell: Some("bash".to_string()),
-                cwd: Some(BackendPath::from_raw(
-                    workspace.to_string_lossy().into_owned(),
-                )),
-                timeout_ms: Some(2_000),
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-    });
+    let result = runtime
+        .block_on(backend.exec().exec(bash_request(
+            &workspace,
+            "echo main-output; sleep 3 &",
+            2_000,
+        )))
+        .unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(result.exit_code, Some(0));
@@ -67,37 +88,17 @@ fn exec_returns_promptly_when_background_process_holds_stdout_pipe() {
 // full stream including the background writer's output.
 #[test]
 fn exec_captures_background_output_when_writer_exits_within_grace() {
-    let _guard = crate::test_support::process_group_test_lock()
-        .lock()
-        .unwrap();
-    let root = test_workspace_root("xiaoo-pipe-", "bg");
-    let workspace = root.join("workspace");
-
-    let backend = local_backend(workspace.clone(), None, None, Some("bash".to_string())).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let (_guard, root, workspace, backend, runtime) = locked_bash_backend("xiaoo-pipe-", "bg");
 
     // The background subshell writes three lines over ~0.3s then exits,
     // releasing the inherited stdout pipe. All of it should be captured.
-    let command = "echo main; ( for i in 1 2 3; do echo bg-$i; sleep 0.1; done ) & echo done";
-    let result = runtime.block_on(async {
-        backend
-            .exec()
-            .exec(ExecRequest {
-                command: command.to_string(),
-                args: vec![],
-                shell: Some("bash".to_string()),
-                cwd: Some(BackendPath::from_raw(
-                    workspace.to_string_lossy().into_owned(),
-                )),
-                timeout_ms: Some(5_000),
-                ..Default::default()
-            })
-            .await
-            .unwrap()
-    });
+    let result = runtime
+        .block_on(backend.exec().exec(bash_request(
+            &workspace,
+            "echo main; ( for i in 1 2 3; do echo bg-$i; sleep 0.1; done ) & echo done",
+            5_000,
+        )))
+        .unwrap();
 
     assert_eq!(result.exit_code, Some(0));
     let out = String::from_utf8_lossy(result.stdout.as_slice());
@@ -135,17 +136,7 @@ impl LineSink for FiveLineCollector {
 
 #[test]
 fn exec_streaming_kills_child_when_sink_returns_false() {
-    let _guard = crate::test_support::process_group_test_lock()
-        .lock()
-        .unwrap();
-    let root = test_workspace_root("xiaoo-stream-", "kill");
-    let workspace = root.join("workspace");
-
-    let backend = local_backend(workspace.clone(), None, None, Some("bash".to_string())).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let (_guard, root, workspace, backend, runtime) = locked_bash_backend("xiaoo-stream-", "kill");
 
     let collector = Arc::new(FiveLineCollector {
         kept: Mutex::new(Vec::new()),
@@ -153,25 +144,13 @@ fn exec_streaming_kills_child_when_sink_returns_false() {
     let sink: Arc<dyn LineSink> = Arc::clone(&collector) as Arc<dyn LineSink>;
 
     let start = Instant::now();
-    let result = runtime.block_on(async {
-        backend
-            .exec()
-            .exec_streaming(
-                ExecRequest {
-                    command: "seq 1 1000000".to_string(),
-                    args: vec![],
-                    shell: Some("bash".to_string()),
-                    cwd: Some(BackendPath::from_raw(
-                        workspace.to_string_lossy().into_owned(),
-                    )),
-                    timeout_ms: Some(30_000), // generous upper bound; we expect to return way before
-                    ..Default::default()
-                },
-                sink,
-            )
-            .await
-            .unwrap()
-    });
+    let result = runtime
+        .block_on(backend.exec().exec_streaming(
+            // generous upper bound; we expect to return way before
+            bash_request(&workspace, "seq 1 1000000", 30_000),
+            sink,
+        ))
+        .unwrap();
     let elapsed = start.elapsed();
 
     // Sink asked for early termination — flag must be set.
@@ -234,42 +213,19 @@ impl LineSink for AllLinesCollector {
 
 #[test]
 fn exec_streaming_drains_to_eof_when_sink_never_stops() {
-    let _guard = crate::test_support::process_group_test_lock()
-        .lock()
-        .unwrap();
-    let root = test_workspace_root("xiaoo-stream-", "eof");
-    let workspace = root.join("workspace");
-
-    let backend = local_backend(workspace.clone(), None, None, Some("bash".to_string())).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let (_guard, root, workspace, backend, runtime) = locked_bash_backend("xiaoo-stream-", "eof");
 
     let collector = Arc::new(AllLinesCollector {
         kept: Mutex::new(Vec::new()),
     });
     let sink: Arc<dyn LineSink> = Arc::clone(&collector) as Arc<dyn LineSink>;
 
-    let result = runtime.block_on(async {
-        backend
-            .exec()
-            .exec_streaming(
-                ExecRequest {
-                    command: "printf 'a\\nb\\nc\\n'".to_string(),
-                    args: vec![],
-                    shell: Some("bash".to_string()),
-                    cwd: Some(BackendPath::from_raw(
-                        workspace.to_string_lossy().into_owned(),
-                    )),
-                    timeout_ms: Some(5_000),
-                    ..Default::default()
-                },
-                sink,
-            )
-            .await
-            .unwrap()
-    });
+    let result = runtime
+        .block_on(backend.exec().exec_streaming(
+            bash_request(&workspace, "printf 'a\\nb\\nc\\n'", 5_000),
+            sink,
+        ))
+        .unwrap();
 
     // Child exited naturally → exit_code 0, no early kill.
     assert_eq!(result.exit_code, Some(0));

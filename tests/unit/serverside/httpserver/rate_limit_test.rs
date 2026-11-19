@@ -1,52 +1,43 @@
 use super::*;
 
 #[test]
-fn default_config_is_enabled_with_sane_defaults() {
+fn default_and_empty_toml_agree_on_sane_defaults() {
     let cfg = RateLimitConfig::default();
     assert!(cfg.enabled);
     assert_eq!(cfg.requests_per_second, 2);
     assert_eq!(cfg.burst, 10);
     assert!(cfg.routes.is_empty());
+
+    let cfg: RateLimitConfig = toml::from_str("").unwrap();
+    assert!(cfg.enabled);
+    assert_eq!(cfg.requests_per_second, 2);
+    assert_eq!(cfg.burst, 10);
 }
 
+/// Disabled and zero-quota settings must not install a governor layer.
 #[test]
-fn disabled_config_yields_no_layer() {
-    let cfg = RateLimitConfig {
-        enabled: false,
-        ..Default::default()
-    };
-    assert!(cfg.governor_layer().is_none());
+fn degenerate_configs_yield_no_layer() {
+    for cfg in [
+        RateLimitConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        RateLimitConfig {
+            requests_per_second: 0,
+            ..Default::default()
+        },
+        RateLimitConfig {
+            burst: 0,
+            ..Default::default()
+        },
+    ] {
+        assert!(cfg.governor_layer().is_none());
+    }
 }
 
 #[test]
 fn enabled_config_yields_a_layer() {
     assert!(RateLimitConfig::default().governor_layer().is_some());
-}
-
-#[test]
-fn zero_rps_yields_no_layer() {
-    let cfg = RateLimitConfig {
-        requests_per_second: 0,
-        ..Default::default()
-    };
-    assert!(cfg.governor_layer().is_none());
-}
-
-#[test]
-fn zero_burst_yields_no_layer() {
-    let cfg = RateLimitConfig {
-        burst: 0,
-        ..Default::default()
-    };
-    assert!(cfg.governor_layer().is_none());
-}
-
-#[test]
-fn empty_toml_uses_defaults() {
-    let cfg: RateLimitConfig = toml::from_str("").unwrap();
-    assert!(cfg.enabled);
-    assert_eq!(cfg.requests_per_second, 2);
-    assert_eq!(cfg.burst, 10);
 }
 
 #[test]

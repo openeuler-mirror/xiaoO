@@ -87,17 +87,13 @@ async fn checkpoint_restore_rebuilds_next_llm_request_during_same_run() {
         .unwrap();
     let snapshot = backend.save(context.clone()).unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(
-        Arc::new(Provider {
-            capabilities: EmptyCallIdToolCallProvider::new().capabilities,
-            backend,
-            snapshot_id: snapshot.id,
-            context: context.clone(),
-            requests: requests.clone(),
-        }),
-        None,
-        None,
-    )));
+    let runtime = test_runtime(wrapped(Arc::new(Provider {
+        capabilities: EmptyCallIdToolCallProvider::new().capabilities,
+        backend,
+        snapshot_id: snapshot.id,
+        context: context.clone(),
+        requests: requests.clone(),
+    })));
     let mut input = AgentLoopInput::new("original task")
         .with_agent_id(AgentId("checkpoint-test".into()))
         .with_visible_tools(dummy_visible_tools())
@@ -180,15 +176,11 @@ async fn checkpoint_preserves_pending_user_message_order_in_every_driver_state()
             events: StdMutex::new(Vec::new()),
         });
         let requests = Arc::new(StdMutex::new(Vec::new()));
-        let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(
-            Arc::new(Provider {
-                healthy: StreamingTestProvider::new(),
-                pending: pending.clone(),
-                requests: requests.clone(),
-            }),
-            None,
-            None,
-        )));
+        let runtime = test_runtime(wrapped(Arc::new(Provider {
+            healthy: StreamingTestProvider::new(),
+            pending: pending.clone(),
+            requests: requests.clone(),
+        })));
         let mut state = LoopState::new(uuid::Uuid::new_v4().to_string());
         let context = SnapshotContext {
             session_id: state.session_id.clone(),
@@ -349,19 +341,15 @@ async fn checkpoint_exit_flush_handles_complete_cancel_error_and_restore() {
                 .await;
         }
         let restore = (exit == "restore").then(|| backend.save(context.clone()).unwrap().id);
-        let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(
-            Arc::new(Provider {
-                healthy: StreamingTestProvider::new(),
-                backend: backend.clone(),
-                context: context.clone(),
-                saved: saved.clone(),
-                restore,
-                cancel: state.cancel.clone(),
-                exit,
-            }),
-            None,
-            None,
-        )));
+        let runtime = test_runtime(wrapped(Arc::new(Provider {
+            healthy: StreamingTestProvider::new(),
+            backend: backend.clone(),
+            context: context.clone(),
+            saved: saved.clone(),
+            restore,
+            cancel: state.cancel.clone(),
+            exit,
+        })));
         let mut input =
             AgentLoopInput::new("exit flush task").with_visible_tools(dummy_visible_tools());
         input.checkpoint_driver = Some(driver.clone());
@@ -562,20 +550,16 @@ async fn checkpoint_idle_restore_preserves_new_input_or_replays_final_step() {
                     .unwrap();
             }
             let requests = Arc::new(StdMutex::new(Vec::new()));
-            let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(
-                Arc::new(Provider {
-                    healthy: StreamingTestProvider {
-                        capabilities: EmptyCallIdToolCallProvider::new().capabilities,
-                    },
-                    backend: backend.clone(),
-                    context: context.clone(),
-                    snapshot_id: snapshot.id.clone(),
-                    running,
-                    requests: requests.clone(),
-                }),
-                None,
-                None,
-            )));
+            let runtime = test_runtime(wrapped(Arc::new(Provider {
+                healthy: StreamingTestProvider {
+                    capabilities: EmptyCallIdToolCallProvider::new().capabilities,
+                },
+                backend: backend.clone(),
+                context: context.clone(),
+                snapshot_id: snapshot.id.clone(),
+                running,
+                requests: requests.clone(),
+            })));
             runtime.set_prompt_builder(Arc::new(ToolPromptBuilder));
             let mut input =
                 AgentLoopInput::new("I new input")
@@ -662,9 +646,7 @@ async fn checkpoint_error_does_not_end_agent_task() {
         .unwrap()
         .driver
         .unwrap();
-    let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(
-        Arc::new(StreamingTestProvider::new()), None, None,
-    )));
+    let runtime = test_runtime(wrapped(Arc::new(StreamingTestProvider::new())));
     let mut state = LoopState::new("active-session".into());
     let mut input = AgentLoopInput::new("task");
     input.checkpoint_driver = Some(Arc::new(driver));
@@ -757,17 +739,13 @@ async fn checkpoint_current_saved_during_final_response_ignores_next_user_input(
         .unwrap();
     let saved = Arc::new(StdMutex::new(None));
     let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(
-        Arc::new(Provider {
-            capabilities: EmptyCallIdToolCallProvider::new().capabilities,
-            backend: backend.clone(),
-            saved: saved.clone(),
-            context: context.clone(),
-            requests: requests.clone(),
-        }),
-        None,
-        None,
-    )));
+    let runtime = test_runtime(wrapped(Arc::new(Provider {
+        capabilities: EmptyCallIdToolCallProvider::new().capabilities,
+        backend: backend.clone(),
+        saved: saved.clone(),
+        context: context.clone(),
+        requests: requests.clone(),
+    })));
     let driver = Arc::new(binding.driver.unwrap());
     let make_input = |text| {
         let mut input = AgentLoopInput::new(text)
@@ -879,17 +857,13 @@ async fn checkpoint_exit_restore_returns_reply_from_restored_history() {
             let snapshot = backend.save(context.clone()).unwrap();
             driver.flush(&mut state, &mut 1).await;
             let runtime = test_runtime_with_max_turns(
-                Arc::new(LlmProviderWrapper::new(
-                    Arc::new(Provider {
-                        healthy: StreamingTestProvider::new(),
-                        backend,
-                        context,
-                        snapshot: snapshot.id,
-                        cancel: (exit == "cancelled").then(|| state.cancel.clone()),
-                    }),
-                    None,
-                    None,
-                )),
+                wrapped(Arc::new(Provider {
+                    healthy: StreamingTestProvider::new(),
+                    backend,
+                    context,
+                    snapshot: snapshot.id,
+                    cancel: (exit == "cancelled").then(|| state.cancel.clone()),
+                })),
                 if exit == "max_turns" { 1 } else { 10 },
             );
             let mut input = AgentLoopInput::new("discarded branch");

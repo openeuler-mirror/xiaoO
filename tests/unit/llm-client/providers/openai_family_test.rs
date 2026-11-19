@@ -11,164 +11,124 @@ fn make_provider() -> OpenAiFamilyProvider {
     )
 }
 
+// `reasoning_effort` follows the model-family table in
+// `reasoning_effort_for_model`: Default always omits the parameter; the
+// deviations sit at the Off end (GPT-5.6 needs an explicit `none`) and the
+// Max end (generic endpoints use `xhigh`, newer families only `max`). On
+// Off, GLM-5.2 additionally sends `thinking: {"type": "disabled"}`.
 #[test]
-fn build_body_sets_reasoning_effort() {
-    let provider = make_provider();
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Max);
+fn build_body_maps_reasoning_effort_per_model_family() {
+    for (model, base_url, effort, with_tools, want_effort, want_thinking) in [
+        (
+            "gpt-5.4",
+            "https://api.openai.com/v1",
+            ReasoningEffort::Max,
+            false,
+            Some("xhigh"),
+            None,
+        ),
+        (
+            "gpt-5.4",
+            "https://api.openai.com/v1",
+            ReasoningEffort::Default,
+            false,
+            None,
+            None,
+        ),
+        (
+            "gpt-5.4",
+            "https://api.openai.com/v1",
+            ReasoningEffort::Off,
+            false,
+            None,
+            None,
+        ),
+        (
+            "gpt-5.6-sol",
+            "https://api.openai.com/v1",
+            ReasoningEffort::Off,
+            true,
+            Some("none"),
+            None,
+        ),
+        (
+            "openai/gpt-5.6-terra",
+            "https://api.openai.com/v1",
+            ReasoningEffort::Off,
+            false,
+            Some("none"),
+            None,
+        ),
+        (
+            "gpt-5.6-sol",
+            "https://api.openai.com/v1",
+            ReasoningEffort::Default,
+            false,
+            None,
+            None,
+        ),
+        (
+            "kimi-k3",
+            "https://api.moonshot.cn/v1",
+            ReasoningEffort::Max,
+            false,
+            Some("max"),
+            None,
+        ),
+        (
+            "glm-5.2",
+            "https://open.bigmodel.cn/api/paas/v4",
+            ReasoningEffort::Off,
+            false,
+            None,
+            Some("disabled"),
+        ),
+        (
+            "glm-5.2",
+            "https://open.bigmodel.cn/api/paas/v4",
+            ReasoningEffort::Default,
+            false,
+            None,
+            None,
+        ),
+        (
+            "z-ai/glm-5.2",
+            "https://open.bigmodel.cn/api/paas/v4",
+            ReasoningEffort::Max,
+            false,
+            Some("max"),
+            None,
+        ),
+    ] {
+        let provider = OpenAiFamilyProvider::new(
+            "test-key".to_string(),
+            base_url.to_string(),
+            model.to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            Default::default(),
+        );
+        let case = format!("model={model} effort={effort}");
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
+            .with_reasoning_effort(effort);
+        if with_tools {
+            request = request.with_tools(vec![agent_types::Tool {
+                name: "lookup".to_string(),
+                description: "Look something up".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }]);
+        }
 
-    let body = provider.build_body(&request, false).unwrap();
+        let body = provider.build_body(&request, false).unwrap();
 
-    assert_eq!(body["reasoning_effort"], "xhigh");
-}
-
-#[test]
-fn build_body_omits_reasoning_effort_when_default() {
-    let provider = make_provider();
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Default);
-
-    let body = provider.build_body(&request, false).unwrap();
-
-    assert!(body.get("reasoning_effort").is_none());
-}
-
-#[test]
-fn build_body_omits_reasoning_effort_when_off() {
-    let provider = make_provider();
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Off);
-
-    let body = provider.build_body(&request, false).unwrap();
-
-    assert!(body.get("reasoning_effort").is_none());
-}
-
-#[test]
-fn gpt_5_6_with_tools_sets_none_reasoning_effort_when_off() {
-    let provider = OpenAiFamilyProvider::new(
-        "test-key".to_string(),
-        "https://api.openai.com/v1".to_string(),
-        "gpt-5.6-sol".to_string(),
-        OpenAiFamilyAuthStyle::Bearer,
-        Default::default(),
-    );
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Off)
-        .with_tools(vec![agent_types::Tool {
-            name: "lookup".to_string(),
-            description: "Look something up".to_string(),
-            parameters: serde_json::json!({"type": "object", "properties": {}}),
-        }]);
-
-    let body = provider.build_body(&request, false).unwrap();
-
-    assert_eq!(body["reasoning_effort"], "none");
-}
-
-#[test]
-fn gpt_5_6_without_tools_sets_none_reasoning_effort_when_off() {
-    let provider = OpenAiFamilyProvider::new(
-        "test-key".to_string(),
-        "https://api.openai.com/v1".to_string(),
-        "openai/gpt-5.6-terra".to_string(),
-        OpenAiFamilyAuthStyle::Bearer,
-        Default::default(),
-    );
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Off);
-
-    let body = provider.build_body(&request, false).unwrap();
-
-    assert_eq!(body["reasoning_effort"], "none");
-}
-
-#[test]
-fn gpt_5_6_default_omits_reasoning_effort() {
-    let provider = OpenAiFamilyProvider::new(
-        "test-key".to_string(),
-        "https://api.openai.com/v1".to_string(),
-        "gpt-5.6-sol".to_string(),
-        OpenAiFamilyAuthStyle::Bearer,
-        Default::default(),
-    );
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Default);
-
-    let body = provider.build_body(&request, false).unwrap();
-
-    assert!(body.get("reasoning_effort").is_none());
-}
-
-#[test]
-fn kimi_k3_maps_supported_reasoning_effort_values() {
-    let provider = OpenAiFamilyProvider::new(
-        "test-key".to_string(),
-        "https://api.moonshot.cn/v1".to_string(),
-        "kimi-k3".to_string(),
-        OpenAiFamilyAuthStyle::Bearer,
-        Default::default(),
-    );
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Max);
-
-    let body = provider.build_body(&request, false).unwrap();
-
-    assert_eq!(body["reasoning_effort"], "max");
-}
-
-#[test]
-fn glm_5_2_disables_thinking_when_reasoning_is_off() {
-    let provider = OpenAiFamilyProvider::new(
-        "test-key".to_string(),
-        "https://open.bigmodel.cn/api/paas/v4".to_string(),
-        "glm-5.2".to_string(),
-        OpenAiFamilyAuthStyle::Bearer,
-        Default::default(),
-    );
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Off);
-
-    let body = provider.build_body(&request, false).unwrap();
-
-    assert_eq!(body["thinking"]["type"], "disabled");
-    assert!(body.get("reasoning_effort").is_none());
-}
-
-#[test]
-fn glm_5_2_default_omits_thinking_and_reasoning_effort() {
-    let provider = OpenAiFamilyProvider::new(
-        "test-key".to_string(),
-        "https://open.bigmodel.cn/api/paas/v4".to_string(),
-        "glm-5.2".to_string(),
-        OpenAiFamilyAuthStyle::Bearer,
-        Default::default(),
-    );
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Default);
-
-    let body = provider.build_body(&request, false).unwrap();
-
-    assert!(body.get("thinking").is_none());
-    assert!(body.get("reasoning_effort").is_none());
-}
-
-#[test]
-fn glm_5_2_maps_max_reasoning_effort_to_max() {
-    let provider = OpenAiFamilyProvider::new(
-        "test-key".to_string(),
-        "https://open.bigmodel.cn/api/paas/v4".to_string(),
-        "z-ai/glm-5.2".to_string(),
-        OpenAiFamilyAuthStyle::Bearer,
-        Default::default(),
-    );
-    let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
-        .with_reasoning_effort(ReasoningEffort::Max);
-
-    let body = provider.build_body(&request, false).unwrap();
-
-    assert_eq!(body["reasoning_effort"], "max");
-    assert!(body.get("thinking").is_none());
+        match want_effort {
+            Some(expected) => assert_eq!(body["reasoning_effort"], expected, "{case}"),
+            None => assert!(body.get("reasoning_effort").is_none(), "{case}"),
+        }
+        match want_thinking {
+            Some(expected) => assert_eq!(body["thinking"]["type"], expected, "{case}"),
+            None => assert!(body.get("thinking").is_none(), "{case}"),
+        }
+    }
 }
 
 // Regression test for the URL fallback loop: when *every* candidate URL

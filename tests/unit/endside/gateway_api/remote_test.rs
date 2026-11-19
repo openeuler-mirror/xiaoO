@@ -125,75 +125,46 @@ fn parses_tool_call_running_event() {
 }
 
 #[test]
-fn parses_loop_end_event_without_summary_fields() {
-    // Older daemons send only `agent_id`.
-    let parsed =
-        parse_sse_frame("event: loop_end\ndata: {\"type\":\"loop_end\",\"agent_id\":\"child-1\"}")
-            .expect("parse")
-            .expect("event");
-
-    match parsed {
-        RemoteSseEvent::LoopEnd { agent_id } => {
-            assert_eq!(agent_id, "child-1");
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-/// Forward-compat: newer daemons attach summary fields
-/// (`turn_count` / `total_tokens` / `stop_reason`) to `loop_end`. The TUI
-/// reads the summary via its own `loop_summary` sink, so these are unknown
-/// fields on `RemoteSseEvent::LoopEnd` and must be silently ignored rather
-/// than break deserialization.
-#[test]
-fn parses_loop_end_event_with_summary_fields_ignoring_them() {
-    let parsed = parse_sse_frame(
+fn parses_loop_end_event_with_and_without_summary_fields() {
+    // Older daemons send only `agent_id`; newer ones attach summary fields
+    // (`turn_count` / `total_tokens` / `stop_reason`). The TUI reads the
+    // summary via its own `loop_summary` sink, so these are unknown fields
+    // on `RemoteSseEvent::LoopEnd` and must be silently ignored rather
+    // than break deserialization.
+    for frame in [
+        "event: loop_end\ndata: {\"type\":\"loop_end\",\"agent_id\":\"child-1\"}",
         "event: loop_end\ndata: {\"type\":\"loop_end\",\"agent_id\":\"child-1\",\"turn_count\":2,\"total_tokens\":512,\"stop_reason\":\"end_turn\"}",
-    )
-    .expect("parse")
-    .expect("event");
-
-    match parsed {
-        RemoteSseEvent::LoopEnd { agent_id } => {
-            assert_eq!(agent_id, "child-1");
+    ] {
+        match parse_sse_frame(frame).expect("parse").expect("event") {
+            RemoteSseEvent::LoopEnd { agent_id } => {
+                assert_eq!(agent_id, "child-1");
+            }
+            other => panic!("unexpected event: {other:?}"),
         }
-        other => panic!("unexpected event: {other:?}"),
     }
 }
 
-/// Backward-compat: older daemons omit `args_preview` on
-/// `tool_result` (the field is `#[serde(default)]`).
 #[test]
-fn parses_tool_result_without_args_preview() {
-    let parsed = parse_sse_frame(
-        "event: tool_result\ndata: {\"type\":\"tool_result\",\"agent_id\":\"root\",\"call_id\":\"call-1\",\"tool_name\":\"bash\",\"output_preview\":\"done\",\"is_error\":false}",
-    )
-    .expect("parse")
-    .expect("event");
-
-    match parsed {
-        RemoteSseEvent::ToolResult { args_preview, .. } => {
-            assert!(args_preview.is_empty());
+fn parses_tool_result_with_or_without_args_preview() {
+    // Backward/forward-compat: older daemons omit `args_preview` on
+    // `tool_result` (the field is `#[serde(default)]`); newer daemons
+    // include it and the TUI should populate the field.
+    for (frame, expected_preview) in [
+        (
+            "event: tool_result\ndata: {\"type\":\"tool_result\",\"agent_id\":\"root\",\"call_id\":\"call-1\",\"tool_name\":\"bash\",\"output_preview\":\"done\",\"is_error\":false}",
+            "",
+        ),
+        (
+            "event: tool_result\ndata: {\"type\":\"tool_result\",\"agent_id\":\"root\",\"call_id\":\"call-1\",\"tool_name\":\"bash\",\"output_preview\":\"done\",\"is_error\":false,\"args_preview\":\"{\\\"command\\\":\\\"ls\\\"}\"}",
+            "{\"command\":\"ls\"}",
+        ),
+    ] {
+        match parse_sse_frame(frame).expect("parse").expect("event") {
+            RemoteSseEvent::ToolResult { args_preview, .. } => {
+                assert_eq!(args_preview, expected_preview);
+            }
+            other => panic!("unexpected event: {other:?}"),
         }
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-/// Forward-compat: a newer daemon includes `args_preview` on
-/// `tool_result` and the TUI should populate the field.
-#[test]
-fn parses_tool_result_with_args_preview() {
-    let parsed = parse_sse_frame(
-        "event: tool_result\ndata: {\"type\":\"tool_result\",\"agent_id\":\"root\",\"call_id\":\"call-1\",\"tool_name\":\"bash\",\"output_preview\":\"done\",\"is_error\":false,\"args_preview\":\"{\\\"command\\\":\\\"ls\\\"}\"}",
-    )
-    .expect("parse")
-    .expect("event");
-
-    match parsed {
-        RemoteSseEvent::ToolResult { args_preview, .. } => {
-            assert_eq!(args_preview, "{\"command\":\"ls\"}");
-        }
-        other => panic!("unexpected event: {other:?}"),
     }
 }
 
@@ -277,6 +248,17 @@ fn temp_config_with(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
+/// Standard 200-OK health mock shared by every connect-path case.
+async fn health_mock(server: &mut mockito::Server, body: impl AsRef<[u8]>) -> mockito::Mock {
+    server
+        .mock("GET", "/api/v1/health")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body)
+        .create_async()
+        .await
+}
+
 fn health_body_with_sha256(sha256: &str) -> String {
     format!(
         r#"{{"status":"ok","version":"0.1.0","config_path":"/etc/xiaoo/config.toml","config_sha256":"{sha256}"}}"#
@@ -298,13 +280,7 @@ async fn connect_remote_accepts_matching_config() {
     let identity =
         xiaoo_shared::config_identity::ConfigFileIdentity::from_path(&config_path).unwrap();
     let mut server = mockito::Server::new_async().await;
-    let _health = server
-        .mock("GET", "/api/v1/health")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(health_body_with_sha256(&identity.sha256))
-        .create_async()
-        .await;
+    let _health = health_mock(&mut server, health_body_with_sha256(&identity.sha256)).await;
 
     let mut state = AppState::new(config_path.clone(), PathBuf::from("."))
         .expect("test app state should initialize");
@@ -322,13 +298,7 @@ async fn connect_remote_accepts_matching_config() {
 async fn connect_remote_rejects_config_mismatch() {
     let (_dir, config_path) = temp_config_with("[llm]\nmodel = \"m\"\n");
     let mut server = mockito::Server::new_async().await;
-    let _health = server
-        .mock("GET", "/api/v1/health")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(health_body_with_sha256("0000deadbeef"))
-        .create_async()
-        .await;
+    let _health = health_mock(&mut server, health_body_with_sha256("0000deadbeef")).await;
 
     let mut state = AppState::new(config_path.clone(), PathBuf::from("."))
         .expect("test app state should initialize");
@@ -367,13 +337,7 @@ async fn connect_remote_rejects_config_mismatch() {
 async fn connect_remote_allows_daemon_without_config_identity() {
     let (_dir, config_path) = temp_config_with("[llm]\nmodel = \"m\"\n");
     let mut server = mockito::Server::new_async().await;
-    let _health = server
-        .mock("GET", "/api/v1/health")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(r#"{"status":"ok","version":"0.0.9"}"#)
-        .create_async()
-        .await;
+    let _health = health_mock(&mut server, r#"{"status":"ok","version":"0.0.9"}"#).await;
 
     let mut state =
         AppState::new(config_path, PathBuf::from(".")).expect("test app state should initialize");
@@ -390,13 +354,7 @@ async fn connect_remote_fails_closed_when_local_config_unreadable() {
     let dir = tempfile::tempdir().expect("temp dir");
     let missing = dir.path().join("deleted-config.toml");
     let mut server = mockito::Server::new_async().await;
-    let _health = server
-        .mock("GET", "/api/v1/health")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(health_body_with_sha256("0000deadbeef"))
-        .create_async()
-        .await;
+    let _health = health_mock(&mut server, health_body_with_sha256("0000deadbeef")).await;
 
     let mut state = AppState::new(missing.clone(), PathBuf::from("."))
         .expect("test app state should initialize");
@@ -425,16 +383,11 @@ async fn connect_remote_rejects_daemon_on_different_host() {
     let identity =
         xiaoo_shared::config_identity::ConfigFileIdentity::from_path(&config_path).unwrap();
     let mut server = mockito::Server::new_async().await;
-    let _health = server
-        .mock("GET", "/api/v1/health")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(health_body_with_sha256_and_host(
-            &identity.sha256,
-            "other-machine",
-        ))
-        .create_async()
-        .await;
+    let _health = health_mock(
+        &mut server,
+        health_body_with_sha256_and_host(&identity.sha256, "other-machine"),
+    )
+    .await;
 
     let mut state = AppState::new(config_path.clone(), PathBuf::from("."))
         .expect("test app state should initialize");
@@ -482,13 +435,11 @@ async fn connect_remote_accepts_daemon_on_same_host() {
     let identity =
         xiaoo_shared::config_identity::ConfigFileIdentity::from_path(&config_path).unwrap();
     let mut server = mockito::Server::new_async().await;
-    let _health = server
-        .mock("GET", "/api/v1/health")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(health_body_with_sha256_and_host(&identity.sha256, &local))
-        .create_async()
-        .await;
+    let _health = health_mock(
+        &mut server,
+        health_body_with_sha256_and_host(&identity.sha256, &local),
+    )
+    .await;
 
     let mut state = AppState::new(config_path.clone(), PathBuf::from("."))
         .expect("test app state should initialize");

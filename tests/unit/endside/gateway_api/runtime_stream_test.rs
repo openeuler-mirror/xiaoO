@@ -7,7 +7,8 @@ use xiaoo_api::chat::AgentId;
 
 use crate::app_state::AppState;
 use crate::chat::{
-    Message, MessageRole, TodoDisplayStatus, ToolExecutionStatus, ToolExecutionUpdate,
+    FileChangeDelta, Message, MessageRole, TodoDisplayStatus, ToolExecutionStatus,
+    ToolExecutionUpdate,
 };
 use crate::gateway::MemoryAutomationHealth;
 use crate::session_gateway::SessionTurnUpdate;
@@ -20,6 +21,48 @@ fn test_state() -> AppState {
         .expect("test app state should initialize");
     state.chat_state.messages.clear();
     state
+}
+
+fn runtime_and_state() -> (GatewayRuntime, AppState) {
+    (
+        GatewayRuntime::new(uuid::Uuid::new_v4().to_string()),
+        test_state(),
+    )
+}
+
+/// Workspace-rooted state for the file-change tracking tests. The TempDir
+/// rides in the returned tuple so it outlives the case.
+fn workspace_state() -> (tempfile::TempDir, AppState) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace dir");
+    let mut state = AppState::new(PathBuf::from("config.toml"), workspace)
+        .expect("test app state should initialize");
+    state.chat_state.messages.clear();
+    (temp, state)
+}
+
+fn tool_update(
+    call_id: &str,
+    tool: &str,
+    args_preview: impl std::fmt::Display,
+    detail: &str,
+    status: ToolExecutionStatus,
+    file_change: Option<FileChangeDelta>,
+) -> ToolExecutionUpdate {
+    ToolExecutionUpdate {
+        call_id: call_id.to_string(),
+        tool: tool.to_string(),
+        summary: String::new(),
+        args_preview: args_preview.to_string(),
+        command_preview: None,
+        command: None,
+        detail: detail.to_string(),
+        status,
+        exit_code: None,
+        duration_ms: None,
+        file_change,
+    }
 }
 
 fn sample_tool_update(call_id: &str) -> ToolExecutionUpdate {
@@ -40,30 +83,23 @@ fn sample_tool_update(call_id: &str) -> ToolExecutionUpdate {
 
 #[test]
 fn todo_write_completed_update_updates_right_panel_plan() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     runtime.apply_tool_update(
         &mut state,
-        ToolExecutionUpdate {
-            call_id: "todo-1".to_string(),
-            tool: "todo_write".to_string(),
-            summary: String::new(),
-            args_preview: serde_json::json!({
+        tool_update(
+            "todo-1",
+            "todo_write",
+            serde_json::json!({
                 "todos": [
                     { "content": "Inspect current implementation", "status": "completed" },
                     { "content": "Add todo_write tool", "status": "in_progress" }
                 ]
-            })
-            .to_string(),
-            command_preview: None,
-            command: None,
-            detail: String::new(),
-            status: ToolExecutionStatus::Completed,
-            exit_code: None,
-            duration_ms: None,
-            file_change: None,
-        },
+            }),
+            "",
+            ToolExecutionStatus::Completed,
+            None,
+        ),
         None,
     );
 
@@ -89,8 +125,7 @@ fn apply_todo_snapshot_invalidates_layout_cache_on_presence_transition() {
         TodoDisplayStatus as SharedTodoStatus, TodoSnapshotItem, TodoSnapshotUpdate,
     };
 
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     // Simulate a prior layout pass that cached the terminal area.
     let cached_rect = Rect::new(0, 0, 64, 24);
@@ -170,8 +205,7 @@ fn apply_todo_snapshot_invalidates_layout_cache_on_presence_transition() {
 
 #[test]
 fn tool_update_preserves_previous_assistant_message() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     state
         .chat_state
@@ -201,8 +235,7 @@ fn tool_update_preserves_previous_assistant_message() {
 
 #[test]
 fn thinking_stream_updates_active_assistant_message() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     runtime.set_stream_message_thinking_content(&mut state, "checking", true);
     runtime.set_stream_message_content(&mut state, "answer", true);
@@ -214,56 +247,39 @@ fn thinking_stream_updates_active_assistant_message() {
 }
 
 #[test]
-fn stream_updates_preserve_user_scroll_lock() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
-    state.chat_state.stick_to_bottom = false;
+fn stream_updates_never_flip_bottom_stickiness() {
+    // Stream updates must only auto-scroll users already glued to the
+    // bottom: a user-scrolled view (stick off) stays off, a bottom-locked
+    // view (stick on) stays on.
+    for stick in [false, true] {
+        let (mut runtime, mut state) = runtime_and_state();
+        state.chat_state.stick_to_bottom = stick;
 
-    let (tx, rx) = mpsc::unbounded_channel();
-    runtime.stream_rx = Some(rx);
-    tx.send(SessionTurnUpdate::SetAssistantThinking {
-        agent_id: AgentId("cli-agent".to_string()),
-        text: "checking".to_string(),
-    })
-    .expect("thinking update should send");
-    tx.send(SessionTurnUpdate::SetAssistantContent {
-        agent_id: AgentId("cli-agent".to_string()),
-        text: "answer".to_string(),
-    })
-    .expect("content update should send");
+        let (tx, rx) = mpsc::unbounded_channel();
+        runtime.stream_rx = Some(rx);
+        tx.send(SessionTurnUpdate::SetAssistantThinking {
+            agent_id: AgentId("cli-agent".to_string()),
+            text: "checking".to_string(),
+        })
+        .expect("thinking update should send");
+        tx.send(SessionTurnUpdate::SetAssistantContent {
+            agent_id: AgentId("cli-agent".to_string()),
+            text: "answer".to_string(),
+        })
+        .expect("content update should send");
 
-    assert!(runtime.poll_stream_updates(&mut state));
+        assert!(runtime.poll_stream_updates(&mut state));
 
-    assert!(!state.chat_state.stick_to_bottom);
-    assert_eq!(state.chat_state.messages.len(), 1);
-    assert_eq!(state.chat_state.messages[0].thinking_content, "checking");
-    assert_eq!(state.chat_state.messages[0].content, "answer");
-}
-
-#[test]
-fn stream_updates_keep_existing_bottom_stickiness() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
-    state.chat_state.stick_to_bottom = true;
-
-    let (tx, rx) = mpsc::unbounded_channel();
-    runtime.stream_rx = Some(rx);
-    tx.send(SessionTurnUpdate::SetAssistantContent {
-        agent_id: AgentId("cli-agent".to_string()),
-        text: "answer".to_string(),
-    })
-    .expect("content update should send");
-
-    assert!(runtime.poll_stream_updates(&mut state));
-
-    assert!(state.chat_state.stick_to_bottom);
-    assert_eq!(state.chat_state.messages[0].content, "answer");
+        assert_eq!(state.chat_state.stick_to_bottom, stick);
+        assert_eq!(state.chat_state.messages.len(), 1);
+        assert_eq!(state.chat_state.messages[0].thinking_content, "checking");
+        assert_eq!(state.chat_state.messages[0].content, "answer");
+    }
 }
 
 #[test]
 fn stream_updates_surface_memory_state_transitions() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     let (tx, rx) = mpsc::unbounded_channel();
     runtime.stream_rx = Some(rx);
@@ -286,8 +302,7 @@ fn stream_updates_surface_memory_state_transitions() {
 
 #[test]
 fn background_memory_health_change_updates_status_without_a_turn() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
     let (health_tx, health_rx) = watch::channel(MemoryAutomationHealth::Healthy);
     *runtime
         .session_gateway
@@ -305,8 +320,7 @@ fn background_memory_health_change_updates_status_without_a_turn() {
 
 #[test]
 fn child_stream_updates_create_subagent_lane_without_touching_root_messages() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     let (tx, rx) = mpsc::unbounded_channel();
     runtime.stream_rx = Some(rx);
@@ -331,28 +345,21 @@ fn child_stream_updates_create_subagent_lane_without_touching_root_messages() {
 
 #[test]
 fn invalid_spawn_output_does_not_create_subagent_lane() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     runtime.apply_tool_update(
         &mut state,
-        ToolExecutionUpdate {
-            call_id: "spawn-1".to_string(),
-            tool: "spawn_subagent".to_string(),
-            summary: String::new(),
-            args_preview: serde_json::json!({
+        tool_update(
+            "spawn-1",
+            "spawn_subagent",
+            serde_json::json!({
                 "description": "Review code",
                 "task_goal": "Find issues"
-            })
-            .to_string(),
-            command_preview: None,
-            command: None,
-            detail: "not-json".to_string(),
-            status: ToolExecutionStatus::Completed,
-            exit_code: None,
-            duration_ms: None,
-            file_change: None,
-        },
+            }),
+            "not-json",
+            ToolExecutionStatus::Completed,
+            None,
+        ),
         Some("main".to_string()),
     );
 
@@ -363,29 +370,22 @@ fn invalid_spawn_output_does_not_create_subagent_lane() {
 
 #[test]
 fn completed_spawn_output_creates_subagent_lane_with_metadata() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     runtime.apply_tool_update(
         &mut state,
-        ToolExecutionUpdate {
-            call_id: "spawn-2".to_string(),
-            tool: "spawn_subagent".to_string(),
-            summary: String::new(),
-            args_preview: serde_json::json!({
+        tool_update(
+            "spawn-2",
+            "spawn_subagent",
+            serde_json::json!({
                 "description": "Review code",
                 "task_goal": "Find issues",
                 "task_context": "Focus on tests"
-            })
-            .to_string(),
-            command_preview: None,
-            command: None,
-            detail: r#"{"agent_id":"child-2"}"#.to_string(),
-            status: ToolExecutionStatus::Completed,
-            exit_code: None,
-            duration_ms: None,
-            file_change: None,
-        },
+            }),
+            r#"{"agent_id":"child-2"}"#,
+            ToolExecutionStatus::Completed,
+            None,
+        ),
         Some("main".to_string()),
     );
 
@@ -407,8 +407,7 @@ fn remote_tool_result_does_not_clobber_subagent_spawn_metadata() {
     // SSE event whose `args_preview` is stripped to an empty string. The
     // `ToolResult` must not overwrite the title/description/task_goal set
     // by `SubagentSpawn` with fallback "Subagent xxx" values.
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     // Step 1: simulate `SubagentSpawn` populating the lane with full
     // metadata (as the daemon-side `SubagentMetaComputingLoopSink` would).
@@ -424,19 +423,14 @@ fn remote_tool_result_does_not_clobber_subagent_spawn_metadata() {
     // `args_preview` (as `remote.rs` constructs it from the SSE event).
     runtime.apply_tool_update(
         &mut state,
-        ToolExecutionUpdate {
-            call_id: "spawn-3".to_string(),
-            tool: "spawn_subagent".to_string(),
-            summary: String::new(),
-            args_preview: String::new(),
-            command_preview: None,
-            command: None,
-            detail: r#"{"agent_id":"child-3"}"#.to_string(),
-            status: ToolExecutionStatus::Completed,
-            exit_code: None,
-            duration_ms: None,
-            file_change: None,
-        },
+        tool_update(
+            "spawn-3",
+            "spawn_subagent",
+            "",
+            r#"{"agent_id":"child-3"}"#,
+            ToolExecutionStatus::Completed,
+            None,
+        ),
         Some("root".to_string()),
     );
 
@@ -457,8 +451,7 @@ fn remote_turn_start_does_not_clobber_subagent_spawn_metadata() {
     // agent's `TurnStart` arrives. The `TurnStart` handler must NOT call
     // `ensure_subagent_lane` with the generic "Subagent xxx" fallback
     // title (which would clobber the real title via `update_metadata`).
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     // Step 1: simulate `SubagentSpawn` populating the lane with full
     // metadata (as the daemon-side `SubagentMetaComputingLoopSink` would).
@@ -504,8 +497,7 @@ fn remote_subagent_events_do_not_clobber_subagent_spawn_metadata() {
     // handler must use `ensure_subagent_lane_preserve_metadata` (or
     // equivalent) so the lane metadata set by `SubagentSpawn` survives
     // the child agent's entire turn.
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     // Step 1: simulate `SubagentSpawn` populating the lane with full
     // metadata (as the daemon-side `SubagentMetaComputingLoopSink` would).
@@ -567,8 +559,7 @@ fn remote_subagent_events_do_not_clobber_subagent_spawn_metadata() {
 
 #[test]
 fn tool_update_drops_empty_streaming_placeholder() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     state
         .chat_state
@@ -586,51 +577,35 @@ fn tool_update_drops_empty_streaming_placeholder() {
 #[test]
 fn tool_update_tracks_session_file_changes_by_call_id() {
     let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    fs::create_dir_all(&workspace).expect("workspace dir");
-
-    let mut state = AppState::new(PathBuf::from("config.toml"), workspace.clone())
-        .expect("test app state should initialize");
-    state.chat_state.messages.clear();
+    let (_temp, mut state) = workspace_state();
 
     runtime.apply_tool_update(
         &mut state,
-        ToolExecutionUpdate {
-            call_id: "call-1".to_string(),
-            tool: "file_edit".to_string(),
-            summary: String::new(),
-            args_preview: "{\n  \"file_path\": \"src/main.rs\"\n}".to_string(),
-            command_preview: None,
-            command: None,
-            detail: String::new(),
-            status: ToolExecutionStatus::Running,
-            exit_code: None,
-            duration_ms: None,
-            file_change: None,
-        },
+        tool_update(
+            "call-1",
+            "file_edit",
+            "{\n  \"file_path\": \"src/main.rs\"\n}",
+            "",
+            ToolExecutionStatus::Running,
+            None,
+        ),
         None,
     );
 
     runtime.apply_tool_update(
         &mut state,
-        ToolExecutionUpdate {
-            call_id: "call-1".to_string(),
-            tool: "file_edit".to_string(),
-            summary: String::new(),
-            args_preview: "{\n  \"file_path\": \"src/main.rs\"\n}".to_string(),
-            command_preview: None,
-            command: None,
-            detail: String::new(),
-            status: ToolExecutionStatus::Completed,
-            exit_code: None,
-            duration_ms: None,
-            file_change: Some(crate::chat::FileChangeDelta {
+        tool_update(
+            "call-1",
+            "file_edit",
+            "{\n  \"file_path\": \"src/main.rs\"\n}",
+            "",
+            ToolExecutionStatus::Completed,
+            Some(FileChangeDelta {
                 file_path: "src/main.rs".to_string(),
                 additions: 2,
                 deletions: 1,
             }),
-        },
+        ),
         None,
     );
 
@@ -645,34 +620,22 @@ fn tool_update_tracks_session_file_changes_by_call_id() {
 #[test]
 fn completed_file_edit_without_running_update_tracks_args_delta() {
     let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    fs::create_dir_all(&workspace).expect("workspace dir");
-
-    let mut state = AppState::new(PathBuf::from("config.toml"), workspace)
-        .expect("test app state should initialize");
-    state.chat_state.messages.clear();
+    let (_temp, mut state) = workspace_state();
 
     runtime.apply_tool_update(
         &mut state,
-        ToolExecutionUpdate {
-            call_id: "call-args-only".to_string(),
-            tool: "file_edit".to_string(),
-            summary: String::new(),
-            args_preview: serde_json::json!({
+        tool_update(
+            "call-args-only",
+            "file_edit",
+            serde_json::json!({
                 "file_path": "README.md",
                 "old_string": "[@shen](https://github.com/shen)",
                 "new_string": "[@hypo](https://github.com/hypo)"
-            })
-            .to_string(),
-            command_preview: None,
-            command: None,
-            detail: String::new(),
-            status: ToolExecutionStatus::Completed,
-            exit_code: None,
-            duration_ms: None,
-            file_change: None,
-        },
+            }),
+            "",
+            ToolExecutionStatus::Completed,
+            None,
+        ),
         None,
     );
 
@@ -694,33 +657,22 @@ fn finish_stream_done_clears_per_call_state_but_preserves_file_totals() {
     // per-file totals (`session_file_changes`) must survive so the diff
     // panel keeps showing the session's cumulative changes.
     let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    fs::create_dir_all(&workspace).expect("workspace dir");
-
-    let mut state = AppState::new(PathBuf::from("config.toml"), workspace)
-        .expect("test app state should initialize");
-    state.chat_state.messages.clear();
+    let (_temp, mut state) = workspace_state();
 
     runtime.apply_tool_update(
         &mut state,
-        ToolExecutionUpdate {
-            call_id: "remote-call-1".to_string(),
-            tool: "file_edit".to_string(),
-            summary: String::new(),
-            args_preview: "{\n  \"file_path\": \"src/main.rs\"\n}".to_string(),
-            command_preview: None,
-            command: None,
-            detail: String::new(),
-            status: ToolExecutionStatus::Completed,
-            exit_code: None,
-            duration_ms: None,
-            file_change: Some(crate::chat::FileChangeDelta {
+        tool_update(
+            "remote-call-1",
+            "file_edit",
+            "{\n  \"file_path\": \"src/main.rs\"\n}",
+            "",
+            ToolExecutionStatus::Completed,
+            Some(FileChangeDelta {
                 file_path: "src/main.rs".to_string(),
                 additions: 2,
                 deletions: 1,
             }),
-        },
+        ),
         None,
     );
 
@@ -747,8 +699,7 @@ fn finish_stream_done_clears_per_call_state_but_preserves_file_totals() {
 
 #[test]
 fn first_token_latency_is_recorded_once_and_completion_uses_reported_prompt_tokens() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     state
         .chat_state
@@ -796,8 +747,7 @@ fn first_token_latency_is_recorded_once_and_completion_uses_reported_prompt_toke
 
 #[test]
 fn completion_accumulates_usage_totals_across_turns_without_changing_ctx_semantics() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     state
         .chat_state
@@ -854,8 +804,7 @@ fn completion_accumulates_usage_totals_across_turns_without_changing_ctx_semanti
 
 #[test]
 fn completion_falls_back_to_estimated_input_tokens_when_prompt_usage_is_missing() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
 
     state
         .chat_state
@@ -912,8 +861,7 @@ fn chat_text_message(
 /// cancellation.
 #[test]
 fn cancel_streaming_drains_terminal_done_and_ignores_ghost_updates() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
     state.chat_state.is_loading = true;
     state.chat_state.messages.push(Message::user("hello"));
     state
@@ -983,63 +931,49 @@ fn cancel_streaming_drains_terminal_done_and_ignores_ghost_updates() {
     assert_eq!(state.chat_state.messages.len(), 2);
 }
 
-/// A late `Err` from a turn the user already cancelled must end the drain
-/// without injecting a ghost error message into the transcript.
+/// Late terminal events from a turn the user already cancelled must end
+/// the drain quietly: a late `Err` must not inject a ghost error message
+/// into the transcript, and a channel disconnect (backend task died
+/// without a terminal update) must not show a disconnect notice after
+/// the user already cancelled.
 #[test]
-fn drain_err_ends_drain_without_ghost_error_message() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
-    state.chat_state.is_loading = true;
-    state
-        .chat_state
-        .messages
-        .push(Message::assistant_streaming());
-    runtime.stream_message_index = Some(0);
-    runtime.set_stream_message_content(&mut state, "partial answer", true);
+fn drain_terminal_events_end_drain_without_ghost_messages() {
+    enum Terminal {
+        LateErr,
+        ChannelDisconnect,
+    }
 
-    let (tx, rx) = mpsc::unbounded_channel();
-    runtime.stream_rx = Some(rx);
+    for terminal in [Terminal::LateErr, Terminal::ChannelDisconnect] {
+        let (mut runtime, mut state) = runtime_and_state();
+        state.chat_state.is_loading = true;
+        state
+            .chat_state
+            .messages
+            .push(Message::assistant_streaming());
+        runtime.stream_message_index = Some(0);
+        runtime.set_stream_message_content(&mut state, "partial answer", true);
 
-    runtime.cancel_streaming(&mut state);
+        let (tx, rx) = mpsc::unbounded_channel();
+        runtime.stream_rx = Some(rx);
 
-    tx.send(SessionTurnUpdate::Err("backend exploded".to_string()))
-        .expect("err update should send");
+        runtime.cancel_streaming(&mut state);
 
-    assert!(runtime.poll_stream_updates(&mut state));
-    assert!(runtime.stream_rx.is_none());
-    assert!(!runtime.turn_stream_in_flight());
-    // No error message was injected: the transcript keeps only the
-    // cancelled partial reply.
-    assert_eq!(state.chat_state.messages.len(), 1);
-    assert_eq!(state.chat_state.messages[0].content, "partial answer");
-}
+        match terminal {
+            Terminal::LateErr => {
+                tx.send(SessionTurnUpdate::Err("backend exploded".to_string()))
+                    .expect("err update should send");
+            }
+            Terminal::ChannelDisconnect => drop(tx),
+        }
 
-/// A channel disconnect while draining (backend task died without a
-/// terminal update) must end the drain quietly — no disconnect notice
-/// after the user already cancelled.
-#[test]
-fn drain_disconnect_ends_drain_without_notice() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
-    state.chat_state.is_loading = true;
-    state
-        .chat_state
-        .messages
-        .push(Message::assistant_streaming());
-    runtime.stream_message_index = Some(0);
-    runtime.set_stream_message_content(&mut state, "partial answer", true);
-
-    let (tx, rx) = mpsc::unbounded_channel();
-    runtime.stream_rx = Some(rx);
-
-    runtime.cancel_streaming(&mut state);
-    drop(tx);
-
-    assert!(runtime.poll_stream_updates(&mut state));
-    assert!(runtime.stream_rx.is_none());
-    assert!(!runtime.turn_stream_in_flight());
-    assert_eq!(state.chat_state.messages.len(), 1);
-    assert_eq!(state.chat_state.messages[0].content, "partial answer");
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert!(runtime.stream_rx.is_none());
+        assert!(!runtime.turn_stream_in_flight());
+        // No error/disconnect message was injected: the transcript keeps
+        // only the cancelled partial reply.
+        assert_eq!(state.chat_state.messages.len(), 1);
+        assert_eq!(state.chat_state.messages[0].content, "partial answer");
+    }
 }
 
 /// Esc pressed while the reveal buffer is still typing out an already
@@ -1047,8 +981,7 @@ fn drain_disconnect_ends_drain_without_notice() {
 /// cancel and still refresh `session_messages`.
 #[test]
 fn cancel_during_reveal_drain_still_applies_pending_done() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
     state.chat_state.is_loading = true;
     state
         .chat_state
@@ -1086,8 +1019,7 @@ fn cancel_during_reveal_drain_still_applies_pending_done() {
 /// terminal `Done` of a cancelled turn lands, then return.
 #[tokio::test]
 async fn settle_in_flight_turn_pumps_drain_until_done() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
     state.chat_state.is_loading = true;
     state
         .chat_state
@@ -1144,8 +1076,7 @@ async fn settle_in_flight_turn_pumps_drain_until_done() {
 /// (the common `/save` path while idle).
 #[tokio::test]
 async fn settle_in_flight_turn_returns_immediately_when_idle() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
     assert!(!runtime.turn_stream_in_flight());
     runtime.settle_in_flight_turn(&mut state).await;
     assert!(state.chat_state.messages.is_empty());
@@ -1153,8 +1084,7 @@ async fn settle_in_flight_turn_returns_immediately_when_idle() {
 
 #[test]
 fn retry_exhaustion_stops_loading_and_waits_for_user_input() {
-    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-    let mut state = test_state();
+    let (mut runtime, mut state) = runtime_and_state();
     state.chat_state.is_loading = true;
     state
         .chat_state
@@ -1183,8 +1113,7 @@ async fn checkpoint_restore_refreshes_chat_and_discards_old_reveal_buffer() {
     use xiaoo_api::runtime::{checkpoint::*, RuntimeState};
 
     for cancelled in [false, true] {
-        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
-        let mut state = test_state();
+        let (mut runtime, mut state) = runtime_and_state();
         let context = SnapshotContext {
             session_id: state.session_id.clone(),
         };

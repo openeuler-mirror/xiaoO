@@ -361,38 +361,27 @@ async fn confirm_after_pending_gc_increments_when_under_limit() {
 }
 
 #[test]
-fn load_max_sandbox_cnt_from_path_parses_value() {
+fn load_max_sandbox_cnt_from_path_covers_valid_missing_and_invalid_files() {
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let path = dir.path().join("sandbox.toml");
-    std::fs::write(&path, "max_sandbox_cnt = 7\n").expect("write config");
-
-    assert_eq!(load_max_sandbox_cnt_from_path(&path), Some(7));
-}
-
-#[test]
-fn load_max_sandbox_cnt_from_path_missing_file_returns_none() {
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let path = dir.path().join("does-not-exist.toml");
-
-    assert_eq!(load_max_sandbox_cnt_from_path(&path), None);
-}
-
-#[test]
-fn load_max_sandbox_cnt_from_path_absent_field_returns_none() {
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let path = dir.path().join("sandbox.toml");
-    std::fs::write(&path, "[other]\nkey = 1\n").expect("write config");
-
-    assert_eq!(load_max_sandbox_cnt_from_path(&path), None);
-}
-
-#[test]
-fn load_max_sandbox_cnt_from_path_invalid_toml_returns_none() {
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let path = dir.path().join("sandbox.toml");
-    std::fs::write(&path, "not = valid = toml\n").expect("write config");
-
-    assert_eq!(load_max_sandbox_cnt_from_path(&path), None);
+    for (index, (contents, expected)) in [
+        // Parsed value.
+        (Some("max_sandbox_cnt = 7\n"), Some(7)),
+        // Missing file.
+        (None, None),
+        // Field absent from an otherwise valid file.
+        (Some("[other]\nkey = 1\n"), None),
+        // Malformed TOML.
+        (Some("not = valid = toml\n"), None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = dir.path().join(format!("sandbox-{index}.toml"));
+        if let Some(contents) = contents {
+            std::fs::write(&path, contents).expect("write config");
+        }
+        assert_eq!(load_max_sandbox_cnt_from_path(&path), expected);
+    }
 }
 
 impl super::SandboxCounter {

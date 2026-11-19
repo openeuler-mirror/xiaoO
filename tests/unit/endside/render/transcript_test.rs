@@ -43,6 +43,24 @@ fn line_display_width(line: &Line<'static>) -> usize {
         .sum()
 }
 
+/// A completed `bash` tool-call message — the fixture shape the
+/// tool-rendering tests below share (exit 0, no summary, no file change).
+fn bash_tool_message(args_preview: String, detail: String, duration_ms: Option<u64>) -> Message {
+    Message::tool_event(ToolExecutionUpdate {
+        call_id: "call-1".to_string(),
+        tool: "bash".to_string(),
+        summary: String::new(),
+        args_preview,
+        command_preview: None,
+        command: None,
+        detail,
+        status: ToolExecutionStatus::Completed,
+        exit_code: Some(0),
+        duration_ms,
+        file_change: None,
+    })
+}
+
 /// Regression test for the "missing last line" bug. `build_transcript_cache`
 /// must derive `total_lines` from the same `wrap_line_to_visual_lines` call
 /// that produces `visual_lines`, so the two stay in lock-step and the
@@ -247,19 +265,11 @@ fn file_edit_args_parse_display_fields() {
 #[test]
 fn tool_output_renders_markdown_tables_when_expanded() {
     let theme = Theme::detect();
-    let message = Message::tool_event(ToolExecutionUpdate {
-        call_id: "call-1".to_string(),
-        tool: "bash".to_string(),
-        summary: String::new(),
-        args_preview: String::new(),
-        command_preview: None,
-        command: None,
-        detail: "| Name | Status |\n| --- | --- |\n| xiaoO | ready |".to_string(),
-        status: ToolExecutionStatus::Completed,
-        exit_code: Some(0),
-        duration_ms: Some(10),
-        file_change: None,
-    });
+    let message = bash_tool_message(
+        String::new(),
+        "| Name | Status |\n| --- | --- |\n| xiaoO | ready |".to_string(),
+        Some(10),
+    );
     let mut tool = message
         .tool_state
         .clone()
@@ -286,23 +296,15 @@ fn tool_output_renders_markdown_tables_when_expanded() {
 #[test]
 fn bash_tool_header_includes_command_when_collapsed() {
     let theme = Theme::detect();
-    let message = Message::tool_event(ToolExecutionUpdate {
-        call_id: "call-1".to_string(),
-        tool: "bash".to_string(),
-        summary: String::new(),
-        args_preview: serde_json::json!({
+    let message = bash_tool_message(
+        serde_json::json!({
             "command": "cargo test -p xiaoo-endside",
             "timeout": 120000
         })
         .to_string(),
-        command_preview: None,
-        command: None,
-        detail: "full output".to_string(),
-        status: ToolExecutionStatus::Completed,
-        exit_code: Some(0),
-        duration_ms: Some(10),
-        file_change: None,
-    });
+        "full output".to_string(),
+        Some(10),
+    );
     let tool = message
         .tool_state
         .as_ref()
@@ -320,24 +322,16 @@ fn bash_tool_header_includes_command_when_collapsed() {
 #[test]
 fn expanded_bash_tool_filters_timeout_and_decodes_escaped_output() {
     let theme = Theme::detect();
-    let message = Message::tool_event(ToolExecutionUpdate {
-        call_id: "call-1".to_string(),
-        tool: "bash".to_string(),
-        summary: String::new(),
-        args_preview: serde_json::json!({
+    let message = bash_tool_message(
+        serde_json::json!({
             "command": "printf 'a\\nb'",
             "cwd": "/tmp/work",
             "timeout": 120000
         })
         .to_string(),
-        command_preview: None,
-        command: None,
-        detail: "line1\\nline2\\tindented".to_string(),
-        status: ToolExecutionStatus::Completed,
-        exit_code: Some(0),
-        duration_ms: Some(10),
-        file_change: None,
-    });
+        "line1\\nline2\\tindented".to_string(),
+        Some(10),
+    );
     let mut tool = message
         .tool_state
         .clone()
@@ -363,22 +357,14 @@ fn expanded_bash_tool_filters_timeout_and_decodes_escaped_output() {
 #[test]
 fn expanded_tool_lines_use_subtle_background() {
     let theme = Theme::detect();
-    let message = Message::tool_event(ToolExecutionUpdate {
-        call_id: "call-1".to_string(),
-        tool: "bash".to_string(),
-        summary: String::new(),
-        args_preview: serde_json::json!({
+    let message = bash_tool_message(
+        serde_json::json!({
             "command": "date"
         })
         .to_string(),
-        command_preview: None,
-        command: None,
-        detail: "Mon Jun 29".to_string(),
-        status: ToolExecutionStatus::Completed,
-        exit_code: Some(0),
-        duration_ms: None,
-        file_change: None,
-    });
+        "Mon Jun 29".to_string(),
+        None,
+    );
     let mut tool = message
         .tool_state
         .clone()
@@ -432,22 +418,14 @@ fn expanded_tool_panel_overrides_nested_markdown_backgrounds() {
 #[test]
 fn tool_toggle_row_tracks_expanded_panel_spacer() {
     let theme = Theme::detect();
-    let mut message = Message::tool_event(ToolExecutionUpdate {
-        call_id: "call-1".to_string(),
-        tool: "bash".to_string(),
-        summary: String::new(),
-        args_preview: serde_json::json!({
+    let mut message = bash_tool_message(
+        serde_json::json!({
             "command": "date"
         })
         .to_string(),
-        command_preview: None,
-        command: None,
-        detail: "ok".to_string(),
-        status: ToolExecutionStatus::Completed,
-        exit_code: Some(0),
-        duration_ms: None,
-        file_change: None,
-    });
+        "ok".to_string(),
+        None,
+    );
 
     let (collapsed, _state) = render_message_entry(render_ctx(&message, &theme, 80, 0));
     assert_eq!(collapsed.tool_toggle_row_offset, Some(1));

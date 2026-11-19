@@ -94,11 +94,7 @@ impl LlmProvider for EmptyCallIdToolCallProvider {
 
 #[tokio::test]
 async fn run_agent_loop_synthesizes_missing_call_id_and_executes_tool() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(EmptyCallIdToolCallProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(EmptyCallIdToolCallProvider::new()));
     let runtime = test_runtime(provider);
     let input = AgentLoopInput::new("现在几点")
         .with_agent_id(AgentId("test-agent".to_string()))
@@ -158,6 +154,54 @@ async fn run_agent_loop_synthesizes_missing_call_id_and_executes_tool() {
     );
 }
 
+/// Fixture mirroring the provider shape that omits `call_id`s entirely.
+fn assistant_with_tool_calls(calls: &[(&str, &str)]) -> AssistantMessage {
+    AssistantMessage {
+        text: None,
+        reasoning_content: None,
+        tool_calls: calls
+            .iter()
+            .map(|(call_id, tool_name)| ToolUseBlock {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                input: serde_json::json!({}),
+            })
+            .collect(),
+        usage: Usage::default(),
+        stop_reason: StopReason::ToolUse,
+    }
+}
+
+#[test]
+fn synthesize_missing_call_ids_fills_only_empty_ids_uniquely() {
+    let mut msg = assistant_with_tool_calls(&[
+        ("", "grep"),          // missing id → synthesized
+        ("   ", "bash"),       // whitespace-only id → treated as missing
+        ("call_real", "edit"), // provider-supplied id → preserved
+    ]);
+
+    synthesize_missing_call_ids(&mut msg, 3);
+
+    assert_eq!(msg.tool_calls[0].call_id, "call_3_0");
+    assert_eq!(msg.tool_calls[1].call_id, "call_3_1");
+    assert_eq!(msg.tool_calls[2].call_id, "call_real");
+    assert!(msg.tool_calls.iter().all(is_valid_tool_call));
+    assert_ne!(msg.tool_calls[0].call_id, msg.tool_calls[1].call_id);
+
+    let mut next = assistant_with_tool_calls(&[("", "grep")]);
+    synthesize_missing_call_ids(&mut next, 4);
+    assert_eq!(next.tool_calls[0].call_id, "call_4_0");
+    assert_ne!(next.tool_calls[0].call_id, msg.tool_calls[0].call_id);
+}
+
+#[test]
+fn synthesize_missing_call_ids_does_not_rescue_empty_tool_name() {
+    let mut msg = assistant_with_tool_calls(&[("", "")]);
+    synthesize_missing_call_ids(&mut msg, 0);
+    assert_eq!(msg.tool_calls[0].call_id, "call_0_0");
+    assert!(!is_valid_tool_call(&msg.tool_calls[0]));
+}
+
 #[test]
 fn filter_ask_user_question_output_replaces_secret_with_display_value() {
     let input_with_display = json!({
@@ -207,54 +251,55 @@ fn filter_ask_user_question_output_replaces_secret_with_display_value() {
     assert_eq!(filtered4, "not a json");
 }
 
+/// A `Tool`-role message carrying a single tool_result block — the input
+/// shape both secret-scanning behaviors consume.
+fn tool_result_message(call_id: &str, tool_name: &str, output: String) -> ChatMessage {
+    ChatMessage {
+        role: MessageRole::Tool,
+        blocks: vec![ContentBlock::ToolResult {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            output,
+            is_error: false,
+        }],
+        message_id: None,
+        timestamp_ms: 0,
+        api_usage_tokens: None,
+        reasoning_content: None,
+        estimated_tokens: None,
+    }
+}
+
 #[test]
 fn extract_secrets_from_messages_redacts_sensitive_values() {
     // Only answers carrying display_value (i.e. user-marked is_secret)
     // enter the secrets table.
-    let message_with_secret = ChatMessage {
-        role: MessageRole::Tool,
-        blocks: vec![ContentBlock::ToolResult {
-            call_id: "call_1".to_string(),
-            tool_name: "ask_user_question".to_string(),
-            output: json!({
-                "answers": [{
-                    "kind": "text",
-                    "prompt": "Password",
-                    "value": "secret123",
-                    "display_value": "<SECRET>"
-                }]
-            })
-            .to_string(),
-            is_error: false,
-        }],
-        message_id: None,
-        timestamp_ms: 0,
-        api_usage_tokens: None,
-        reasoning_content: None,
-        estimated_tokens: None,
-    };
+    let message_with_secret = tool_result_message(
+        "call_1",
+        "ask_user_question",
+        json!({
+            "answers": [{
+                "kind": "text",
+                "prompt": "Password",
+                "value": "secret123",
+                "display_value": "<SECRET>"
+            }]
+        })
+        .to_string(),
+    );
 
-    let message_with_normal_text = ChatMessage {
-        role: MessageRole::Tool,
-        blocks: vec![ContentBlock::ToolResult {
-            call_id: "call_2".to_string(),
-            tool_name: "ask_user_question".to_string(),
-            output: json!({
-                "answers": [{
-                    "kind": "text",
-                    "prompt": "Username",
-                    "value": "john"
-                }]
-            })
-            .to_string(),
-            is_error: false,
-        }],
-        message_id: None,
-        timestamp_ms: 0,
-        api_usage_tokens: None,
-        reasoning_content: None,
-        estimated_tokens: None,
-    };
+    let message_with_normal_text = tool_result_message(
+        "call_2",
+        "ask_user_question",
+        json!({
+            "answers": [{
+                "kind": "text",
+                "prompt": "Username",
+                "value": "john"
+            }]
+        })
+        .to_string(),
+    );
 
     let messages = vec![message_with_secret, message_with_normal_text];
     let secrets = extract_secrets_from_messages(&messages);
@@ -263,35 +308,26 @@ fn extract_secrets_from_messages_redacts_sensitive_values() {
     assert_eq!(secrets[0], "secret123");
     assert!(!secrets.contains(&"john".to_string()));
 
-    let message_multiple = ChatMessage {
-        role: MessageRole::Tool,
-        blocks: vec![ContentBlock::ToolResult {
-            call_id: "call_3".to_string(),
-            tool_name: "ask_user_question".to_string(),
-            output: json!({
-                "answers": [
-                    {
-                        "kind": "text",
-                        "prompt": "Username",
-                        "value": "admin"
-                    },
-                    {
-                        "kind": "text",
-                        "prompt": "Password",
-                        "value": "pass123",
-                        "display_value": "<SECRET>"
-                    }
-                ]
-            })
-            .to_string(),
-            is_error: false,
-        }],
-        message_id: None,
-        timestamp_ms: 0,
-        api_usage_tokens: None,
-        reasoning_content: None,
-        estimated_tokens: None,
-    };
+    let message_multiple = tool_result_message(
+        "call_3",
+        "ask_user_question",
+        json!({
+            "answers": [
+                {
+                    "kind": "text",
+                    "prompt": "Username",
+                    "value": "admin"
+                },
+                {
+                    "kind": "text",
+                    "prompt": "Password",
+                    "value": "pass123",
+                    "display_value": "<SECRET>"
+                }
+            ]
+        })
+        .to_string(),
+    );
 
     let secrets2 = extract_secrets_from_messages(&[message_multiple]);
     assert_eq!(secrets2.len(), 1);
@@ -300,27 +336,19 @@ fn extract_secrets_from_messages_redacts_sensitive_values() {
 
     // tool_results from tools other than ask_user_question do not
     // contribute secrets.
-    let message_other_tool = ChatMessage {
-        role: MessageRole::Tool,
-        blocks: vec![ContentBlock::ToolResult {
-            call_id: "call_4".to_string(),
-            tool_name: "bash".to_string(),
-            output: "some output with password123".to_string(),
-            is_error: false,
-        }],
-        message_id: None,
-        timestamp_ms: 0,
-        api_usage_tokens: None,
-        reasoning_content: None,
-        estimated_tokens: None,
-    };
+    let message_other_tool = tool_result_message(
+        "call_4",
+        "bash",
+        "some output with password123".to_string(),
+    );
 
     let secrets3 = extract_secrets_from_messages(&[message_other_tool]);
     assert_eq!(secrets3.len(), 0);
 }
 
 #[test]
-fn is_parallel_safe_allows_pure_readers_only() {
+fn is_parallel_safe_allows_pure_readers_and_serializes_everything_else() {
+    // Pure readers (filesystem or network) may run concurrently.
     let reader = EffectProfile {
         reads_filesystem: true,
         writes_filesystem: false,
@@ -335,45 +363,37 @@ fn is_parallel_safe_allows_pure_readers_only() {
     };
     assert!(is_parallel_safe(&reader));
     assert!(is_parallel_safe(&network_reader));
-}
 
-#[test]
-fn is_parallel_safe_serializes_writers_side_effects_and_interactive() {
-    let writer = EffectProfile {
-        reads_filesystem: true,
-        writes_filesystem: true,
-        network_access: false,
-        side_effects: false,
-    };
-    let side_effecting = EffectProfile {
-        reads_filesystem: true,
-        writes_filesystem: true,
-        network_access: false,
-        side_effects: true,
-    };
-    let stateful = EffectProfile {
-        reads_filesystem: false,
-        writes_filesystem: false,
-        network_access: false,
-        side_effects: true,
-    };
-    let interactive = EffectProfile::default();
-    assert!(!is_parallel_safe(&writer));
-    assert!(!is_parallel_safe(&side_effecting));
-    assert!(!is_parallel_safe(&stateful));
-    assert!(
-        !is_parallel_safe(&interactive),
-        "an interactive prompt declares no read/network and must serialize"
-    );
+    // Writers, side-effecting tools and interactive prompts must serialize.
+    for profile in [
+        EffectProfile {
+            reads_filesystem: true,
+            writes_filesystem: true,
+            network_access: false,
+            side_effects: false,
+        },
+        EffectProfile {
+            reads_filesystem: true,
+            writes_filesystem: true,
+            network_access: false,
+            side_effects: true,
+        },
+        EffectProfile {
+            reads_filesystem: false,
+            writes_filesystem: false,
+            network_access: false,
+            side_effects: true,
+        },
+        // an interactive prompt declares no read/network and must serialize
+        EffectProfile::default(),
+    ] {
+        assert!(!is_parallel_safe(&profile));
+    }
 }
 
 #[tokio::test]
 async fn conversational_run_with_visible_tools_completes_in_one_turn() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(StreamingTestProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(StreamingTestProvider::new()));
     let runtime = test_runtime(provider);
     let input = AgentLoopInput::new("explain how this code works")
         .with_agent_id(AgentId("test-agent".to_string()))
@@ -576,11 +596,7 @@ impl LlmProvider for TwoToolCallProvider {
 async fn mid_batch_stop_still_records_every_executed_result() {
     let registry = Arc::new(SingleToolRegistry::new());
     let visible = registry.visible();
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(TwoToolCallProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(TwoToolCallProvider::new()));
     let runtime = test_runtime_with_registry(provider, 4, registry);
     let input = AgentLoopInput::new("go")
         .with_agent_id(AgentId("test-agent".to_string()))
@@ -705,11 +721,7 @@ impl ToolExecutor for BlockingCancelledExecutor {
 /// in the transcript (issue #184 review follow-up).
 #[tokio::test]
 async fn cancelled_tool_batch_leaves_no_tool_results_in_history() {
-    let provider = Arc::new(LlmProviderWrapper::new(
-        Arc::new(TwoToolCallProvider::new()),
-        None,
-        None,
-    ));
+    let provider = wrapped(Arc::new(TwoToolCallProvider::new()));
     let cancel = tokio_util::sync::CancellationToken::new();
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let registry = SingleToolRegistry::with_executor({

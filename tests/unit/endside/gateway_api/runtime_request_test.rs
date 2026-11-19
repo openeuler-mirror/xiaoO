@@ -149,58 +149,41 @@ fn tui_entry_context_carries_instance_id_for_remote() {
     assert_eq!(entry.instance_id.as_deref(), Some("http://127.0.0.1:18080"));
 }
 
+/// Decision table for `evaluate_max_tokens_against_window`: a roomy
+/// max_tokens passes; anything at/over the window (or within the system
+/// reserve band below it) is rejected with a message that must name the
+/// model, the config path and the offending numbers — otherwise the
+/// rejection is undiagnosable.
 #[test]
-fn window_rejects_max_tokens_at_or_above_window() {
-    let error = evaluate_max_tokens_against_window(
-        128_000,
-        128_000,
-        "glm-5.2",
-        std::path::Path::new("/tmp/config.toml"),
-    )
-    .expect_err("max_tokens == window leaves no input space");
-    assert!(error.contains("NO space for input"));
-    assert!(error.contains("glm-5.2"));
-    assert!(error.contains("/tmp/config.toml"));
-}
+fn evaluate_max_tokens_against_window_decision_table() {
+    let path = std::path::Path::new("/tmp/config.toml");
 
-#[test]
-fn window_with_input_space_accepts_max_tokens() {
-    let outcome = evaluate_max_tokens_against_window(
-        128_000,
-        8_192,
-        "glm-5.2",
-        std::path::Path::new("/tmp/config.toml"),
+    // Plenty of input space left → Ok.
+    assert_eq!(
+        evaluate_max_tokens_against_window(128_000, 8_192, "glm-5.2", path),
+        Ok(())
     );
-    assert_eq!(outcome, Ok(()));
-}
 
-#[test]
-fn window_rejects_max_tokens_far_beyond_the_window() {
-    // Regression: used to panic deep in the turn instead of failing here.
-    let error = evaluate_max_tokens_against_window(
-        128_000,
-        100_000_000,
-        "glm-5.2",
-        std::path::Path::new("/tmp/config.toml"),
-    )
-    .expect_err("no window bounds a budget this large");
-    assert!(error.contains("NO space for input"));
-    assert!(error.contains("100000000"));
-}
-
-#[test]
-fn window_reserve_band_rejects_max_tokens_just_below_the_window() {
-    let error = evaluate_max_tokens_against_window(
-        128_000,
-        127_000,
-        "glm-5.2",
-        std::path::Path::new("/tmp/config.toml"),
-    )
-    .expect_err("the system reserve leaves no input space");
-    assert!(error.contains("NO space for input"));
-    // The reserve value must surface in the text, or a rejection below the
-    // window reads as a contradiction (127000 < 128000 yet rejected).
-    assert!(error.contains(&DEFAULT_SYSTEM_TOKEN_RESERVE.to_string()));
+    let reserve = DEFAULT_SYSTEM_TOKEN_RESERVE.to_string();
+    // (max_tokens, extra text the rejection must carry)
+    for (max_tokens, must_mention) in [
+        // max_tokens == window leaves no input space.
+        (128_000, ""),
+        // Regression: used to panic deep in the turn instead of failing here.
+        (100_000_000, "100000000"),
+        // The reserve value must surface in the text, or a rejection below
+        // the window reads as a contradiction (127000 < 128000 yet rejected).
+        (127_000, reserve.as_str()),
+    ] {
+        let error = evaluate_max_tokens_against_window(128_000, max_tokens, "glm-5.2", path)
+            .expect_err("no input space left");
+        assert!(error.contains("NO space for input"), "got: {error}");
+        assert!(error.contains("glm-5.2"), "got: {error}");
+        assert!(error.contains("/tmp/config.toml"), "got: {error}");
+        if !must_mention.is_empty() {
+            assert!(error.contains(must_mention), "got: {error}");
+        }
+    }
 }
 
 #[tokio::test]

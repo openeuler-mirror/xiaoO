@@ -287,25 +287,18 @@ fn profile_includes_roots_and_omits_network_when_disabled() {
 }
 
 #[test]
-fn macos_seatbelt_defaults_to_allowing_network() {
-    let options: LocalIsolationOptions =
-        serde_json::from_value(serde_json::json!({"kind": "macos_seatbelt"})).unwrap();
-    let LocalIsolationOptions::MacosSeatbelt { allow_network, .. } = options else {
-        panic!("expected macos seatbelt options");
-    };
-
-    assert!(allow_network);
-}
-
-#[test]
-fn linux_bubblewrap_defaults_to_allowing_network() {
-    let options: LocalIsolationOptions =
-        serde_json::from_value(serde_json::json!({"kind": "linux_bubblewrap"})).unwrap();
-    let LocalIsolationOptions::LinuxBubblewrap { allow_network, .. } = options else {
-        panic!("expected linux bubblewrap options");
-    };
-
-    assert!(allow_network);
+fn isolation_options_default_to_allowing_network() {
+    for kind in ["macos_seatbelt", "linux_bubblewrap"] {
+        let options: LocalIsolationOptions =
+            serde_json::from_value(serde_json::json!({ "kind": kind })).unwrap();
+        match options {
+            LocalIsolationOptions::MacosSeatbelt { allow_network, .. }
+            | LocalIsolationOptions::LinuxBubblewrap { allow_network, .. } => {
+                assert!(allow_network, "{kind} should default to allowing network");
+            }
+            _ => panic!("unexpected variant for {kind}"),
+        }
+    }
 }
 
 #[test]

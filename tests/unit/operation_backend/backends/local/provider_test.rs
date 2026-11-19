@@ -3,12 +3,20 @@ use agent_contracts::backend::{
     BackendLifecycleReason, BackendPath, BackendPauseMode, BackendResourceLimits, BackendSnapshotId,
 };
 
+/// Shared fixture: the provider under test plus the single-thread runtime
+/// every lifecycle call in this file blocks on.
+fn provider_and_runtime() -> (LocalBackendProvider, tokio::runtime::Runtime) {
+    (
+        local_backend_provider(),
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime"),
+    )
+}
+
 #[test]
 fn local_delete_is_noop_success() {
-    let provider = local_backend_provider();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("runtime");
+    let (provider, runtime) = provider_and_runtime();
 
     let outcome = runtime
         .block_on(provider.delete(BackendDeleteRequest {
@@ -27,10 +35,7 @@ fn local_delete_is_noop_success() {
 
 #[test]
 fn local_pause_is_unsupported() {
-    let provider = local_backend_provider();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("runtime");
+    let (provider, runtime) = provider_and_runtime();
 
     let result = runtime.block_on(provider.pause(BackendPauseRequest {
         backend_id: BackendId("local:test".to_string()),
@@ -49,10 +54,7 @@ fn local_pause_is_unsupported() {
 
 #[test]
 fn local_create_and_attach_builds_active_backend() {
-    let provider = local_backend_provider();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("runtime");
+    let (provider, runtime) = provider_and_runtime();
     let workspace_root = BackendPath::from_raw(
         std::env::current_dir()
             .expect("cwd")
@@ -83,10 +85,7 @@ fn local_create_and_attach_builds_active_backend() {
 
 #[test]
 fn local_inspect_uses_workspace_metadata_when_present() {
-    let provider = local_backend_provider();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("runtime");
+    let (provider, runtime) = provider_and_runtime();
     let mut metadata = Map::new();
     metadata.insert(
         LOCAL_METADATA_WORKSPACE_ROOT.to_string(),
