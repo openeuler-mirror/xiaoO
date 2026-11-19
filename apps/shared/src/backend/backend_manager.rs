@@ -1,6 +1,6 @@
 use agent_contracts::backend::{
-    BackendId, BackendLifecycleReason, BackendResourceLimits, OperationBackendBuildError,
-    OperationError,
+    BackendId, BackendLifecycleReason, BackendResourceLimits, OperationBackend,
+    OperationBackendBuildError, OperationError,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -27,6 +27,7 @@ pub struct BackendManager {
     registry: BackendRegistry,
     sandbox_counter: SandboxCounter,
     process_id: String,
+    controlled_bindings: Option<Mutex<HashMap<String, BackendLease>>>,
 }
 
 #[derive(Default)]
@@ -169,7 +170,39 @@ impl BackendManager {
             registry,
             sandbox_counter,
             process_id,
+            controlled_bindings: None,
         }
+    }
+
+    pub(crate) fn new_controlled() -> Self {
+        Self {
+            state: Mutex::new(BackendManagerState::default()),
+            limits: BackendManagerLimits::default(),
+            registry: BackendRegistry::disabled(),
+            sandbox_counter: SandboxCounter::disabled(),
+            process_id: Self::generate_process_id(),
+            controlled_bindings: Some(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn is_controlled(&self) -> bool {
+        self.controlled_bindings.is_some()
+    }
+
+    pub(crate) async fn bind_controlled(
+        &self,
+        instance: agent_contracts::backend::BackendInstance,
+        backend: Arc<dyn OperationBackend>,
+    ) {
+        let bindings = self
+            .controlled_bindings
+            .as_ref()
+            .expect("controlled backend manager");
+        let session_id = instance.session_id.clone();
+        bindings
+            .lock()
+            .await
+            .insert(session_id, BackendLease::new(backend, instance));
     }
 
     fn generate_process_id() -> String {
@@ -562,6 +595,11 @@ impl BackendManager {
         request: BackendEnsureSessionRequest,
         session_store: Arc<dyn SessionStore>,
     ) -> Result<BackendLease, OperationBackendBuildError> {
+        if self.is_controlled() {
+            return Err(OperationBackendBuildError::UnsupportedBackend {
+                kind: "controlled session without a bound backend".to_string(),
+            });
+        }
         let config = resolve_session_backend_config(request.config.clone())?;
         let workspace_root = workspace_root_string(&request.workspace_root)?;
         let config_hash = hash_config(&config);
@@ -1243,6 +1281,16 @@ impl BackendManager {
         &self,
         session_id: &str,
     ) -> Result<BackendLease, BackendError> {
+        if let Some(bindings) = &self.controlled_bindings {
+            return bindings
+                .lock()
+                .await
+                .get(session_id)
+                .cloned()
+                .ok_or_else(|| BackendError::NotFound {
+                    backend_id: format!("session:{session_id}"),
+                });
+        }
         let state = self.state.lock().await;
         let backend_id =
             state
@@ -1264,6 +1312,13 @@ impl BackendManager {
     }
 
     pub async fn release_session(&self, session_id: &str) -> Result<(), OperationError> {
+        if let Some(bindings) = &self.controlled_bindings {
+            let lease = bindings.lock().await.remove(session_id);
+            return match lease {
+                Some(lease) => lease.backend().shutdown().await,
+                None => Ok(()),
+            };
+        }
         let removed = {
             let mut state = self.state.lock().await;
             let Some(backend_id) = state.session_index.remove(session_id) else {

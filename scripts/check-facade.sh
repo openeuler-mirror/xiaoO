@@ -71,7 +71,7 @@ manifest_path_of() {
 # 两个应用门面（允许被应用直接依赖）：
 FACADE_CRATES="xiaoo-api xiaoo-shared"
 # 应用（被约束的对象）：
-APPS="xiaoo-endside xiaoo-serverside"
+APPS="xiaoo-acp xiaoo-endside xiaoo-serverside"
 # 底层 crates：禁止被应用直接依赖、必须 publish=false、禁止在 apps 源码里被 use。
 # 名单 = 工作区所有 path crate − 门面 − 应用 − vault（vault 仅被 shared 引用，
 # 属于 shared 的实现细节，不向应用暴露，但当前不是应用直依约束对象）。

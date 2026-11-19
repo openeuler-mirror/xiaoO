@@ -81,6 +81,7 @@ impl AppRuntimeFactory {
         existing_tool_manifest: Option<Vec<ToolSpecSnapshot>>,
         operation_backend: Arc<dyn OperationBackend>,
         cancel_token: Option<CancellationToken>,
+        controlled: bool,
     ) -> Result<AppRuntimeAssembly, AppRuntimeFactoryError> {
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl);
         // Defense-in-depth: every code path that resolves a session runtime
@@ -108,24 +109,26 @@ impl AppRuntimeFactory {
             CompactionPolicy::from_budget(&resolved.descriptor.token_budget),
         );
         let is_channel_session = session.channel.is_some();
-        let tool_manifest = existing_tool_manifest.unwrap_or_else(|| {
-            snapshot_tool_specs(
-                tool_registry
-                    .filter_for(&resolved.descriptor.agent_id)
-                    .visible_tools()
-                    .into_iter()
-                    .filter(|spec| {
-                        // Hide channel-only tools when not in a channel session.
-                        if !is_channel_session {
-                            let name = spec.name().0.as_str();
-                            if CHANNEL_ONLY_TOOLS.contains(&name) {
-                                return false;
+        let tool_manifest = existing_tool_manifest
+            .filter(|_| !controlled)
+            .unwrap_or_else(|| {
+                snapshot_tool_specs(
+                    tool_registry
+                        .filter_for(&resolved.descriptor.agent_id)
+                        .visible_tools()
+                        .into_iter()
+                        .filter(|spec| {
+                            // Hide channel-only tools when not in a channel session.
+                            if !is_channel_session {
+                                let name = spec.name().0.as_str();
+                                if CHANNEL_ONLY_TOOLS.contains(&name) {
+                                    return false;
+                                }
                             }
-                        }
-                        true
-                    }),
-            )
-        });
+                            true
+                        }),
+                )
+            });
         let visible_tools = tool_specs_from_snapshot(&tool_manifest);
 
         let runtime_view = {
@@ -169,6 +172,7 @@ impl AppRuntimeFactory {
                 ToolStateStoreBuilderImpl::new()
                     .with_config(tool_state_store_config_for_entry_kind(
                         resolved.entry_kind.as_ref(),
+                        controlled,
                     ))
                     .build()?,
                 Box::new(SharedToolEventSink::new(
@@ -219,10 +223,16 @@ impl AppRuntimeFactory {
 
 fn tool_state_store_config_for_entry_kind(
     entry_kind: Option<&GatewayEntryKind>,
+    controlled: bool,
 ) -> ToolStateStoreConfig {
-    let backend = match entry_kind {
-        Some(GatewayEntryKind::Tui | GatewayEntryKind::Cli) => "noop",
-        _ => "stdout",
+    let backend = if controlled
+        || matches!(
+            entry_kind,
+            Some(GatewayEntryKind::Tui | GatewayEntryKind::Cli)
+        ) {
+        "noop"
+    } else {
+        "stdout"
     };
 
     ToolStateStoreConfig {

@@ -724,6 +724,7 @@ impl SessionSupervisor {
             .await?;
             let session_snapshot = self.snapshot().await;
             let worker_result = SessionWorker::run(SessionWorkerInput {
+                controlled: self.backend_manager.is_controlled(),
                 runtime_input: input.runtime_input.clone(),
                 resolved_runtime,
                 session: session_snapshot,
@@ -1379,6 +1380,9 @@ impl SessionSupervisor {
     }
 
     async fn report_session_status(&self, session_id: &str, status: &SessionLifecycleStatus) {
+        if self.backend_manager.is_controlled() {
+            return;
+        }
         let lease = match self.backend_manager.lease_bound_session(session_id).await {
             Ok(lease) => lease,
             Err(_) => return,

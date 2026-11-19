@@ -177,10 +177,17 @@ impl std::error::Error for BackendRegistryError {}
 
 pub(crate) struct BackendRegistry {
     storage_path: PathBuf,
-    lock_path: PathBuf,
+    lock_path: Option<PathBuf>,
 }
 
 impl BackendRegistry {
+    pub(super) fn disabled() -> Self {
+        Self {
+            storage_path: PathBuf::new(),
+            lock_path: None,
+        }
+    }
+
     /// Construct with an explicit storage directory. The registry and lock
     /// files are derived from `dir`, so callers (notably tests) can isolate
     /// from the shared `~/.xiaoo/` files by pointing at a fresh temporary
@@ -189,7 +196,7 @@ impl BackendRegistry {
         std::fs::create_dir_all(&dir).ok();
         Self {
             storage_path: dir.join("backend_registry.json"),
-            lock_path: dir.join("backend_registry.lock"),
+            lock_path: Some(dir.join("backend_registry.lock")),
         }
     }
 
@@ -336,6 +343,12 @@ impl BackendRegistry {
     }
 
     fn acquire_lock(&self) -> Result<File, BackendRegistryError> {
+        let path = self
+            .lock_path
+            .as_ref()
+            .ok_or_else(|| BackendRegistryError::Lock {
+                message: "shared backend storage is disabled".to_string(),
+            })?;
         let lock_file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -343,7 +356,7 @@ impl BackendRegistry {
             // contents are never read or written — so state the truncate
             // intent explicitly instead of leaving it implied.
             .truncate(false)
-            .open(&self.lock_path)
+            .open(path)
             .map_err(|e| BackendRegistryError::Lock {
                 message: format!("failed to create lock file: {}", e),
             })?;
