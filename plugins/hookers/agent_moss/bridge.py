@@ -42,6 +42,7 @@
 
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -67,6 +68,16 @@ _TIMEOUT = float(os.getenv("AGENT_MOSS_HOOK_TIMEOUT", "60"))
 _HEALTH_TIMEOUT = float(os.getenv("AGENT_MOSS_HEALTH_TIMEOUT", "2"))
 _LOG_PATH = os.getenv("AGENT_MOSS_LOG_PATH", "")
 _CHECK_SOURCE = os.getenv("AGENT_MOSS_CHECK_SOURCE", "") == "1"
+
+#: 写工具历史里单个文本字段（content/old/new/patch…）保留的最大字符数。
+#: RBW-11 只需要判断「脚本/写入内容是否提到目标文件名」，不需要整份内容；
+#: 无界保留会让 analyze 请求体与 L3 prompt 随文件体积线性膨胀。
+_HISTORY_TEXT_LIMIT = 2000
+#: 从写工具内容里提取的「引用文件名」上限（紧凑数组，供 RBW-11 匹配）。
+_HISTORY_REF_NAME_LIMIT = 64
+_HISTORY_REF_NAME_MAXLEN = 128
+#: 文件名（含扩展名）粗提取：覆盖 `out.csv`、`dir/折旧表.csv`、`C:\x\a.py` 等。
+_HISTORY_REF_NAME_RE = re.compile(r"[^\s'\"`<>|;:,(){}\[\]]+\.[A-Za-z0-9]{1,8}")
 
 # AgentMoss 0.16.14 起默认开启鉴权（auto 生成 token）：不带 Bearer 会 401，
 # 而 bridge 的失败分支是 fail-closed，等于所有工具调用都被拒。
@@ -170,32 +181,75 @@ def _log(tag: str, payload: object) -> None:
         print(f"[agent_moss_bridge] log write failed: {exc}", file=sys.stderr)
 
 
-def _probe_service_url() -> str | None:
-    """探测本地端口找 AgentMoss（返回 healthy 且归属匹配的实例）。
+def _version_key(v: str) -> tuple[int, ...]:
+    """把版本号转成可比较的整数元组（0.17.33 > 0.17.22）。"""
+    parts = [int(x) for x in re.findall(r"\d+", v or "")]
+    return tuple(parts) or (0,)
 
-    扫 _PROBE_PORTS，GET /api/v1/health，要求 status=='healthy' 且
-    instance 字段 == _EXPECT_INSTANCE（避免漂移到同机其他 agent 的 agentmoss）。
-    找不到返回 None（调用方走默认 9090，让 fail-closed 逻辑生效）。
-    与 OpenDesk hook.ts probeGateUrl 探测范围一致，但增加归属过滤。
+
+def _healthy_instance(port: int) -> dict | None:
+    """GET 某端口的 health；healthy 且 instance 匹配才返回响应，否则 None。"""
+    url = f"http://{_HOST}:{port}/api/v1/health"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=_HEALTH_TIMEOUT) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8"))
+            if data.get("status") != "healthy":
+                return None
+            # 归属过滤：未带 instance（旧版/未配置）或不匹配 → 跳过。
+            # 宁可探测不到走 fail-closed，也不漂移到别人的进程用错规则。
+            if data.get("instance", "") != _EXPECT_INSTANCE:
+                return None
+            return data
+    except Exception:
+        return None
+
+
+def _port_file_service_url() -> str | None:
+    """优先读 AgentMoss 启动时写的 port 文件，避免同机旧实例占着 9090。
+
+    AgentMoss 端口漂移后会写 ``<数据目录>/agent_moss_server.port.json``。
+    若只按 9090-9095 顺序探测，同机残留的旧版本实例（同 instance 名）会先命中，
+    token 体系不一致 → 401 → fail-closed 拒绝所有工具调用（2026-11 实测）。
     """
-    for port in _PROBE_PORTS:
-        url = f"http://{_HOST}:{port}/api/v1/health"
+    root = os.getenv("AGENT_MOSS_DATA_DIR", "").strip()
+    base = Path(root) if root else Path.home() / ".config" / "agentmoss"
+    # 新版本按 instance 分子目录；旧版本仍写共享路径（兼容回退，靠 health 校验 instance）
+    candidates = [
+        base / _EXPECT_INSTANCE / "agent_moss_server.port.json",
+        base / "agent_moss_server.port.json",
+    ]
+    for path in candidates:
         try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=_HEALTH_TIMEOUT) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    if data.get("status") != "healthy":
-                        continue
-                    # 归属过滤：未带 instance（旧版/未配置）或不匹配 → 跳过。
-                    # 宁可探测不到走 fail-closed，也不漂移到别人的进程用错规则。
-                    if data.get("instance", "") != _EXPECT_INSTANCE:
-                        continue
-                    return f"http://{_HOST}:{port}"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            port = int(data.get("port") or 0)
         except Exception:
-            # 端口未监听或非 AgentMoss，继续探测下一个
             continue
+        if port > 0 and _healthy_instance(port) is not None:
+            return f"http://{_HOST}:{port}"
     return None
+
+
+def _probe_service_url() -> str | None:
+    """探测本地端口找 AgentMoss（healthy + 归属匹配；多实例取版本最高的）。
+
+    与 OpenDesk hook.ts probeGateUrl 探测范围一致，但增加归属过滤与版本优先：
+    同机可能残留旧实例（如 0.17.22 占 9090、新 0.17.33 漂移到 9091），
+    按端口顺序取第一个会选到旧版，token/规则都不对。
+    """
+    best_url: str | None = None
+    best_key: tuple[int, ...] | None = None
+    for port in _PROBE_PORTS:
+        data = _healthy_instance(port)
+        if data is None:
+            continue
+        key = (_version_key(str(data.get("version", ""))), -port)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_url = f"http://{_HOST}:{port}"
+    return best_url
 
 
 def _resolve_service_url() -> str:
@@ -221,12 +275,17 @@ def _resolve_service_url() -> str:
     if os.getenv("AGENT_MOSS_PORT") is not None:
         _cached_service_url = f"http://{_HOST}:{_PORT}"
         return _cached_service_url
-    # 3. 探测
+    # 3. AgentMoss 启动时写的 port 文件（端口漂移后仍指向当前实例）
+    port_file = _port_file_service_url()
+    if port_file:
+        _cached_service_url = port_file
+        return _cached_service_url
+    # 4. 探测
     probed = _probe_service_url()
     if probed:
         _cached_service_url = probed
         return _cached_service_url
-    # 4. 兜底默认 9090
+    # 5. 兜底默认 9090
     _cached_service_url = f"http://{_HOST}:{_PORT}"
     return _cached_service_url
 
@@ -304,6 +363,43 @@ def _extract_action_detail(tool_name: str, tool_input) -> str:
     return str(tool_input)
 
 
+def _referenced_names(text: str) -> set[str]:
+    """从内容里粗提取文件名（basename），供 AgentMoss RBW-11 判断脚本产物。"""
+    names: set[str] = set()
+    for match in _HISTORY_REF_NAME_RE.finditer(text or ""):
+        token = match.group(0).strip(".,;:()[]{}<>\"'")
+        name = token.replace("\\", "/").rsplit("/", 1)[-1]
+        if 1 <= len(name) <= _HISTORY_REF_NAME_MAXLEN:
+            names.add(name)
+    return names
+
+
+def _bounded_history_input(tool_input: dict) -> str:
+    """写工具历史：保留有界内容片段 + 引用文件名，避免整份文件进历史/L3。
+
+    - content/old/new/patch 等文本字段截断到 _HISTORY_TEXT_LIMIT；
+    - 从原始内容提取 basename 放进 `referenced_names`（最多 64 个），
+      RBW-11 仍能命中脚本里提到的目标文件名；
+    - 其余参数（file_path/mode 等）原样保留。
+    """
+    data = dict(tool_input)
+    names: set[str] = set()
+    text_keys = (
+        "content", "old", "new", "oldString", "newString",
+        "old_string", "new_string", "patch", "text",
+    )
+    for key in text_keys:
+        value = data.get(key)
+        if not isinstance(value, str):
+            continue
+        names.update(_referenced_names(value))
+        if len(value) > _HISTORY_TEXT_LIMIT:
+            data[key] = value[:_HISTORY_TEXT_LIMIT] + "…[truncated]"
+    if names:
+        data["referenced_names"] = sorted(names)[:_HISTORY_REF_NAME_LIMIT]
+    return json.dumps(data, ensure_ascii=False)
+
+
 def _normalize_history_item(h: dict) -> dict:
     """把 xiaoO action_history 的一项规范化成 AnalyzeRequest 要求的结构。
 
@@ -311,14 +407,27 @@ def _normalize_history_item(h: dict) -> dict:
     的 {"questions": [...]}、skill 的 {"skill": "..."}、bash 的 {"command": "..."}），
     而 AnalyzeRequest.action_detail 要求 str，dict 直传触发 422。
 
-    解法：跟 a_next 一样，按 tool_name 提取（bash→command / file_*→file_path /
-    skill→skill 名 / 其他→JSON）。tool_name 已是 str 时直接用。
+    解法：
+    - 写工具（file_write/file_edit）优先取 `input` 字典（即使同时带了字符串
+      action_detail），交给 `_bounded_history_input`：保留有界内容片段 + 引用
+      文件名，供 AgentMoss RBW-11 判断脚本产物；不把整份文件塞进历史/L3；
+    - 其他工具：bash→command / file_read→file_path / skill→skill 名 / 其他→JSON。
     """
     tool_name = str(h.get("name") or h.get("action_type") or "unknown_tool")
-    raw_detail = h.get("action_detail", h.get("input", ""))
-    if raw_detail == "":
-        raw_detail = h.get("input", "")
-    action_detail = _extract_action_detail(tool_name, raw_detail)
+    tn = tool_name.lower()
+    raw_input = h.get("input")
+    raw_detail = h.get("action_detail", raw_input)
+    if raw_detail == "" or raw_detail is None:
+        raw_detail = raw_input
+    if tn in ("file_write", "file_edit"):
+        if isinstance(raw_input, dict):
+            action_detail = _bounded_history_input(raw_input)
+        elif isinstance(raw_detail, dict):
+            action_detail = _bounded_history_input(raw_detail)
+        else:
+            action_detail = _extract_action_detail(tool_name, raw_detail)
+    else:
+        action_detail = _extract_action_detail(tool_name, raw_detail)
     item = {"action_type": tool_name, "action_detail": action_detail}
     # 工具返回内容：ask_user_question 的 output 是用户回答，AgentMoss 的授权类
     # 规则（改密码 / 删用户）靠它判断"用户是否已确认"。不传就会被判成未授权。

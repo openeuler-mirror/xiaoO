@@ -101,7 +101,7 @@ AGENT_MOSS_DISABLE_*  env  >  runtime JSON（~/.config/agentmoss/agent_moss_runt
 
 ### 3.7 安装源（install.sh）
 
-AgentMoss 服务由 `plugins/hookers/agent_moss/install.sh` 安装：创建 venv（`/opt/agent_moss/venv`）并**从 PyPI 安装固定版本 `agent-moss==0.15.1`**（install.sh）。不存在 `AGENT_MOSS_HOME` / `pip install -e` 本地源码安装路径。
+AgentMoss 服务由 `plugins/hookers/agent_moss/install.sh` 安装：创建 venv（`/opt/agent_moss/venv`）并**从 PyPI 安装固定版本 `agent-moss==0.17.34`**（install.sh）。不存在 `AGENT_MOSS_HOME` / `pip install -e` 本地源码安装路径。
 
 ### 3.8 AcTrail（事件上报，可选）
 
