@@ -21,7 +21,7 @@ use super::constants::{
 };
 use super::dedup::{system_time_to_timestamp, DedupStateStore, FileReadState};
 use super::input::FileReadInput;
-use super::output::FileReadOutput;
+use super::output::{FileReadOutput, TextOutput};
 use super::readers;
 use super::spec::FileReadToolSpec;
 use crate::r#impl::fs_timeout::{timed, DEFAULT_FS_TIMEOUT_MS};
@@ -84,14 +84,11 @@ impl FileReadExecutor {
         self.dedup_store.lock().await
     }
 
-    async fn process_notebook(
-        &self,
+    fn process_notebook(
         file_path: &str,
         bytes: &[u8],
-        input: &FileReadInput,
         max_size_bytes: u64,
         max_tokens: usize,
-        mtime: i64,
     ) -> Result<FileReadOutput, String> {
         let cells =
             readers::notebook::read_notebook_from_bytes(file_path, bytes, Some(max_size_bytes))
@@ -114,17 +111,6 @@ impl FileReadExecutor {
                 estimated_tokens, max_tokens
             ));
         }
-
-        let mut dedup_store = self.get_dedup_store().await;
-        dedup_store.set_read_state(
-            file_path.to_string(),
-            FileReadState {
-                timestamp: mtime,
-                offset: input.offset,
-                limit: input.limit,
-                is_partial_view: input.is_partial_view(),
-            },
-        );
 
         Ok(FileReadOutput::Notebook(cells))
     }
@@ -190,33 +176,25 @@ impl FileReadExecutor {
         Ok(FileReadOutput::Pdf(pdf_output))
     }
 
-    async fn process_text(
-        &self,
+    fn process_text(
         file_path: &str,
-        _ext: &str,
         bytes: &[u8],
         input: &FileReadInput,
         max_tokens: usize,
-        mtime: i64,
+        client: bool,
     ) -> Result<FileReadOutput, String> {
         let text_output =
             readers::text::read_text_from_bytes(file_path, bytes, input.offset, input.limit)
                 .map_err(|e| e.to_string())?;
 
+        if client {
+            // The escaped JSON display budget also bounds the token count.
+            return Ok(FileReadOutput::Text(text_output));
+        }
         let estimated_tokens = super::tokenizer::estimate_tokens(file_path, &text_output.content);
         if estimated_tokens > max_tokens {
             if input.limit.is_none() {
                 let windowed = window_text_output(text_output, max_tokens, estimated_tokens);
-                let mut dedup_store = self.get_dedup_store().await;
-                dedup_store.set_read_state(
-                    file_path.to_string(),
-                    FileReadState {
-                        timestamp: mtime,
-                        offset: input.offset,
-                        limit: input.limit,
-                        is_partial_view: input.is_partial_view(),
-                    },
-                );
                 return Ok(FileReadOutput::Text(windowed));
             }
             return Err(format!(
@@ -224,17 +202,6 @@ impl FileReadExecutor {
                 estimated_tokens, max_tokens
             ));
         }
-
-        let mut dedup_store = self.get_dedup_store().await;
-        dedup_store.set_read_state(
-            file_path.to_string(),
-            FileReadState {
-                timestamp: mtime,
-                offset: input.offset,
-                limit: input.limit,
-                is_partial_view: input.is_partial_view(),
-            },
-        );
 
         Ok(FileReadOutput::Text(text_output))
     }
@@ -282,11 +249,79 @@ impl FileReadExecutor {
     }
 }
 
+struct ReadDelivery {
+    json: String,
+    // Preview bounds are used for freshness tracking and never suppress a reread.
+    preview: Option<(u64, u64)>,
+}
+
+fn serialize_read(
+    output: FileReadOutput,
+    client: bool,
+    bytes: &[u8],
+) -> Result<ReadDelivery, ToolExecutionError> {
+    use super::super::super::{client_result_json, json_string_prefix, CLIENT_RESULT_LIMIT};
+
+    let serialization_error = |error| ToolExecutionError::ExecutionFailed {
+        message: format!("Failed to serialize file read output: {error}"),
+    };
+    if !client {
+        return Ok(ReadDelivery {
+            json: serde_json::to_string(&output).map_err(serialization_error)?,
+            preview: None,
+        });
+    }
+    if let Some(json) = client_result_json(&output).map_err(serialization_error)? {
+        return Ok(ReadDelivery {
+            json,
+            preview: None,
+        });
+    }
+
+    let mut text = match output {
+        FileReadOutput::Text(text) => text,
+        FileReadOutput::Notebook(notebook) => {
+            readers::text::read_text_from_bytes(&notebook.file_path, bytes, None, None).map_err(
+                |error| ToolExecutionError::ExecutionFailed {
+                    message: error.to_string(),
+                },
+            )?
+        }
+        _ => {
+            return Err(ToolExecutionError::ExecutionFailed {
+                message: "client file read result exceeds the display limit".into(),
+            })
+        }
+    };
+    const MARKER: &str =
+        "\n\n[file_read preview truncated. Narrow the line range or use grep to locate text.]";
+    let mut body = std::mem::take(&mut text.content);
+    text.content = MARKER.into();
+    let overhead = serde_json::to_string(&FileReadOutput::Text(text.clone()))
+        .map_err(serialization_error)?
+        .len();
+    let budget = CLIENT_RESULT_LIMIT
+        .checked_sub(overhead)
+        .filter(|&budget| budget > 0)
+        .ok_or_else(|| ToolExecutionError::ExecutionFailed {
+            message: "client file read metadata exceeds the display limit".into(),
+        })?;
+    body.truncate(json_string_prefix(&body, budget));
+    text.num_lines = body.lines().count() as u64;
+    let preview = Some((text.start_line, text.num_lines));
+    body.push_str(MARKER);
+    text.content = body;
+    Ok(ReadDelivery {
+        json: serde_json::to_string(&FileReadOutput::Text(text)).map_err(serialization_error)?,
+        preview,
+    })
+}
+
 fn window_text_output(
-    output: super::output::TextOutput,
+    output: TextOutput,
     max_tokens: usize,
     estimated_tokens: usize,
-) -> super::output::TextOutput {
+) -> TextOutput {
     let lines: Vec<&str> = output.content.lines().collect();
     let total_shown = lines.len();
     let fraction = (max_tokens as f64 / estimated_tokens.max(1) as f64).min(1.0) * 0.9;
@@ -299,7 +334,7 @@ fn window_text_output(
          Re-read with offset={} (optionally a `limit`) to continue, or use grep to jump to a pattern.]…",
         output.start_line, last_line, output.total_lines, next_offset,
     );
-    super::output::TextOutput {
+    TextOutput {
         content: format!("{head}{marker}"),
         num_lines: keep as u64,
         ..output
@@ -401,7 +436,8 @@ impl ToolExecutor for FileReadExecutor {
         }
 
         let ext = Self::get_extension(&resolved_str).unwrap_or_default();
-        if backend.requires_text_files() && !Self::dedup_applies(&ext) {
+        let client = backend.requires_text_files();
+        if client && !Self::dedup_applies(&ext) {
             return Err(ToolExecutionError::ExecutionFailed {
                 message: "the client backend supports text files only".into(),
             });
@@ -441,30 +477,19 @@ impl ToolExecutor for FileReadExecutor {
         })?;
 
         let result = if Self::is_notebook_extension(&ext) {
-            self.process_notebook(
+            Self::process_notebook(
                 &resolved_str,
                 &bytes,
-                &input,
                 DEFAULT_MAX_SIZE_BYTES,
                 DEFAULT_MAX_TOKENS,
-                mtime,
             )
-            .await
         } else if Self::is_image_extension(&ext) {
             Self::process_image(&resolved_str, &ext, &bytes, DEFAULT_MAX_TOKENS)
         } else if Self::is_pdf_extension(&ext) {
             self.process_pdf(&resolved_str, &ext, &bytes, &input, &*backend)
                 .await
         } else {
-            self.process_text(
-                &resolved_str,
-                &ext,
-                &bytes,
-                &input,
-                DEFAULT_MAX_TOKENS,
-                mtime,
-            )
-            .await
+            Self::process_text(&resolved_str, &bytes, &input, DEFAULT_MAX_TOKENS, client)
         };
 
         match result {
@@ -474,14 +499,27 @@ impl ToolExecutor for FileReadExecutor {
                         spawn_touch_file(lsp, Path::new(&resolved_str));
                     }
                 }
-                let json_output =
-                    super::super::super::result_json(&output, backend.requires_text_files())
-                        .map_err(|e| ToolExecutionError::ExecutionFailed {
-                            message: format!("Failed to serialize output: {}", e),
-                        })?;
+                let delivery = serialize_read(output, client, &bytes)?;
+                if Self::dedup_applies(&ext) {
+                    let mut store = self.get_dedup_store().await;
+                    let mut state = FileReadState {
+                        timestamp: mtime,
+                        offset: input.offset,
+                        limit: input.limit,
+                        is_partial_view: input.is_partial_view(),
+                    };
+                    if let Some((start_line, num_lines)) = delivery.preview {
+                        state.offset = Some(start_line);
+                        state.limit = Some(num_lines);
+                        state.is_partial_view = true;
+                        store.set_preview_state(resolved_str, state);
+                    } else {
+                        store.set_read_state(resolved_str, state);
+                    }
+                }
                 Ok(ToolExecutorOutput::Completed {
                     raw_outcome: RawToolOutcome::Success {
-                        output: json_output,
+                        output: delivery.json,
                     },
                 })
             }

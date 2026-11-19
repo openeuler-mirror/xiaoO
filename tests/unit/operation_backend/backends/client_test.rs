@@ -41,10 +41,10 @@ async fn glob_filters_remote_listing_before_the_output_limit() {
     let root = temp.path();
     let noise = "x".repeat(192);
     for i in 0..400 {
-        std::fs::File::create(root.join(format!("{noise}-{i}"))).unwrap();
+        std::fs::File::create(root.join(format!("keep{noise}-{i}.txt"))).unwrap();
     }
     std::fs::create_dir(root.join("nested")).unwrap();
-    for path in ["keep1.txt", "nested/keep2.txt", "keep9.txt"] {
+    for path in ["keep1.txt", "nested/keep2.txt", "keep9.txt", "keepé.txt"] {
         std::fs::File::create(root.join(path)).unwrap();
     }
     let backend = ClientBackend::new(
@@ -60,19 +60,27 @@ async fn glob_filters_remote_listing_before_the_output_limit() {
     )
     .unwrap();
 
-    let files = backend
-        .glob(GlobRequest {
-            pattern: "**/keep[12].txt".into(),
-            base_dir: None,
-            limit: Some(2),
-        })
-        .await
-        .unwrap();
-    let paths: Vec<_> = files
-        .iter()
-        .map(|path| path.relative_path.as_str())
-        .collect();
-    assert_eq!(paths, ["keep1.txt", "nested/keep2.txt"]);
+    for (pattern, expected) in [
+        ("**/keep[12].txt", &["keep1.txt", "nested/keep2.txt"][..]),
+        (
+            "**/keep?.txt",
+            &["keep1.txt", "keep9.txt", "keepé.txt", "nested/keep2.txt"][..],
+        ),
+    ] {
+        let files = backend
+            .glob(GlobRequest {
+                pattern: pattern.into(),
+                base_dir: None,
+                limit: Some(expected.len()),
+            })
+            .await
+            .unwrap();
+        let paths: Vec<_> = files
+            .iter()
+            .map(|path| path.relative_path.as_str())
+            .collect();
+        assert_eq!(paths, expected);
+    }
 }
 
 #[tokio::test]

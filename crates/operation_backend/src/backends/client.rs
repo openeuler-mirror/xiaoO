@@ -33,15 +33,18 @@ fi
 "#;
 
 const GLOB_FILTER: &str = r#"
+set -o pipefail
 export LC_ALL=C
 root=$1 pattern=$2
 shift 2
 for path; do
     relative=${path#./}
-    if [[ $relative == $pattern || "$root/$relative" == $pattern ]]; then
-        printf '%s\0' "$path"
-    fi
-done
+    printf '%s\0' "$relative" "$root/$relative"
+done |
+{ grep -Pz -- "$pattern" || [[ $? == 1 ]]; } |
+while IFS= read -r -d '' match; do
+    printf './%s\0' "${match#"$root"/}"
+done | sort -zu
 "#;
 
 #[derive(Clone, Copy, Default)]
@@ -607,37 +610,63 @@ impl OperationSearch for ClientBackend {
     }
 }
 
-/// Project a validated Rust glob onto a Bash pattern that accepts at least
-/// the same paths. The Rust matcher below still decides exact membership.
+/// Compile a validated Rust glob for matching UTF-8 paths in the client.
 fn glob_prefilter(pattern: &str) -> String {
+    use std::fmt::Write;
+
     let mut chars = pattern.chars().peekable();
-    let mut filter = String::new();
+    let mut filter = String::from(r"(*UTF)(?s)\A");
     while let Some(ch) = chars.next() {
         match ch {
             '*' => {
-                if chars.next_if_eq(&'*').is_some() {
-                    chars.next_if_eq(&'/');
+                if chars.next_if_eq(&'*').is_some() && chars.next_if_eq(&'/').is_some() {
+                    filter.push_str("(?:.*/)?");
+                } else {
+                    filter.push_str(".*");
                 }
-                filter.push('*');
             }
-            '?' => filter.push('*'),
+            '?' => filter.push('.'),
             '[' => {
-                chars.next_if_eq(&'!');
-                // The first class member may itself be a closing bracket.
-                chars.next();
-                for member in chars.by_ref() {
-                    if member == ']' {
-                        break;
+                let negated = chars.next_if_eq(&'!').is_some();
+                // A closing bracket in the first member position is literal.
+                let members: Vec<_> = chars
+                    .next()
+                    .into_iter()
+                    .chain(chars.by_ref().take_while(|&ch| ch != ']'))
+                    .collect();
+                let mut class = String::new();
+                let mut members = members.as_slice();
+                while let [first, ..] = members {
+                    match members {
+                        [start, '-', end, rest @ ..] => {
+                            if start <= end {
+                                write!(class, r"\x{{{:x}}}-\x{{{:x}}}", *start as u32, *end as u32)
+                                    .unwrap();
+                            }
+                            members = rest;
+                        }
+                        [_, rest @ ..] => {
+                            write!(class, r"\x{{{:x}}}", *first as u32).unwrap();
+                            members = rest;
+                        }
+                        [] => unreachable!(),
                     }
                 }
-                filter.push('*');
+                if class.is_empty() {
+                    filter.push_str(if negated { "." } else { "(?!)" });
+                } else {
+                    filter.push('[');
+                    if negated {
+                        filter.push('^');
+                    }
+                    filter.push_str(&class);
+                    filter.push(']');
+                }
             }
-            literal => {
-                filter.push('\\');
-                filter.push(literal);
-            }
+            literal => write!(filter, r"\x{{{:x}}}", literal as u32).unwrap(),
         }
     }
+    filter.push_str(r"\z");
     filter
 }
 

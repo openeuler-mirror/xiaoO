@@ -39,6 +39,17 @@ async fn scripted_model(
                 let messages = request["messages"].as_array().unwrap();
                 let tool = messages.iter().rev().find(|m| m["role"] == "tool").unwrap();
                 assert!(tool.to_string().contains(expected), "{tool}");
+                if expected == "preview-start" {
+                    let json = tool["content"].as_str().unwrap();
+                    assert!(json.len() <= 32 * 1024);
+                    let read: Value = serde_json::from_str(json).unwrap();
+                    assert_eq!(read["type"], "text");
+                    assert_eq!(read["numLines"], 1);
+                    let body = read["content"].as_str().unwrap();
+                    assert!(body.starts_with("preview-start \""));
+                    assert!(body.contains("preview truncated"));
+                    assert!(!body.contains("preview-end"));
+                }
             }
             let chunk = json!({
                 "id": "test", "object": "chat.completion.chunk", "created": 0, "model": "scripted",
@@ -120,7 +131,7 @@ stdin = "none"
         fs::write(
             &config,
             format!(
-                "default_model = \"mock\"\n[delegation]\npermission = \"{permission}\"\nexclusive_writer = true\n{}",
+                "default_model = \"mock\"\n[delegation]\npermission = \"{permission}\"\nexclusive_writer = true\n{}context_window = 65536\n",
                 profile("mock", "scripted", endpoint, "ACP_TEST_KEY")
             ),
         )
@@ -238,7 +249,21 @@ async fn controlled_tools_execute_in_the_client_workspace() {
             json!({"file_path": "nest/remote.txt", "content": "alpha\n"}),
             Some("within 1 MiB"),
         ),
-        ("file_read", json!({"file_path": "nest/remote.txt"}), None),
+        (
+            "file_read",
+            json!({"file_path":"preview.txt", "limit":1}),
+            None,
+        ),
+        (
+            "file_read",
+            json!({"file_path":"preview.txt", "limit":1}),
+            Some("preview-start"),
+        ),
+        (
+            "file_read",
+            json!({"file_path": "nest/remote.txt"}),
+            Some("preview-start"),
+        ),
         (
             "file_edit",
             json!({"file_path": "nest/remote.txt", "old_string": "alpha", "new_string": "bravo"}),
@@ -276,6 +301,11 @@ async fn controlled_tools_execute_in_the_client_workspace() {
         .set_len(1024 * 1024 + 1)
         .unwrap();
     std::os::unix::fs::symlink(&large, fixture.client.join("large-link.txt")).unwrap();
+    fs::write(
+        fixture.client.join("preview.txt"),
+        format!("preview-start {} preview-end", "\"".repeat(40 * 1024)),
+    )
+    .unwrap();
     fixture.prompt(4).await;
 
     let mut terminal = std::collections::HashMap::new();
@@ -287,6 +317,7 @@ async fn controlled_tools_execute_in_the_client_workspace() {
     let mut approvals = 0;
     let mut plan_completed = false;
     let mut reads = 0;
+    let mut preview_reads = 0;
     let mut writes = 0;
     loop {
         let message = fixture.agent.next().await;
@@ -339,7 +370,9 @@ async fn controlled_tools_execute_in_the_client_workspace() {
             "fs/read_text_file" => {
                 reads += 1;
                 let path = fixture.translate(&params["path"]);
-                assert_ne!(path.file_name().unwrap(), "large-link.txt");
+                let filename = path.file_name().unwrap();
+                assert_ne!(filename, "large-link.txt");
+                preview_reads += usize::from(filename == "preview.txt");
                 json!({"content": fs::read_to_string(path).unwrap()})
             }
             "fs/write_text_file" => {
@@ -414,7 +447,8 @@ async fn controlled_tools_execute_in_the_client_workspace() {
     assert_eq!(failed, 2);
     assert_eq!(approvals, count - 1);
     assert!(plan_completed);
-    assert!(reads >= 2 && writes == 2 && terminal.is_empty());
+    assert_eq!(preview_reads, 2);
+    assert!(reads >= 4 && writes == 2 && terminal.is_empty());
     assert_eq!(
         fs::read_to_string(fixture.client.join("nest/remote.txt")).unwrap(),
         "bravo\n"

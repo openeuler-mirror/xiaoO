@@ -11,9 +11,15 @@ pub struct FileReadState {
     pub is_partial_view: bool,
 }
 
+#[derive(Debug)]
+struct RecordedRead {
+    state: FileReadState,
+    complete: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct DedupStateStore {
-    states: HashMap<String, FileReadState>,
+    states: HashMap<String, RecordedRead>,
 }
 
 impl DedupStateStore {
@@ -24,11 +30,28 @@ impl DedupStateStore {
     }
 
     pub fn get_read_state(&self, path: &str) -> Option<FileReadState> {
-        self.states.get(path).cloned()
+        self.states.get(path).map(|read| read.state.clone())
     }
 
     pub fn set_read_state(&mut self, path: String, state: FileReadState) {
-        self.states.insert(path, state);
+        self.states.insert(
+            path,
+            RecordedRead {
+                state,
+                complete: true,
+            },
+        );
+    }
+
+    pub(crate) fn set_preview_state(&mut self, path: String, state: FileReadState) {
+        // Keep the freshness check for an edit while allowing the read to be retried.
+        self.states.insert(
+            path,
+            RecordedRead {
+                state,
+                complete: false,
+            },
+        );
     }
 
     pub fn is_file_unchanged(
@@ -39,15 +62,13 @@ impl DedupStateStore {
         limit: Option<u64>,
         is_partial_view: bool,
     ) -> bool {
-        match self.get_read_state(path) {
-            Some(state) => {
-                state.timestamp == current_mtime
-                    && state.offset == offset
-                    && state.limit == limit
-                    && state.is_partial_view == is_partial_view
-            }
-            None => false,
-        }
+        self.states.get(path).is_some_and(|read| {
+            read.complete
+                && read.state.timestamp == current_mtime
+                && read.state.offset == offset
+                && read.state.limit == limit
+                && read.state.is_partial_view == is_partial_view
+        })
     }
 }
 

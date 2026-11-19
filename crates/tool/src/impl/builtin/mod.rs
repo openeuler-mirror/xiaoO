@@ -54,15 +54,37 @@ fn result_json<T: serde::Serialize>(output: &T, client: bool) -> serde_json::Res
         return serde_json::to_string(output);
     }
 
+    Ok(client_result_json(output)?.unwrap_or_else(|| {
+        r#"{"truncated":true,"message":"Client tool result exceeds the display limit. Request a narrower result."}"#
+            .into()
+    }))
+}
+
+fn client_result_json<T: serde::Serialize>(output: &T) -> serde_json::Result<Option<String>> {
     let mut writer = ClientResultWriter::default();
     match serde_json::to_writer(&mut writer, output) {
-        Ok(()) => Ok(String::from_utf8(writer.bytes).expect("JSON is UTF-8")),
-        Err(_) if writer.exceeded => Ok(
-            r#"{"truncated":true,"message":"Client tool result exceeds the display limit. Request a narrower result."}"#
-                .into(),
-        ),
+        Ok(()) => Ok(Some(
+            String::from_utf8(writer.bytes).expect("JSON is UTF-8"),
+        )),
+        Err(_) if writer.exceeded => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// The longest UTF-8 prefix that fits the escaped JSON string body budget.
+fn json_string_prefix(text: &str, mut budget: usize) -> usize {
+    for (index, ch) in text.char_indices() {
+        let encoded = match ch {
+            '\\' | '"' | '\x08' | '\x0c' | '\n' | '\r' | '\t' => 2,
+            '\0'..='\x1f' => 6,
+            _ => ch.len_utf8(),
+        };
+        if encoded > budget {
+            return index;
+        }
+        budget -= encoded;
+    }
+    text.len()
 }
 
 #[derive(Default)]

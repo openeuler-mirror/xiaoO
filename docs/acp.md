@@ -111,7 +111,8 @@ denied. Workspace and home-directory tool discovery are disabled.
 
 Files use the client's UTF-8 text methods with a 1 MiB content limit. Terminal
 callbacks run Bash and Linux filesystem utilities for commands, stat, directory
-creation and search. Search uses ripgrep with a GNU grep fallback when ripgrep
+creation and search. Glob filtering uses GNU grep with PCRE support.
+Content search uses ripgrep with a GNU grep fallback when ripgrep
 is unavailable. Multiline searches and file-type filters require ripgrep.
 Truncated terminal output makes a filesystem query or search fail. Bash
 reports the client's combined stream in `stdout` and preserves the client
