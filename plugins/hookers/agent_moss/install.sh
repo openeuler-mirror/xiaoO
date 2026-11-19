@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AgentMoss 版本（单一定义，多处使用）
 # 0.10.3 起 health 带 instance 字段，配合本脚本注入 AGENT_MOSS_INSTANCE=xiaoo
 # 实现多实例探测过滤（避免漂移到其他agent的agentmoss）。
-AM_VERSION="0.17.22"
+AM_VERSION="0.17.34"
 
 # 探测端口窗口与 instance 归属过滤的共享定义（含 AM_INSTANCE）。
 # 本脚本全部探测与 build.sh 的 console URL 探测共用 find_instance_port，

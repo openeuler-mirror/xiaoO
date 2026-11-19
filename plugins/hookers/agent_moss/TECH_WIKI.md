@@ -1,6 +1,6 @@
 # AgentMoss（agent_moss）技术 Wiki
 
-本文档描述 AgentMoss 安全分析服务的当前架构，以及 xiaoO 通过 `plugins/hookers/agent_moss/` 桥接插件接入它的工作原理。权威规则与源码在 AgentMoss 仓库（PyPI 包 `agent-moss`，本仓 install.sh 固定安装版本 `0.15.1`）。
+本文档描述 AgentMoss 安全分析服务的当前架构，以及 xiaoO 通过 `plugins/hookers/agent_moss/` 桥接插件接入它的工作原理。权威规则与源码在 AgentMoss 仓库（PyPI 包 `agent-moss`，本仓 install.sh 固定安装版本 `0.17.34`）。
 
 ---
 
@@ -191,7 +191,7 @@ bash plugins/hookers/agent_moss/install.sh [--enable-llm|--disable-llm]
 
 install.sh 会：
 
-1. 创建 venv（`/opt/agent_moss/venv`）并**从 PyPI 安装 `agent-moss==0.15.1`**（install.sh；已有同版本 venv 则跳过）
+1. 创建 venv（`/opt/agent_moss/venv`）并**从 PyPI 安装 `agent-moss==0.17.34`**（install.sh；已有同版本 venv 则跳过）
 2. 写入 `/etc/agent_moss/agent_moss.env`（注入 `AGENT_MOSS_INSTANCE=xiaoo`）
 3. 注册并启动 systemd service（`agent-moss`，`agent-moss install --enable`；无 sudo 时 nohup 后台启动）
 4. 探测 9090-9095 验证 `instance==xiaoo` 的健康检查

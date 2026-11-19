@@ -271,6 +271,9 @@ AgentMoss 的三层防御中，层3（LLM 语义分析）是可选的。层1+层
 
 - **Skill 最多 3 个**：L3 从全部安全 Skill 中按关键词相关度评分取 top-3 注入 prompt（无匹配时兜底 `general_tool_risk_guard` 1 个），不会把全部 Skill 都塞进去。每个 Skill 文件 29-39 行。
 - **每次调用独立**：L3 是"判定单个待执行动作 a_next"的独立请求，**不是**把 agent 的全部历史对话叠加进上下文。每次输入 = 固定模板 + 本次 a_next + 本次 session 的历史动作 + ≤3 个 Skill，彼此之间无累积。
+- **写工具历史有界**：`file_write`/`file_edit` 的历史 `action_detail` 只保留
+  ≤2KB 内容片段 + 引用文件名列表（供 AgentMoss RBW-11 判断脚本产物），
+  不会把整份文件内容放进历史/L3 prompt。
 - **实测输入大小**：典型 L3 调用 prompt 长度约 **3500-3700 字符（~1k-1.5k token）**，多次调用稳定在该量级，不随 session 延长而膨胀。
 - **与 Agent 主循环的区别**：Agent 主循环调 LLM 时通常把全部历史对话（user/assistant 往返）叠加进上下文，session 越长 token 越大；AgentMoss L3 每次只判一个动作，历史只传"已执行动作的摘要"（name + action_detail），且本次判定完即丢弃，不在 L3 侧累积。
 
