@@ -321,7 +321,7 @@ impl ControlledTextSession {
                     root,
                 }),
             )
-            .await;
+            .await?;
         Self::open_with_backend_manager(session_id, cwd, profile, backend_manager).await
     }
 

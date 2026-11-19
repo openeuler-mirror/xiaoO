@@ -124,3 +124,49 @@ async fn timed_out_attempt_leaves_successful_retry_usage_partial() {
         (Some(4), Some(2))
     );
 }
+
+#[tokio::test]
+async fn duplicate_controlled_binding_preserves_the_original_lease() {
+    let manager = BackendManager::new_controlled();
+    let session_id = "controlled";
+    let binding = |id: &str| {
+        let root = BackendPath::from_raw("/client/workspace");
+        let instance = BackendInstance {
+            backend_id: BackendId(id.into()),
+            provider: BackendProviderKind("acp".into()),
+            instance_id: BackendInstanceId(id.into()),
+            session_id: session_id.into(),
+            state: BackendLifecycleState::Active,
+            workspace_root: root.clone(),
+            endpoint: None,
+            snapshot: None,
+            capabilities: Default::default(),
+            resources: Default::default(),
+            metadata: serde_json::Value::Null,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let backend = Arc::new(TextOnlyBackend {
+            session_id: id.into(),
+            root,
+        });
+        (instance, backend)
+    };
+    let (original, backend) = binding("original");
+    manager.bind_controlled(original, backend).await.unwrap();
+    let lease = manager.lease_bound_session(session_id).await.unwrap();
+
+    let (replacement, backend) = binding("replacement");
+    let error = manager
+        .bind_controlled(replacement, backend)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::backend::BackendError::Conflict { message }
+            if message == "controlled session controlled already has an operation backend binding"
+    ));
+    let current = manager.lease_bound_session(session_id).await.unwrap();
+    assert_eq!(current.instance().backend_id.0, "original");
+    assert!(Arc::ptr_eq(&lease.backend(), &current.backend()));
+}

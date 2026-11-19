@@ -3,7 +3,7 @@ use agent_contracts::backend::{
     OperationBackendBuildError, OperationError,
 };
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -193,16 +193,24 @@ impl BackendManager {
         &self,
         instance: agent_contracts::backend::BackendInstance,
         backend: Arc<dyn OperationBackend>,
-    ) {
+    ) -> Result<(), BackendError> {
         let bindings = self
             .controlled_bindings
             .as_ref()
             .expect("controlled backend manager");
-        let session_id = instance.session_id.clone();
-        bindings
-            .lock()
-            .await
-            .insert(session_id, BackendLease::new(backend, instance));
+        let mut bindings = bindings.lock().await;
+        match bindings.entry(instance.session_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(BackendLease::new(backend, instance));
+                Ok(())
+            }
+            Entry::Occupied(entry) => Err(BackendError::Conflict {
+                message: format!(
+                    "controlled session {} already has an operation backend binding",
+                    entry.key()
+                ),
+            }),
+        }
     }
 
     fn generate_process_id() -> String {
