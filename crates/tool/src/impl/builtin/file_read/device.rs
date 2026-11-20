@@ -22,28 +22,37 @@ pub fn is_blocked_device_path(path: &str) -> bool {
         return true;
     }
 
-    if path.starts_with("/proc/self/fd/") {
-        if let Some(fd) = path.strip_prefix("/proc/self/fd/") {
-            if fd == "0" || fd == "1" || fd == "2" {
+    if let Some(rest) = path.strip_prefix("/proc/") {
+        if let Some(index) = rest.find("/fd/") {
+            let owner = &rest[..index];
+            let fd = &rest[index + "/fd/".len()..];
+            if matches!(fd, "0" | "1" | "2") && is_process_fd_owner(owner) {
                 return true;
             }
         }
     }
 
-    if path.starts_with("/proc/") && path.contains("/fd/") {
-        if let Some(fd_part) = path.strip_prefix("/proc/") {
-            if let Some(rest) = fd_part.find("/fd/") {
-                let pid_and_rest = &fd_part[..rest];
-                let fd = &fd_part[rest + 4..];
-                // Verify the PID part is digits only (basic validation)
-                if pid_and_rest.chars().all(|c| c.is_ascii_digit())
-                    && (fd == "0" || fd == "1" || fd == "2")
-                {
-                    return true;
-                }
-            }
-        }
+    false
+}
+
+/// Whether the path segment before `/fd/` identifies a process or thread fd table.
+///
+/// Besides `/proc/<pid>`, Linux exposes the same standard streams through
+/// `/proc/self`, `/proc/thread-self` and the per-thread form `/proc/<pid>/task/<tid>`.
+/// Reading any of those std fds blocks until the process receives input, which is
+/// what the block list is meant to prevent.
+fn is_process_fd_owner(owner: &str) -> bool {
+    if owner == "self" || owner == "thread-self" {
+        return true;
     }
 
-    false
+    if let Some((head, tid)) = owner.split_once("/task/") {
+        return (head == "self" || head == "thread-self" || is_pid(head)) && is_pid(tid);
+    }
+
+    is_pid(owner)
+}
+
+fn is_pid(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_digit())
 }
