@@ -978,8 +978,15 @@ fn is_root_stream_agent(agent_id: &AgentId, state: &AppState) -> bool {
     if agent_id.0.is_empty() || agent_id.0 == "cli-agent" {
         return true;
     }
+    // Case-insensitive: the TUI lowercases ids when resolving
+    // (`Config::resolve_default_agent_id`), the daemon matches them verbatim,
+    // so a mixed-case `[[agents.list]]` id must not fork the root detection.
+    // ASCII folding (`eq_ignore_ascii_case`) is sufficient because the
+    // daemon restricts agent ids to ASCII letters/digits/'_'/'-'
+    // (`validate_agents`), and the TUI-side `to_lowercase` of an ASCII-only
+    // id yields exactly the ASCII lowercase form.
     super::runtime_request::resolve_agent_id(None, None, &state.agent_config)
-        .map(|root_agent_id| agent_id.0 == root_agent_id)
+        .map(|root_agent_id| agent_id.0.eq_ignore_ascii_case(&root_agent_id))
         .unwrap_or(false)
 }
 

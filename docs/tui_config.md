@@ -420,13 +420,16 @@ tells root-agent turns apart from subagent turns in the stream
 default_agent_id = "main"             # Optional, default sender id
 
 [[agents.list]]
-id = "main"                           # Agent ID - the ONLY field
+id = "main"                           # Agent ID
+default = true                        # Optional, mark as default agent
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `agents.default_agent_id` | string | `"main"` | Sender id the TUI reports for root-agent turns. When blank, the first `[[agents.list]]` entry is used, else `"main"`. |
+| `agents.default_agent_id` | string | unset | Sender id the TUI reports for root-agent turns. When the key is absent (or left blank), the `default = true` entry is used, else the first `[[agents.list]]` entry, else `"main"` — the same fallback chain as the daemon (`resolve_default_agent_id`, `apps/endside/src/support/config.rs`, mirroring `DaemonConfig::resolve_agent`). Note the daemon rejects an explicit-but-blank `default_agent_id = ""` at startup, so the key-absent spelling is the only reachable "unset" in remote mode. |
 | `agents.list[].id` | string | — (required) | An agent identity entry. The whole list may be omitted: no validation happens and the default stays `"main"`. |
+| `agents.list[].default` | bool | `false` | Marks the entry as the default agent. At most one entry may set it (validated by both the TUI bootstrap and the daemon's startup). |
+| `agents.list[].workspace` / `.profile_id` / `.system_prompt` | string | — | Daemon-side fields. The TUI parses and preserves them (see note below) but does not consume them. |
 
 There is no runtime override for the sender id: it is resolved from the
 config on every session open / turn (`resolve_agent_id`, which also knows
@@ -436,17 +439,22 @@ case-insensitive throughout (ids are lowercased). When the list is
 non-empty, startup fails if the resolved default is not in the list
 (`agents.default_agent_id validation failed`).
 
-> **There is only the `id` field on `[[agents.list]]`.** `AgentConfig` has
-> exactly `id` (`apps/endside/src/support/config.rs`) — no `workspace_dir`,
-> `model`, `profile_id` or `system_prompt`; those live on the daemon-side
-> `AgentConfig` (`apps/serverside/src/daemon_config.rs`). Because the struct
-> does not set `deny_unknown_fields`, a stray key — a leftover
-> `workspace_dir` from older configs, or a `profile_id` copied from a daemon
-> config — is **silently ignored** rather than reported, and the next TUI
-> rewrite of config.toml (e.g. applying a `/connect` provider change) drops
-> it from the file. The TUI workspace is not configurable here: in local
-> mode it is the launch directory (switch at runtime via `/dir`); in remote
-> mode it is bound by the daemon at session-open time.
+> **`[[agents.list]]` fields beyond `id` are daemon-side fields.** The TUI's
+> `AgentConfig` (`apps/endside/src/support/config.rs`) parses `id`,
+> `default`, `workspace`, `profile_id` and `system_prompt` — mirroring the
+> daemon's `AgentConfig` (`apps/serverside/src/daemon_config.rs`) — but the
+> TUI only consumes `id` and `default`. The daemon-only fields are parsed
+> and re-serialized unchanged so that a TUI rewrite of config.toml (e.g.
+> applying a `/connect` provider change) never strips fields the daemon
+> depends on, never materializes an absent `default_agent_id` key (which
+> would flip the daemon's root agent or fail its startup validation), and
+> so both sides resolve the same root agent id in remote mode (a divergent
+> resolution hides the daemon's root replies inside a phantom subagent
+> lane). A stray key — e.g. a leftover `workspace_dir` from older configs —
+> is still **silently ignored** rather than reported, because the struct
+> does not set `deny_unknown_fields`. The TUI workspace is not configurable
+> here: in local mode it is the launch directory (switch at runtime via
+> `/dir`); in remote mode it is bound by the daemon at session-open time.
 
 ---
 
