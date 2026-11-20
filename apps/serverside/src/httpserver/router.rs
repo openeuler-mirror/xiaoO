@@ -2004,7 +2004,9 @@ fn map_session_error(error: xiaoo_shared::gateway::SessionServiceError) -> Respo
 /// Build the JSON response body for a [`SessionServiceError`].
 /// `SessionAttachedByAnotherClient` emits structured holder-identity fields
 /// (so TUIs can read `holder_client_id` / `stale` without parsing a Display
-/// string); other variants fall back to `{"error": "<Display>"}`.
+/// string); `RuntimeConflict` emits a `kind` marker for the same reason;
+/// other variants fall back to
+/// `{"error": "<Display>"}`.
 fn session_error_body(error: &xiaoo_shared::gateway::SessionServiceError) -> serde_json::Value {
     match error {
         xiaoo_shared::gateway::SessionServiceError::SessionAttachedByAnotherClient {
@@ -2023,6 +2025,12 @@ fn session_error_body(error: &xiaoo_shared::gateway::SessionServiceError) -> ser
             "holder_pid": holder_pid,
             "last_heartbeat_ms": last_heartbeat_ms,
             "stale": stale,
+        }),
+        // `kind` lets clients tell this 409 apart from the attach-lease
+        // 409 without matching Display wording.
+        xiaoo_shared::gateway::SessionServiceError::RuntimeConflict { .. } => serde_json::json!({
+            "error": error.to_string(),
+            "kind": xiaoo_shared::gateway::RUNTIME_CONFLICT_KIND,
         }),
         _ => serde_json::json!({ "error": error.to_string() }),
     }

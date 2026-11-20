@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ratatui::{layout::Rect, text::Line, widgets::ScrollbarState};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use xiaoo_api::chat::ReasoningEffort;
@@ -463,6 +463,10 @@ pub struct AppState {
     /// config (provider switch).
     pub config_identity: Option<ConfigFileIdentity>,
     pub workspace: PathBuf,
+    /// Workspace the daemon bound the remote session to (from the open
+    /// response); shown by the status panel in preference to the local
+    /// `workspace` while set.
+    pub remote_workspace_root: Option<PathBuf>,
     /// Session generation for model fetches: after a session rebuild, old
     /// in-flight results must be dropped — otherwise the previous session's
     /// official list would be written into the new session and marked
@@ -533,6 +537,7 @@ impl AppState {
             config_path,
             config_identity,
             workspace: workspace.clone(),
+            remote_workspace_root: None,
             model_fetch_session: 0,
             model_fetch_inflight: std::collections::HashSet::new(),
             session_messages: Vec::new(),
@@ -579,13 +584,37 @@ impl AppState {
         self.model_fetch_session = self.model_fetch_session.wrapping_add(1);
     }
 
+    /// Working directory the status panel shows: the daemon-bound
+    /// workspace while a remote session is open, else the local
+    /// `workspace`.
+    pub fn effective_workspace_display(&self) -> &Path {
+        self.remote_workspace_root
+            .as_deref()
+            .unwrap_or(&self.workspace)
+    }
+
+    /// Refresh the status panel's workspace line.
+    pub fn sync_workspace_display(&mut self) {
+        let display = self.effective_workspace_display().to_path_buf();
+        self.status_panel.set_workspace(&display);
+    }
+
+    /// Record the daemon-bound workspace and repaint the status panel;
+    /// single choke point for every remote-open entry point.
+    pub fn bind_remote_workspace(&mut self, root: PathBuf) {
+        self.remote_workspace_root = Some(root);
+        self.sync_workspace_display();
+    }
+
     pub fn reset_for_new_session(&mut self) {
         self.next_model_fetch_session();
         let input_history = self.chat_state.input_history.clone();
         self.chat_state = build_chat_state(&self.agent_config);
         self.chat_state.set_input_history(input_history);
         self.status_panel = build_status_panel(&self.agent_config);
-        self.status_panel.set_workspace(&self.workspace);
+        // A fresh session has not been opened yet; drop any stale pin.
+        self.remote_workspace_root = None;
+        self.sync_workspace_display();
         self.input_mode = InputMode::Editing;
         self.provider_dialog = None;
         self.sandbox_dialog = None;

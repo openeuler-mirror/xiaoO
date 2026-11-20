@@ -73,6 +73,9 @@ impl StatusPanel {
     }
 
     /// Update the workspace line from an absolute path (caller should pass canonical path when possible).
+    /// The display string is sanitized against terminal control characters
+    /// because the path may originate from a remote daemon's session record
+    /// (i.e. another client's open request), not just the local cwd.
     pub fn set_workspace(&mut self, path: &Path) {
         self.workspace_display = shorten_path_display(path, 26);
     }
@@ -128,10 +131,14 @@ impl StatusPanel {
 }
 
 fn shorten_path_display(path: &Path, max_chars: usize) -> String {
-    let s = path.to_string_lossy();
+    // Sanitize BEFORE truncating: the path can be daemon-controlled (the
+    // session record's workspace may trace back to another client's open
+    // request), and raw ESC/TAB bytes would reach the terminal and
+    // desync ratatui's cell grid (see `sanitize_terminal_text`).
+    let s = sanitize_terminal_text(&path.to_string_lossy());
     let count = s.chars().count();
     if count <= max_chars {
-        return s.into_owned();
+        return s;
     }
     let prefix = sanitize_terminal_text("…");
     let keep = max_chars.saturating_sub(prefix.chars().count());

@@ -528,3 +528,48 @@ capacity = 50
         StorageConfig::default()
     );
 }
+
+// --- `[[agents.list]].workspace` mirror + e2b detection (#96) -------------
+
+#[test]
+fn agent_config_workspace_survives_config_round_trip() {
+    let config: Config = toml::from_str(
+        r#"
+[[agents.list]]
+id = "main"
+workspace = "/tmp/pinned"
+"#,
+    )
+    .unwrap();
+    assert!(config.agent_workspace_is_pinned("main"));
+    assert!(config.agents.list[0].workspace.is_some());
+
+    // The TUI rewrites config.toml on provider switches; the mirrored
+    // workspace key must survive the round trip.
+    let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert!(restored.agent_workspace_is_pinned("main"));
+}
+
+#[test]
+fn daemon_backend_kind_is_read_from_preserved_server_section() {
+    let e2b: Config = toml::from_str(
+        r#"
+[server.operation_backend]
+kind = "e2b"
+"#,
+    )
+    .unwrap();
+    assert!(e2b.daemon_uses_e2b_backend());
+
+    let local: Config = toml::from_str(
+        r#"
+[server.operation_backend]
+kind = "local"
+"#,
+    )
+    .unwrap();
+    assert!(!local.daemon_uses_e2b_backend());
+
+    assert!(!Config::default().daemon_uses_e2b_backend());
+    assert!(!Config::default().agent_workspace_is_pinned("main"));
+}

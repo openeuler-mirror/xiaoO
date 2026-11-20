@@ -336,6 +336,32 @@ provider = "openrouter"
 model = "z-ai/glm-5"
 ```
 
+**Workspace resolution per entry point.** At the protocol level the daemon
+resolves a session's workspace at open time in this order:
+
+1. The request-supplied `workspace` field — the highest-priority override
+   (see `SessionOpenRequest.workspace`). MCP agent callers must always
+   supply one; a *new* TUI remote session names the client cwd so remote
+   tools operate where the user launched the TUI (matching local mode;
+   requires the same-host / same-config guarantees enforced at `/remote`
+   connect). Third-party callers take note: this field overrides any
+   configured workspace below.
+2. The existing session's bound root — once bound, a request naming a
+   different workspace is rejected with a `BootstrapConflict` 409
+   (`kind: "runtime_conflict"` in the body).
+3. The daemon-side default: `workspace` on `[[agents.list]]` (explicit
+   pin), else `<data_dir>/workspace/<agent_id>` (see `[paths]` below), else
+   `~/.xiaoo/workspace/<agent_id>`.
+
+The bundled TUI deliberately suppresses the client-cwd hint when
+`[[agents.list]].workspace` pins the agent, so the pin holds for every
+bundled entry point in practice — but that is client-side courtesy, not a
+protocol guarantee. Unattended entry points (Telegram / channels / cron /
+MCP chatbot) never supply a workspace, so they always resolve to the pin or
+the daemon default. The same holds for sessions a hook's `create_session`
+action opens daemon-side — no client cwd is involved. E2B-backed agents
+ignore the client cwd for now (see `[server.operation_backend]` below).
+
 > **There is no `model` field on `[[agents.list]]`.** `AgentConfig` has exactly
 > `id`, `default`, `workspace`, `profile_id` and `system_prompt`
 > (`apps/serverside/src/daemon_config.rs`). To give an agent a model,
@@ -353,6 +379,15 @@ model = "z-ai/glm-5"
 data_dir = "~/.xiaoo"                # Optional, root directory for data storage
 ```
 
+`data_dir` relocates xiaoo's data (history, session records, caches). The
+derived `<data_dir>/workspace/<agent_id>` directory is the **default
+workspace for unattended entry points** (Telegram / channels / cron / MCP
+chatbot), not a pin: interactive TUI remote sessions launched without an
+explicit `[[agents.list]].workspace` follow the **client's current
+directory** instead, so remote tools operate where the user is. Sessions
+and other data still live under `data_dir` regardless of where a session's
+workspace points.
+
 ---
 
 ### [server.operation_backend] - Daemon Operation Backend
@@ -360,6 +395,12 @@ data_dir = "~/.xiaoo"                # Optional, root directory for data storage
 The daemon reads operation backend configuration only from the `server`
 namespace. Top-level `[operation_backend]` is reserved for CLI/TUI-side
 configuration and is ignored by the daemon.
+
+For E2B-backed agents, an open request's `workspace` field is the sandbox
+bootstrap snapshot source packed into the newly created sandbox. TUI remote
+sessions deliberately leave it unset for now — the sandbox boots with an
+empty `workspace/` directory plus skills — so the client cwd is never
+silently uploaded into a sandbox.
 
 ```toml
 [server.operation_backend]

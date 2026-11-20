@@ -19,6 +19,12 @@ use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
 use xiaoo_api::runtime::LoopStateSnapshot;
 
+/// Wire marker emitted in HTTP 409 bodies for
+/// [`SessionServiceError::RuntimeConflict`], letting clients discriminate
+/// a workspace/skills re-bind rejection from the attach-lease 409 without
+/// matching Display wording.
+pub const RUNTIME_CONFLICT_KIND: &str = "runtime_conflict";
+
 #[derive(Debug, Error)]
 pub enum SessionServiceError {
     #[error("invalid request: {message}")]

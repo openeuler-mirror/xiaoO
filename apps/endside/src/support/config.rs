@@ -189,16 +189,20 @@ pub struct AgentsConfig {
 
 /// TUI-side mirror of the daemon's `AgentConfig`
 /// (`apps/serverside/src/daemon_config.rs`). The TUI does not consume
-/// `default`/`workspace`/`profile_id`/`system_prompt`, but they MUST parse
+/// `default`/`profile_id`/`system_prompt`, but they MUST parse
 /// (and round-trip through `save_to`) so the shared config.toml keeps the
 /// daemon's fields intact and both sides resolve the same root agent id:
 /// `resolve_default_agent_id` mirrors the daemon's fallback chain, which
-/// includes the `default = true` entry.
+/// includes the `default = true` entry. `workspace` is the exception: the
+/// TUI reads it to suppress the client-cwd hint for pinned agents
+/// (see `remote_open_workspace_hint`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub id: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub default: bool,
+    /// Explicit workspace pin; when set, the daemon's configured workspace
+    /// wins over the client-cwd hint (see `remote_open_workspace_hint`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,6 +299,28 @@ impl Config {
             .iter()
             .map(|agent| agent.id.to_lowercase())
             .collect()
+    }
+
+    /// Whether the daemon runs the e2b operation backend
+    /// (`[server.operation_backend] kind = "e2b"`), read from the
+    /// preserved `extra` section so config rewrites never drop other
+    /// `[server]` keys.
+    pub fn daemon_uses_e2b_backend(&self) -> bool {
+        self.extra
+            .get("server")
+            .and_then(|server| server.get("operation_backend"))
+            .and_then(|backend| backend.get("kind"))
+            .and_then(toml::Value::as_str)
+            // Exact match, aligned with the daemon's own case-sensitive check.
+            .is_some_and(|kind| kind == "e2b")
+    }
+
+    /// Whether `agent_id` (lowercase) has an explicit workspace pin.
+    pub fn agent_workspace_is_pinned(&self, agent_id: &str) -> bool {
+        self.agents
+            .list
+            .iter()
+            .any(|agent| agent.id.to_lowercase() == agent_id && agent.workspace.is_some())
     }
 
     /// Mirrors the daemon's fallback chain

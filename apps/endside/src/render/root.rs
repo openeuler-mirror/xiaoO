@@ -37,7 +37,7 @@ impl App {
             None
         } else {
             // Slow path: recompute layout and cache it.
-            self.state.status_panel.set_workspace(&self.state.workspace);
+            self.state.sync_workspace_display();
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([

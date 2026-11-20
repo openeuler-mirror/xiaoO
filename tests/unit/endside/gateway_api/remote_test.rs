@@ -542,3 +542,97 @@ fn verify_same_host_decision_table() {
         "error should explain the fail-closed path, got: {error}"
     );
 }
+
+// --- Workspace hint for new remote sessions (#96) -------------------------
+
+fn test_state(workspace: &str) -> AppState {
+    AppState::new(PathBuf::from("config.toml"), PathBuf::from(workspace))
+        .expect("test app state should initialize")
+}
+
+#[test]
+fn workspace_hint_defaults_to_client_cwd() {
+    let state = test_state("/tmp/client");
+    assert_eq!(
+        super::remote_open_workspace_hint(&state),
+        Some(PathBuf::from("/tmp/client"))
+    );
+}
+
+#[test]
+fn workspace_hint_suppressed_when_agent_workspace_pinned() {
+    let mut state = test_state("/tmp/client");
+    let config = toml::from_str::<crate::config::Config>(
+        r#"
+[[agents.list]]
+id = "main"
+workspace = "/tmp/pinned"
+"#,
+    )
+    .expect("pinned agent config should parse");
+    state.agent_config = std::sync::Arc::new(config);
+
+    assert_eq!(super::remote_open_workspace_hint(&state), None);
+}
+
+#[test]
+fn workspace_hint_suppressed_for_e2b_backend() {
+    let mut state = test_state("/tmp/client");
+    let config = toml::from_str::<crate::config::Config>(
+        r#"
+[server.operation_backend]
+kind = "e2b"
+"#,
+    )
+    .expect("e2b daemon config should parse");
+    assert!(config.daemon_uses_e2b_backend());
+    state.agent_config = std::sync::Arc::new(config);
+
+    assert_eq!(super::remote_open_workspace_hint(&state), None);
+}
+
+#[test]
+fn new_session_open_request_carries_workspace_hint() {
+    let state = test_state("/tmp/client");
+    let runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let request = runtime
+        .remote_session_open_request(&state, Some(PathBuf::from("/tmp/client")))
+        .expect("open request should build against a bare test state");
+    assert_eq!(request.workspace, Some(PathBuf::from("/tmp/client")));
+}
+
+#[test]
+fn restore_open_request_never_names_a_workspace() {
+    let mut state = test_state("/tmp/client");
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    runtime.configure_remote(&mut state, "http://daemon.example".to_string(), None);
+
+    let request = runtime
+        .remote_session_open_request(&state, None)
+        .expect("open request should build against a bare test state");
+    assert!(request.workspace.is_none());
+}
+
+#[tokio::test]
+async fn disconnecting_remote_clears_daemon_bound_workspace_pin() {
+    let mut state = test_state("/tmp/client");
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    runtime.configure_remote(&mut state, "http://daemon.example".to_string(), None);
+    state.remote_workspace_root = Some(PathBuf::from("/daemon/bound"));
+
+    assert_eq!(
+        state.effective_workspace_display(),
+        std::path::Path::new("/daemon/bound")
+    );
+
+    runtime
+        .disconnect_remote(&mut state)
+        .await
+        .expect("remote disconnect should succeed");
+
+    assert!(state.remote_workspace_root.is_none());
+    assert_eq!(
+        state.effective_workspace_display(),
+        state.workspace.as_path()
+    );
+}

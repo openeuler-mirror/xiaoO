@@ -642,12 +642,15 @@ impl App {
                         session_id = %session_id,
                         "heartbeat rejected with stale lease; attempting to reclaim via open"
                     );
-                    if self
+                    if let Ok(record) = self
                         .gateway
                         .open_remote_session_with_record(&mut self.state)
                         .await
-                        .is_ok()
                     {
+                        // Refill the pin from the record: it is not
+                        // guaranteed initialised on every path here.
+                        self.state
+                            .bind_remote_workspace(record.runtime.workspace_root.clone());
                         tracing::info!(
                             session_id = %session_id,
                             "reclaimed stale lease via open; resuming normal operation"
@@ -886,6 +889,8 @@ impl App {
         .await
         {
             Ok(Ok(record)) => {
+                self.state
+                    .bind_remote_workspace(record.runtime.workspace_root.clone());
                 let loop_messages = record.loop_state.map(|ls| ls.messages).unwrap_or_default();
                 let display_messages =
                     crate::chat::messages_from_chat_messages(loop_messages.clone());
