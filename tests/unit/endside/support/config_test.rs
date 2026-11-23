@@ -64,9 +64,10 @@ allowed_agent_roles = ["main", "researcher"]
 #[test]
 fn tui_bootstrap_requires_default_agent_id_in_agents_list() {
     let mut config = valid_config();
-    config.agents.default_agent_id = "missing".to_string();
+    config.agents.default_agent_id = Some("missing".to_string());
     config.agents.list.push(super::AgentConfig {
         id: "main".to_string(),
+        ..super::AgentConfig::default()
     });
 
     let error = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
@@ -77,6 +78,191 @@ fn tui_bootstrap_requires_default_agent_id_in_agents_list() {
             .contains("agents.default_agent_id validation failed"),
         "unexpected error: {error}"
     );
+}
+
+/// Regression for the TUI/daemon root-agent resolution fork: when the
+/// `agents.default_agent_id` key is ABSENT (the daemon's standard "unset"
+/// spelling) and a non-first `[[agents.list]]` entry sets `default = true`,
+/// the TUI must resolve the same root agent id as the daemon (the
+/// `default = true` entry, not the first entry) — see
+/// `DaemonConfig::resolve_agent` in `apps/serverside/src/daemon_config.rs`.
+#[test]
+fn resolves_default_agent_from_default_true_entry() {
+    let mut config = valid_config();
+    config.agents.default_agent_id = None;
+    config.agents.list = vec![
+        super::AgentConfig {
+            id: "main".to_string(),
+            ..super::AgentConfig::default()
+        },
+        super::AgentConfig {
+            id: "Review".to_string(),
+            default: true,
+            ..super::AgentConfig::default()
+        },
+    ];
+
+    assert_eq!(config.resolve_default_agent_id(), "review");
+    // Startup validation must follow the same chain (the `default = true`
+    // entry must be accepted as the resolved default).
+    assert!(config.validate_default_agent_id().is_ok());
+}
+
+#[test]
+fn explicit_default_agent_id_wins_over_default_true_entry() {
+    let mut config = valid_config();
+    config.agents.default_agent_id = Some("main".to_string());
+    config.agents.list = vec![
+        super::AgentConfig {
+            id: "main".to_string(),
+            ..super::AgentConfig::default()
+        },
+        super::AgentConfig {
+            id: "review".to_string(),
+            default: true,
+            ..super::AgentConfig::default()
+        },
+    ];
+
+    assert_eq!(config.resolve_default_agent_id(), "main");
+}
+
+/// A blank `default_agent_id = ""` is treated as unset (walk the chain):
+/// this is the TUI's historical local-mode behavior, and the daemon
+/// rejects that spelling at startup so it cannot fork remote mode.
+#[test]
+fn blank_default_agent_id_treated_as_unset() {
+    let mut config = valid_config();
+    config.agents.default_agent_id = Some(String::new());
+    config.agents.list = vec![
+        super::AgentConfig {
+            id: "main".to_string(),
+            ..super::AgentConfig::default()
+        },
+        super::AgentConfig {
+            id: "review".to_string(),
+            default: true,
+            ..super::AgentConfig::default()
+        },
+    ];
+
+    assert_eq!(config.resolve_default_agent_id(), "review");
+}
+
+#[test]
+fn first_entry_fallback_when_no_default_true() {
+    let mut config = valid_config();
+    config.agents.default_agent_id = None;
+    config.agents.list = vec![
+        super::AgentConfig {
+            id: "main".to_string(),
+            ..super::AgentConfig::default()
+        },
+        super::AgentConfig {
+            id: "review".to_string(),
+            ..super::AgentConfig::default()
+        },
+    ];
+
+    assert_eq!(config.resolve_default_agent_id(), "main");
+}
+
+/// The TUI and daemon share one config.toml; a TUI rewrite (e.g. `/connect`
+/// provider switch → `save_to`) must not strip the daemon-owned
+/// `[[agents.list]]` fields (`default` / `workspace` / `profile_id` /
+/// `system_prompt`) or materialize the `default_agent_id` key, or the
+/// daemon's startup validation / root-agent resolution break on reload.
+///
+/// The input uses the daemon's standard "unset" spelling: the
+/// `default_agent_id` key is ABSENT (a blank `default_agent_id = ""` is
+/// rejected by the daemon's `validate_agents` at startup, so it is not a
+/// reachable shared-config spelling).
+#[test]
+fn save_preserves_daemon_owned_agents_list_fields() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+
+[[agents.list]]
+id = "main"
+
+[[agents.list]]
+id = "review"
+default = true
+workspace = "/srv/review"
+profile_id = "fast"
+system_prompt = "You are a reviewer."
+"#,
+    )
+    .expect("write config");
+
+    let mut config = Config::load_from(&path).expect("load config");
+    assert_eq!(config.resolve_default_agent_id(), "review");
+    config.llm.model = "gpt-4.1".to_string();
+    config.save_to(&path).expect("save config");
+
+    let persisted: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&path).expect("read persisted config"))
+            .expect("parse persisted config");
+    // The unset spelling must not be materialized as default_agent_id =
+    // "main" — that either flips the daemon's root agent (non-empty list)
+    // or fails its startup validation (empty list).
+    assert!(persisted["agents"].get("default_agent_id").is_none());
+    let list = persisted["agents"]["list"]
+        .as_array()
+        .expect("agents.list array");
+    assert_eq!(list.len(), 2);
+    // Id-only entry round-trips without gaining extra keys.
+    assert_eq!(list[0]["id"].as_str(), Some("main"));
+    assert!(list[0].get("default").is_none());
+    // Daemon-owned fields survive the rewrite.
+    assert_eq!(list[1]["default"].as_bool(), Some(true));
+    assert_eq!(list[1]["workspace"].as_str(), Some("/srv/review"));
+    assert_eq!(list[1]["profile_id"].as_str(), Some("fast"));
+    assert_eq!(
+        list[1]["system_prompt"].as_str(),
+        Some("You are a reviewer.")
+    );
+}
+
+/// A config without an `[agents]` section must stay without one after a
+/// TUI rewrite: materializing `[agents] default_agent_id = "main"` with an
+/// empty list makes the daemon bail at startup ("does not exist").
+#[test]
+fn save_does_not_materialize_agents_section() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+"#,
+    )
+    .expect("write config");
+
+    let mut config = Config::load_from(&path).expect("load config");
+    config.llm.model = "gpt-4.1".to_string();
+    config.save_to(&path).expect("save config");
+
+    let persisted: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&path).expect("read persisted config"))
+            .expect("parse persisted config");
+    match persisted.get("agents") {
+        None => {}
+        // An empty `[agents]` header is semantically identical to absent on
+        // both sides; anything beyond that is a materialization bug.
+        Some(agents) => {
+            assert!(agents.get("default_agent_id").is_none());
+            assert!(agents.get("list").is_none());
+        }
+    }
 }
 
 #[test]

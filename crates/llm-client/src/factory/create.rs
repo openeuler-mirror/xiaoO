@@ -37,12 +37,14 @@ pub fn create_llm_provider(
     let api_key = resolve_api_key(config, &profile)?;
 
     create_provider_by_protocol(
-        profile.protocol_family,
-        api_key,
-        api_base,
-        config.model.clone(),
-        &profile,
-        headers,
+        ProviderConnection {
+            protocol: profile.protocol_family,
+            api_key,
+            api_base,
+            model: config.model.clone(),
+            profile: &profile,
+            request_headers: headers,
+        },
         agent_id,
         runtime_view,
     )
@@ -60,27 +62,44 @@ pub fn create_llm_provider_from_resolved(
         .and_then(resolve_provider_profile);
 
     create_provider_by_protocol(
-        config.protocol,
-        config.api_key.clone(),
-        config.base_url.clone(),
-        model,
-        &profile.unwrap_or_else(|| default_profile(config.protocol)),
-        config.request_headers.resolve(Some(config.protocol))?,
+        ProviderConnection {
+            protocol: config.protocol,
+            api_key: config.api_key.clone(),
+            api_base: config.base_url.clone(),
+            model,
+            profile: &profile.unwrap_or_else(|| default_profile(config.protocol)),
+            request_headers: config.request_headers.resolve(Some(config.protocol))?,
+        },
         agent_id,
         runtime_view,
     )
 }
 
-fn create_provider_by_protocol(
+/// `create_provider_by_protocol` 的连接参数集合：收敛参数个数
+/// （clippy::too_many_arguments），身份类参数（`agent_id` /
+/// `runtime_view`）单独传递。
+struct ProviderConnection<'a> {
     protocol: ProtocolFamily,
     api_key: Option<String>,
     api_base: String,
     model: String,
-    profile: &ProviderProfile,
+    profile: &'a ProviderProfile,
     request_headers: reqwest::header::HeaderMap,
+}
+
+fn create_provider_by_protocol(
+    connection: ProviderConnection<'_>,
     agent_id: Option<String>,
     runtime_view: Option<Arc<dyn RuntimeView>>,
 ) -> Result<LlmProviderWrapper, LlmError> {
+    let ProviderConnection {
+        protocol,
+        api_key,
+        api_base,
+        model,
+        profile,
+        request_headers,
+    } = connection;
     // 注册表键先行克隆：各协议分支会消费原始 api_key，限流器则按
     // (api_base, api_key) 归一后共享（见下方 gate_provider 调用）。
     let registry_api_key = api_key.clone();

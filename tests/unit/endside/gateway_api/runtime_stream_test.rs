@@ -1277,3 +1277,36 @@ fn checkpoint_restore_replaces_or_clears_todo_panel_even_after_cancel() {
         }
     }
 }
+
+/// Root-lane routing must be case-insensitive: the TUI lowercases ids
+/// when resolving (`Config::resolve_default_agent_id`) while the daemon
+/// reports the configured id verbatim, so a mixed-case
+/// `[[agents.list]]` id must not fork `is_root_stream_agent` — that
+/// would hide the daemon's root replies inside a phantom subagent lane
+/// (`runtime_stream.rs`).
+#[test]
+fn root_stream_agent_matching_is_case_insensitive() {
+    let (_, mut state) = runtime_and_state();
+    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
+    agent_config.agents.default_agent_id = Some("Review".to_string());
+    agent_config.agents.list = vec![crate::support::config::AgentConfig {
+        id: "Review".to_string(),
+        ..crate::support::config::AgentConfig::default()
+    }];
+
+    // Daemon reports the configured id verbatim ("Review"); the TUI
+    // resolves the lowercased "review" — both spellings are root.
+    assert!(super::is_root_stream_agent(
+        &AgentId("Review".to_string()),
+        &state
+    ));
+    assert!(super::is_root_stream_agent(
+        &AgentId("review".to_string()),
+        &state
+    ));
+    // Anything else is a subagent lane.
+    assert!(!super::is_root_stream_agent(
+        &AgentId("other".to_string()),
+        &state
+    ));
+}

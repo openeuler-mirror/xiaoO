@@ -170,17 +170,45 @@ impl Default for LlmConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// TUI-side mirror of the daemon's `AgentsConfig`
+/// (`apps/serverside/src/daemon_config.rs`). `default_agent_id` is
+/// `Option<String>` so the daemon's standard "unset" spelling — the key
+/// ABSENT — round-trips as `None` and never materializes as
+/// `default_agent_id = "main"` on save (which would either flip the
+/// daemon's root agent or fail its startup validation on an empty list).
+/// An explicit-but-blank `""` is treated as unset here for local-mode
+/// compatibility; the daemon rejects that spelling at startup, so it
+/// cannot fork remote-mode resolution.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentsConfig {
-    #[serde(default = "default_agent_id")]
-    pub default_agent_id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub list: Vec<AgentConfig>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// TUI-side mirror of the daemon's `AgentConfig`
+/// (`apps/serverside/src/daemon_config.rs`). The TUI does not consume
+/// `default`/`workspace`/`profile_id`/`system_prompt`, but they MUST parse
+/// (and round-trip through `save_to`) so the shared config.toml keeps the
+/// daemon's fields intact and both sides resolve the same root agent id:
+/// `resolve_default_agent_id` mirrors the daemon's fallback chain, which
+/// includes the `default = true` entry.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub id: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub default: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -205,15 +233,6 @@ pub struct SubagentRoleConfig {
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub tools: BTreeMap<String, bool>,
-}
-
-impl Default for AgentsConfig {
-    fn default() -> Self {
-        Self {
-            default_agent_id: default_agent_id(),
-            list: Vec::new(),
-        }
-    }
 }
 
 impl Config {
@@ -278,18 +297,56 @@ impl Config {
             .collect()
     }
 
+    /// Mirrors the daemon's fallback chain
+    /// (`DaemonConfig::resolve_agent`, `apps/serverside/src/daemon_config.rs`):
+    /// a non-empty `agents.default_agent_id` → the `default = true` entry →
+    /// the first entry → `"main"`. The unset spelling matters: the daemon
+    /// only walks the chain when the key is ABSENT (`Option<String>`), so
+    /// the TUI must treat an absent key — not a defaulted `"main"` — as
+    /// "walk the chain". Keeping the chains symmetric is load-bearing: in
+    /// remote mode the TUI routes streamed agent events by re-resolving the
+    /// root agent id locally (`is_root_stream_agent`), so any divergence
+    /// hides the daemon's root replies inside a phantom subagent lane.
+    /// A non-empty explicit id is trimmed before use, mirroring the
+    /// daemon's `resolve_agent_by_id` (which trims); whitespace-only
+    /// spellings are treated as unset, like `""`.
     pub fn resolve_default_agent_id(&self) -> String {
-        if !self.agents.default_agent_id.trim().is_empty() {
-            return self.agents.default_agent_id.to_lowercase();
+        if let Some(id) = self
+            .agents
+            .default_agent_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            return id.trim().to_lowercase();
         }
         self.agents
             .list
-            .first()
+            .iter()
+            .find(|agent| agent.default)
+            .or_else(|| self.agents.list.first())
             .map(|agent| agent.id.to_lowercase())
             .unwrap_or_else(|| DEFAULT_AGENT_ID.to_string())
     }
 
+    /// Mirrors the daemon's `validate_agents`
+    /// (`apps/serverside/src/daemon_config.rs`): the resolved default must
+    /// be in `agents.list` (when non-empty), and at most one entry may set
+    /// `default = true`. The second check runs regardless of list size so
+    /// a shared config the daemon would reject at startup fails TUI
+    /// bootstrap too, instead of silently resolving the first `default =
+    /// true` entry.
     pub fn validate_default_agent_id(&self) -> Result<()> {
+        if self
+            .agents
+            .list
+            .iter()
+            .filter(|agent| agent.default)
+            .count()
+            > 1
+        {
+            bail!("only one agents.list item may set default=true");
+        }
+
         let ids = self.list_agent_ids();
         if ids.is_empty() {
             return Ok(());
@@ -501,10 +558,6 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
 
 pub fn init_llm_secrets(config_path: &Path) -> Result<()> {
     xiaoo_shared::llm_secrets::init_llm_secrets(config_path)
-}
-
-fn default_agent_id() -> String {
-    DEFAULT_AGENT_ID.to_string()
 }
 
 fn default_llm_max_tokens() -> u32 {
