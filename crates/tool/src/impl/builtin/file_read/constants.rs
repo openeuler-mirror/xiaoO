@@ -174,3 +174,25 @@ pub const BLOCKED_DEVICE_PATHS: &[&str] = &[
     "/dev/fd/1",
     "/dev/fd/2",
 ];
+
+/// Process-scoped files under `/proc/<pid>/` that must never be readable.
+///
+/// Unlike the device paths above these do not block — they leak. `environ`
+/// carries the daemon's API keys and database credentials, `cmdline` often
+/// carries them as `--api-key=...`, `mem` allows reading *and* writing another
+/// process's memory, and the layout family (`maps`, `smaps`,
+/// `smaps_rollup`, `numa_maps`, `auxv`) exposes where that memory lives and,
+/// via `auxv`, the stack canary and `AT_RANDOM` bytes. Blocking `mem` without
+/// blocking the layout family would leave the first half of the injection
+/// chain wide open. Matched by file name so `/proc/self/...`, `/proc/1/...`
+/// and `/proc/<pid>/task/<tid>/...` are all covered.
+pub const BLOCKED_PROC_FILES: &[&str] = &[
+    "environ",
+    "cmdline",
+    "mem",
+    "maps",
+    "smaps",
+    "smaps_rollup",
+    "numa_maps",
+    "auxv",
+];
