@@ -778,7 +778,9 @@ pub fn apply_snapshot(
     mut snapshot: TuiSessionSnapshot,
 ) -> Option<SessionRecord> {
     state.workspace = snapshot.workspace;
-    state.status_panel.set_workspace(&state.workspace);
+    // A local snapshot belongs to a local session; drop any remote pin.
+    state.remote_workspace_root = None;
+    state.sync_workspace_display();
     state.sync_diff_tracker_workspace();
     state.session_id = snapshot.session_id;
     state.current_snapshot_context = None;

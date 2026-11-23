@@ -850,14 +850,9 @@ impl App {
         }
         if first_token_is_dir_command(trimmed) {
             self.state.chat_state.input.reset();
-            // Remote open/turn requests are always built with
-            // `workspace: None` (`remote_session_open_request_for` /
-            // `remote_turn_request`), and the daemon pins a session's
-            // workspace at open time, rejecting re-binding
-            // (`BootstrapConflict`). Applying the switch locally would only
-            // repaint the status panel while the daemon keeps its own
-            // workspace — so refuse the command instead of pretending it
-            // worked.
+            // Remote workspaces are daemon-bound at open time; a local
+            // switch would only repaint the status panel — refuse instead
+            // of pretending it worked.
             if self.gateway.remote_base_url().is_some() {
                 self.state
                     .chat_state
@@ -872,7 +867,7 @@ impl App {
             match resolve_dir_command(trimmed, &self.state.workspace) {
                 Ok(path) => {
                     self.state.workspace = path;
-                    self.state.status_panel.set_workspace(&self.state.workspace);
+                    self.state.sync_workspace_display();
                     self.state.sync_diff_tracker_workspace();
                     self.state
                         .chat_state
@@ -969,7 +964,11 @@ impl App {
             },
             "close" => {
                 let session_id = self.state.session_id.clone();
-                match self.gateway.close_remote_session(&session_id).await {
+                match self
+                    .gateway
+                    .close_remote_session(&mut self.state, &session_id)
+                    .await
+                {
                     Ok(()) => crate::chat::Message::system(format!(
                         "Remote session closed on daemon: {session_id}"
                     )),

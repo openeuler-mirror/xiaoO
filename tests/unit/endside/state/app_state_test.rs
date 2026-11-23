@@ -708,6 +708,7 @@ impl super::AppState {
             config_path,
             config_identity,
             workspace: workspace.clone(),
+            remote_workspace_root: None,
             model_fetch_session: 0,
             model_fetch_inflight: std::collections::HashSet::new(),
             session_messages: Vec::new(),

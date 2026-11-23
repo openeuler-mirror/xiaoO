@@ -68,7 +68,9 @@ pub use session_runtime::{
     ResolvedSessionRuntime, SessionRuntimeBindings, SessionRuntimeBuildInput,
     SessionRuntimeDescriptor, SessionRuntimeResolveError, SessionRuntimeResolver,
 };
-pub use session_service::{SessionControlPlane, SessionService, SessionServiceError};
+pub use session_service::{
+    SessionControlPlane, SessionService, SessionServiceError, RUNTIME_CONFLICT_KIND,
+};
 pub(crate) use session_service_impl::CoreBackedSessionService;
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError};
 pub use turns::{

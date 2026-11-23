@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use xiaoo_api::chat::AgentId;
@@ -16,7 +17,7 @@ use xiaoo_shared::config_identity::ConfigFileIdentity;
 use xiaoo_shared::daemon_protocol::response::GatewayHealthResponse;
 use xiaoo_shared::gateway::{
     RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
-    RuntimeInteractionRequest, RuntimeOpenRequest, RuntimeTurnRequest,
+    RuntimeInteractionRequest, RuntimeOpenRequest, RuntimeTurnRequest, RUNTIME_CONFLICT_KIND,
 };
 
 // TUI-side HTTP timeouts live in `crate::gateway_api::http_timeouts` so the
@@ -210,6 +211,10 @@ impl GatewayRuntime {
         // New session gets a fresh attach lease; clear any stale takeover
         // flag so the first submission after `/remote <url>` is not rejected.
         state.session_taken_over = false;
+        // The workspace pin belongs to a previous connection's session;
+        // nothing is open yet, so drop it (the pin-less fallback shows the
+        // local cwd).
+        state.remote_workspace_root = None;
         state
             .status_panel
             .set_backend(format!("Remote: {base_url}"));
@@ -292,13 +297,14 @@ impl GatewayRuntime {
         }
         self.remote = None;
         self.remote_session_open = false;
-        // Takeover flag belongs to the abandoned remote session; clear it so
-        // local submissions work after `/remote off`.
+        // Takeover flag and workspace pin belong to the abandoned remote
+        // session; clear both so local mode works after `/remote off`.
         state.session_taken_over = false;
+        state.remote_workspace_root = None;
         state
             .status_panel
             .set_backend(sandbox_display_name(&state.agent_config.operation_backend));
-        state.status_panel.set_workspace(&state.workspace);
+        state.sync_workspace_display();
         state.status_panel.memory_status = self.session_gateway.current_memory_status();
         Ok(())
     }
@@ -359,17 +365,38 @@ impl GatewayRuntime {
         let client_id = self.client_id.clone();
 
         if !self.remote_session_open {
-            let open_request = self.remote_session_open_request(state)?;
-            post_json(
-                &client,
-                &remote,
-                token.as_deref(),
-                "/api/v1/runtimes/open",
-                &open_request,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+            let workspace_hint = remote_open_workspace_hint(state);
+            let hinted = workspace_hint.is_some();
+            let open_request = self.remote_session_open_request(state, workspace_hint)?;
+            let record =
+                match post_open_request(&client, &remote, token.as_deref(), &open_request).await {
+                    Ok(record) => record,
+                    // Retry only when a cwd hint was actually offered: without
+                    // one the request is already restore-shaped, and the 409
+                    // (skills / manifest conflict, or a workspace mismatch
+                    // another client caused) is deterministic — an identical
+                    // re-send would just re-fail after another open timeout.
+                    Err(RemoteOpenError::BootstrapConflict(error)) if hinted => {
+                        // `remote_session_open == false` does not imply a new
+                        // session: a `/sessions` switch whose first open timed
+                        // out also lands here. Retry once with restore
+                        // semantics so the daemon keeps the session's own
+                        // binding instead of rejecting the cwd hint forever.
+                        tracing::warn!(
+                            session_id = %state.session_id,
+                            error = %error,
+                            "workspace-hinted open hit an already-bound session; \
+                             retrying without a workspace hint"
+                        );
+                        let restore_request = self.remote_session_open_request(state, None)?;
+                        post_open_request(&client, &remote, token.as_deref(), &restore_request)
+                            .await
+                            .map_err(|error| error.to_string())?
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
             self.remote_session_open = true;
+            state.bind_remote_workspace(record.runtime.workspace_root);
         }
 
         let turn_request =
@@ -436,7 +463,11 @@ impl GatewayRuntime {
     /// is only cleared on success: on failure the daemon may still hold the
     /// session (and our lease on it), so a subsequent `disconnect_remote`
     /// still needs to detach.
-    pub async fn close_remote_session(&mut self, session_id: &str) -> Result<(), String> {
+    pub async fn close_remote_session(
+        &mut self,
+        state: &mut AppState,
+        session_id: &str,
+    ) -> Result<(), String> {
         let Some(remote) = self.remote.clone() else {
             return Ok(());
         };
@@ -457,6 +488,10 @@ impl GatewayRuntime {
         .await;
         if result.is_ok() {
             self.remote_session_open = false;
+            // The session and its bound workspace are gone; drop the pin
+            // and show the placeholder again.
+            state.remote_workspace_root = None;
+            state.status_panel.set_remote_workspace(&remote.base_url);
         }
         result.map_err(|error| error.to_string())
     }
@@ -582,6 +617,10 @@ impl GatewayRuntime {
     /// intact) so the TUI can restore context after a switch. Sets
     /// `remote_session_open = true` on success.
     ///
+    /// The open request never names a workspace: an existing session keeps
+    /// its daemon-bound root (the client-cwd hint is reserved for the
+    /// new-session open in `start_remote_turn`).
+    ///
     /// On 409 (`SessionAttachedByAnotherClient`) the error string carries a
     /// user-readable hint; the caller decides whether to auto-retry (stale
     /// lease → safe to take over) or surface the error.
@@ -595,37 +634,10 @@ impl GatewayRuntime {
             .ok_or_else(|| "remote backend is not configured".to_string())?;
         let token = resolve_bearer_token(remote.bearer_token_env.as_deref())?;
         let client = self.http_client.clone();
-        let open_request = self.remote_session_open_request(state)?;
-        let url = format!("{}/api/v1/runtimes/open", remote.base_url);
-        let mut request = client.post(url).json(&open_request);
-        if let Some(token) = token.as_ref() {
-            request = request.bearer_auth(token);
-        }
-        // Bound send by 15 s — `open` may involve backend provisioning (e.g.
-        // leasing an e2b sandbox), but must not hang on the OS's 75 s+ TCP
-        // timeout when the daemon is unreachable.
-        let response = match tokio::time::timeout(OPEN_RPC_TIMEOUT, request.send()).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => return Err(format!("remote open failed: {error}")),
-            Err(_) => return Err(format!("remote open timed out after {OPEN_RPC_TIMEOUT:?}")),
-        };
-        let status = response.status();
-        if status == StatusCode::CONFLICT {
-            // Daemon says the session is held by another client. Body shape
-            // matches `map_session_error`'s JSON (`{"error": "<Display>"}`),
-            // which already includes holder/stale info; relay it verbatim.
-            let body = read_response_text_bounded(response).await;
-            let parsed = parse_session_attached_body(&body);
-            return Err(format_remote_attached_error(&parsed));
-        }
-        if !status.is_success() {
-            let body = read_response_text_bounded(response).await;
-            return Err(format!("remote open failed: HTTP {status} {body}"));
-        }
-        let record: crate::gateway::SessionRecord = response
-            .json()
+        let open_request = self.remote_session_open_request(state, None)?;
+        let record = post_open_request(&client, &remote, token.as_deref(), &open_request)
             .await
-            .map_err(|error| format!("failed to parse session record: {error}"))?;
+            .map_err(|error| error.to_string())?;
         self.remote_session_open = true;
         Ok(record)
     }
@@ -686,33 +698,30 @@ impl GatewayRuntime {
         });
     }
 
-    fn remote_session_open_request(&self, state: &AppState) -> Result<RuntimeOpenRequest, String> {
-        Self::remote_session_open_request_for(
-            state,
-            self.remote.as_ref().map(|remote| remote.base_url.clone()),
-            self.client_hostname.clone(),
-        )
-    }
-
-    fn remote_session_open_request_for(
+    /// Build an open request; `workspace` is the hint for a *new* session —
+    /// `None` keeps an existing session's daemon-side binding.
+    fn remote_session_open_request(
+        &self,
         state: &AppState,
-        base_url: Option<String>,
-        client_hostname: Option<String>,
+        workspace: Option<PathBuf>,
     ) -> Result<RuntimeOpenRequest, String> {
         let sender_id = super::runtime_request::resolve_agent_id(None, None, &state.agent_config)?;
         Ok(RuntimeOpenRequest {
             session_id: state.session_id.clone(),
             conversation_id: state.session_id.clone(),
             sender_id,
-            entry: super::runtime_request::tui_entry_context(state, base_url),
+            entry: super::runtime_request::tui_entry_context(
+                state,
+                self.remote.as_ref().map(|remote| remote.base_url.clone()),
+            ),
             channel: None,
             channel_instance_id: None,
             llm: Some(super::runtime_request::remote_llm_config_from_state(state)),
-            workspace: None,
+            workspace,
             skills: None,
             client_id: Some(state.client_id.clone()),
             client_pid: Some(std::process::id()),
-            client_hostname,
+            client_hostname: self.client_hostname.clone(),
         })
     }
 
@@ -749,6 +758,125 @@ impl GatewayRuntime {
             client_id: Some(state.client_id.clone()),
         })
     }
+}
+
+/// Workspace hint a *new* remote session's open request may carry: the
+/// client cwd, so remote tools operate where the user launched the TUI
+/// (matching local mode). Suppressed when the config pins the agent's
+/// workspace (explicit daemon-side intent wins) or the daemon runs the e2b
+/// backend (there the field doubles as the sandbox bootstrap source and
+/// stays unset for now).
+fn remote_open_workspace_hint(state: &AppState) -> Option<PathBuf> {
+    if state.agent_config.daemon_uses_e2b_backend() {
+        return None;
+    }
+    // `.ok()` is fine: `resolve_agent_id` runs again (and propagates its
+    // error) while building the request this hint rides on.
+    let agent_id =
+        super::runtime_request::resolve_agent_id(None, None, &state.agent_config).ok()?;
+    if state.agent_config.agent_workspace_is_pinned(&agent_id) {
+        return None;
+    }
+    // A relative path (the `current_dir()` failure fallback ".") would be
+    // canonicalized to the daemon's own cwd — withhold it.
+    if !state.workspace.is_absolute() {
+        return None;
+    }
+    Some(state.workspace.clone())
+}
+
+/// Discriminates the daemon's workspace/skills re-bind 409 from the
+/// attach-lease 409: a structured `kind` marker when the body has one,
+/// else a text fallback for older daemons. Fails safe to `Attached`
+/// (the error surfaces unchanged either way).
+const BOOTSTRAP_CONFLICT_MARKER: &str = "already bound to workspace";
+
+fn is_bootstrap_conflict_error(body: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str) {
+            return kind == RUNTIME_CONFLICT_KIND;
+        }
+    }
+    body.contains(BOOTSTRAP_CONFLICT_MARKER)
+}
+
+/// Typed open failures; each variant carries the formatted user-readable
+/// message so callers branch on what the daemon said.
+#[derive(Debug)]
+enum RemoteOpenError {
+    /// 409 workspace/skills re-bind rejection; a caller that offered a
+    /// workspace hint may retry once without it.
+    BootstrapConflict(String),
+    /// 409 attach-lease takeover guard — another client holds the session.
+    Attached(String),
+    /// Transport, timeout, non-409 status, or unparsable body.
+    Other(String),
+}
+
+impl std::fmt::Display for RemoteOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BootstrapConflict(message) | Self::Attached(message) | Self::Other(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+/// POST `/api/v1/runtimes/open` and parse the `SessionRecord` reply;
+/// shared by every open entry point so timeout and 409 handling cannot
+/// drift apart.
+async fn post_open_request(
+    client: &reqwest::Client,
+    remote: &RemoteRuntimeConfig,
+    token: Option<&str>,
+    open_request: &RuntimeOpenRequest,
+) -> Result<crate::gateway::SessionRecord, RemoteOpenError> {
+    let url = format!("{}/api/v1/runtimes/open", remote.base_url);
+    let mut request = client.post(url).json(open_request);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    // Bound send by 15 s — `open` may involve backend provisioning (e.g.
+    // leasing an e2b sandbox), but must not hang on the OS's 75 s+ TCP
+    // timeout when the daemon is unreachable.
+    let response = match tokio::time::timeout(OPEN_RPC_TIMEOUT, request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            return Err(RemoteOpenError::Other(format!(
+                "remote open failed: {error}"
+            )))
+        }
+        Err(_) => {
+            return Err(RemoteOpenError::Other(format!(
+                "remote open timed out after {OPEN_RPC_TIMEOUT:?}"
+            )))
+        }
+    };
+    let status = response.status();
+    if status == StatusCode::CONFLICT {
+        let body = read_response_text_bounded(response).await;
+        if is_bootstrap_conflict_error(&body) {
+            return Err(RemoteOpenError::BootstrapConflict(format!(
+                "remote open failed: HTTP {status} {body}"
+            )));
+        }
+        // Attach-lease conflict: relay the parsed holder/stale info.
+        let parsed = parse_session_attached_body(&body);
+        return Err(RemoteOpenError::Attached(format_remote_attached_error(
+            &parsed,
+        )));
+    }
+    if !status.is_success() {
+        let body = read_response_text_bounded(response).await;
+        return Err(RemoteOpenError::Other(format!(
+            "remote open failed: HTTP {status} {body}"
+        )));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| RemoteOpenError::Other(format!("failed to parse session record: {error}")))
 }
 
 async fn run_remote_stream(
