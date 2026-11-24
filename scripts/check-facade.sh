@@ -12,7 +12,8 @@
 #   [APP-USE]    apps 源码零底层 use——不出现 `use <底层 crate>::`
 #   [PUBLISH]    底层 crate 必须 publish=false
 #   [API-FROZEN] xiaoo-api 依赖边与模块结构冻结——path 依赖集与 pub mod 列表
-#                必须与基线精确一致（新增/删除/改名均失败），基线版本头须同步
+#                必须与基线精确一致（新增/删除/改名均失败）；基线条目变化时
+#                须已 bump workspace version（版本升级与基线文件解耦）
 #
 # 退出码：0 通过；1 有违反。违规项逐条打印到 stderr。
 
@@ -204,10 +205,10 @@ done
 # ---- [API-FROZEN] xiaoo-api 依赖边与模块结构冻结 ------------------------------
 # 冻结基线存于 scripts/baselines/*.txt（一处真相源，变更基线时改文件即可）。
 # 1) 当前 path 依赖集、pub mod 列表与基线做双向精确比对：新增、删除、改名都失败。
-# 2) 基线文件头记录 # workspace-version: <version>，必须与根 Cargo.toml 的
-#    [workspace.package].version 一致。
-# 3) 基线条目相对最近一次改动发生变化时，要求 workspace version 已 bump；
-#    git 不可用时跳过第 3 项（前两项仍然生效）。
+# 2) 基线条目相对最近一次改动发生变化时，要求 workspace version 已 bump；
+#    git 不可用时跳过第 2 项（集合比对仍然生效）。
+# 版本号与基线解耦：纯 bump [workspace.package].version 不需要改动基线文件，
+# 基线文件不再携带 workspace-version 标记。
 API_DEPS_BASELINE="$SCRIPT_DIR/baselines/api-deps.txt"
 API_MODS_BASELINE="$SCRIPT_DIR/baselines/api-mods.txt"
 # git 的 pathspec 与 `$ref:path` 需要仓库相对路径；由上面的绝对路径推导，
@@ -237,11 +238,6 @@ workspace_version() {
     ' "${1:-/dev/stdin}"
 }
 
-# 基线文件里的 workspace-version 头。
-baseline_version() {
-    sed -nE 's/^#[[:space:]]*workspace-version:[[:space:]]*([^[:space:]]+).*/\1/p' "$1" | head -n1
-}
-
 # 基线有效条目：去注释/空行，排序去重（与下方精确比对口径一致）。
 baseline_entries() {
     grep -vE '^[[:space:]]*(#|$)' | sort -u || true
@@ -260,21 +256,6 @@ if [ -z "$current_version" ]; then
     exit 1
 fi
 
-deps_baseline_version="$(baseline_version "$API_DEPS_BASELINE")"
-mods_baseline_version="$(baseline_version "$API_MODS_BASELINE")"
-if [ -z "$deps_baseline_version" ] || [ -z "$mods_baseline_version" ]; then
-    log "FAIL [META]: 基线文件缺少 '# workspace-version: <version>' 头"
-    exit 1
-fi
-if [ "$deps_baseline_version" != "$mods_baseline_version" ]; then
-    log "FAIL [API-FROZEN]: 两个基线的 workspace-version 头不一致（$deps_baseline_version vs $mods_baseline_version）"
-    fail=1
-fi
-if [ "$deps_baseline_version" != "$current_version" ] || [ "$mods_baseline_version" != "$current_version" ]; then
-    log "FAIL [API-FROZEN]: 基线 workspace-version ($deps_baseline_version/$mods_baseline_version) 与当前 [workspace.package].version ($current_version) 不一致；版本变化后请同步两个基线文件的头"
-    fail=1
-fi
-
 # 基线条目相对最近一次改动是否变化；变化则要求 workspace version 已 bump。
 version_ref=""
 if command -v git >/dev/null 2>&1 \
@@ -287,7 +268,7 @@ if command -v git >/dev/null 2>&1 \
         version_ref="HEAD^"
     fi
 else
-    log "WARN [API-FROZEN]: 未检测到可用 git，跳过 version bump 校验（集合一致性与版本头仍然校验）"
+    log "WARN [API-FROZEN]: 未检测到可用 git，跳过 version bump 校验（集合一致性仍然校验）"
 fi
 
 if [ -n "$version_ref" ]; then
@@ -304,7 +285,7 @@ if [ -n "$version_ref" ]; then
         if [ -z "$prev_version" ]; then
             log "WARN [API-FROZEN]: 无法从 $version_ref 读取 workspace version，跳过 version bump 校验"
         elif ! version_bumped "$prev_version" "$current_version"; then
-            log "FAIL [API-FROZEN]: 基线条目已变化，但 workspace version 未 bump（$version_ref=$prev_version，当前=$current_version）；请 bump [workspace.package].version 并同步基线头"
+            log "FAIL [API-FROZEN]: 基线条目已变化，但 workspace version 未 bump（$version_ref=$prev_version，当前=$current_version）；请 bump [workspace.package].version"
             fail=1
         fi
     fi
