@@ -3,7 +3,7 @@
 //! This module provides path validation to prevent reading from device files
 //! that could produce infinite output or other problematic behavior.
 
-use super::constants::BLOCKED_DEVICE_PATHS;
+use super::constants::{BLOCKED_DEVICE_PATHS, BLOCKED_PROC_FILES};
 
 /// Checks if a path refers to a blocked device file.
 ///
@@ -14,6 +14,7 @@ use super::constants::BLOCKED_DEVICE_PATHS;
 /// assert!(is_blocked_device_path("/dev/zero"));
 /// assert!(is_blocked_device_path("/dev/urandom"));
 /// assert!(is_blocked_device_path("/proc/self/fd/0"));
+/// assert!(is_blocked_device_path("/proc/self/environ"));
 /// assert!(!is_blocked_device_path("/dev/null")); // /dev/null is safe
 /// assert!(!is_blocked_device_path("/etc/passwd"));
 /// ```
@@ -29,6 +30,14 @@ pub fn is_blocked_device_path(path: &str) -> bool {
             if matches!(fd, "0" | "1" | "2") && is_process_fd_owner(owner) {
                 return true;
             }
+        }
+
+        // Process-scoped files: `/proc/<pid>/environ`, `/proc/self/mem`, and the
+        // per-thread form `/proc/<pid>/task/<tid>/cmdline`. Matched on the last
+        // segment so every owner variant is covered by one rule.
+        let file = rest.rsplit('/').next().unwrap_or("");
+        if BLOCKED_PROC_FILES.contains(&file) {
+            return true;
         }
     }
 
@@ -56,3 +65,7 @@ fn is_process_fd_owner(owner: &str) -> bool {
 fn is_pid(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c.is_ascii_digit())
 }
+
+#[cfg(test)]
+#[path = "../../../../../../tests/unit/tool/impl/builtin/file_read/device_test.rs"]
+mod tests;
