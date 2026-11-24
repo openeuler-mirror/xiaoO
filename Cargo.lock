@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent-contracts"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-types",
  "async-trait",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "agent-llm"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-types",
  "serde_json",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "agent-types"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "cron",
@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "compact"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-llm",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "hook"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-types",
@@ -1775,7 +1775,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "llm-client"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-llm",
@@ -1857,7 +1857,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lsp"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-types",
@@ -1913,7 +1913,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcp"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1949,7 +1949,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memory"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-types",
  "serde",
@@ -2027,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "moirai"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2236,7 +2236,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "operation_backend"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-types",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "process-coordination"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "tokio",
@@ -2475,7 +2475,7 @@ dependencies = [
 
 [[package]]
 name = "prompt"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-llm",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-types",
  "schemars",
@@ -3357,7 +3357,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skill"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-types",
@@ -3494,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "subagent"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-types",
  "async-trait",
@@ -3846,7 +3846,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tool"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-types",
@@ -3971,7 +3971,7 @@ dependencies = [
 
 [[package]]
 name = "trace"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-types",
@@ -4204,7 +4204,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vault"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "hmac",
@@ -4800,7 +4800,7 @@ dependencies = [
 
 [[package]]
 name = "xiaoo-api"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-types",
@@ -4818,7 +4818,7 @@ dependencies = [
 
 [[package]]
 name = "xiaoo-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-contracts",
  "agent-llm",
@@ -4843,7 +4843,7 @@ dependencies = [
 
 [[package]]
 name = "xiaoo-endside"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4875,7 +4875,7 @@ dependencies = [
 
 [[package]]
 name = "xiaoo-serverside"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4915,7 +4915,7 @@ dependencies = [
 
 [[package]]
 name = "xiaoo-shared"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "agent-contracts",
