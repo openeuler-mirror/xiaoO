@@ -235,3 +235,148 @@ fn permission_aware_backend_forwards_create_dir_all_extra() {
     );
     assert!(target.is_dir(), "the recording layer delegated the mkdir");
 }
+
+// ---------------------------------------------------------------------------
+// exec() error path: a failed exec must still dirty the backend.
+//
+// `DirtyTrackedExec::exec` used to `?` the inner result, so any transport
+// error skipped `mark_dirty`. A remote exec can fail *after* the command ran
+// (connection dropped mid-flight, response lost, timeout while the process
+// kept writing), leaving the sandbox mutated while the tracker still reports
+// clean. `checkpoint_backend` then reuses the pre-exec checkpoint, silently
+// discarding those writes.
+// ---------------------------------------------------------------------------
+
+/// Wraps a real backend so `exec` runs the command for real, then reports a
+/// transport failure — the "command ran, the wire lied" case.
+struct ExecFailsAfterRunning {
+    inner: Arc<dyn OperationBackend>,
+    exec: FailingExec,
+}
+
+struct FailingExec {
+    inner: Arc<dyn OperationBackend>,
+}
+
+impl ExecFailsAfterRunning {
+    fn wrap(inner: Arc<dyn OperationBackend>) -> Arc<dyn OperationBackend> {
+        Arc::new(Self {
+            exec: FailingExec {
+                inner: Arc::clone(&inner),
+            },
+            inner,
+        })
+    }
+}
+
+#[async_trait]
+impl OperationExec for FailingExec {
+    fn default_shell(&self) -> Option<&str> {
+        self.inner.exec().default_shell()
+    }
+
+    async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
+        // The command really runs (and may write files) ...
+        self.inner.exec().exec(request).await.ok();
+        // ... but the caller is told the transport failed.
+        Err(OperationError::Transport {
+            message: "connection reset after the command was dispatched".to_string(),
+        })
+    }
+
+    async fn exec_streaming(
+        &self,
+        request: ExecRequest,
+        sink: Arc<dyn LineSink>,
+    ) -> Result<ExecResult, OperationError> {
+        self.inner.exec().exec_streaming(request, sink).await
+    }
+}
+
+#[async_trait]
+impl OperationBackend for ExecFailsAfterRunning {
+    fn backend_id(&self) -> &str {
+        self.inner.backend_id()
+    }
+
+    fn capabilities(&self) -> OperationBackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn paths(&self) -> &dyn OperationPathResolver {
+        self.inner.paths()
+    }
+
+    fn files(&self) -> &dyn OperationFileSystem {
+        self.inner.files()
+    }
+
+    fn search(&self) -> &dyn OperationSearch {
+        self.inner.search()
+    }
+
+    fn exec(&self) -> &dyn OperationExec {
+        &self.exec
+    }
+
+    fn export(&self) -> &dyn OperationExport {
+        self.inner.export()
+    }
+
+    fn attach_interaction(&self, interaction: Arc<dyn InteractionHandle>) {
+        self.inner.attach_interaction(interaction);
+    }
+
+    fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {
+        self.inner.permission_control()
+    }
+
+    async fn shutdown(&self) -> Result<(), OperationError> {
+        self.inner.shutdown().await
+    }
+}
+
+/// A command that ran and wrote a file, but whose result was lost on the wire,
+/// must leave the backend dirty so the next checkpoint cannot reuse a snapshot
+/// taken before the write.
+#[test]
+fn failed_exec_still_dirties_the_backend() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let backend = ExecFailsAfterRunning::wrap(local_backend_in(&workspace));
+    let tracker = Arc::new(BackendDirtyTracker::default());
+    let wrapped = DirtyTrackedOperationBackend::wrap(backend, Arc::clone(&tracker));
+
+    let marker = workspace.join("written-by-a-failed-exec.txt");
+    let error = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(wrapped.exec().exec(ExecRequest {
+            command: format!("printf landed > {}", marker.display()),
+            args: Vec::new(),
+            shell: Some("/bin/sh".to_string()),
+            cwd: Some(BackendPath::from_raw(
+                workspace.to_string_lossy().to_string(),
+            )),
+            timeout_ms: Some(5_000),
+            ..Default::default()
+        }))
+        .expect_err("the injected transport failure must surface");
+    assert!(
+        matches!(error, OperationError::Transport { .. }),
+        "expected a transport error, got {error:?}"
+    );
+
+    assert!(
+        marker.is_file(),
+        "the command must have run and written before the failure was reported"
+    );
+    assert!(
+        tracker.is_dirty(),
+        "a failed exec can still have mutated the backend; keeping the tracker \
+         clean makes checkpoint_backend reuse the pre-exec snapshot"
+    );
+}
