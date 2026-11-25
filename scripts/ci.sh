@@ -48,11 +48,15 @@ for t in cargo rustfmt python3 bash mktemp grep sed awk sort paste tr comm; do
 done
 
 # --- 配置参数 ---
+# Bootstrap into a dedicated file. `/etc/yum.repos.d/openEuler.repo` belongs to
+# the host: truncating it to add our section (as this block used to) removes
+# every repo the developer already had, so one missing tool turns into a
+# machine whose package manager no longer works. A separate file only ever
+# overwrites our own definition.
 REPO_DIR="/etc/yum.repos.d"
-TARGET_REPO_FILE="${REPO_DIR}/openEuler.repo"
-SEARCH_STRING="openEuler-24.03-LTS-SP3"
-NEW_REPO_CONTENT="[openEuler-24.03LTSSP3]
-name=openEuler-24.03LTSSP3
+CI_REPO_FILE="${REPO_DIR}/openEuler-24.03LTSSP3-xiaoo-ci.repo"
+NEW_REPO_CONTENT="[openEuler-24.03LTSSP3-xiaoo-ci]
+name=openEuler-24.03LTSSP3-xiaoo-ci
 baseurl=https://repo.huaweicloud.com/openeuler/openEuler-24.03-LTS-SP3/everything/x86_64/
 enabled=1
 gpgcheck=1
@@ -61,12 +65,12 @@ gpgkey=https://repo.huaweicloud.com/openeuler/openEuler-24.03-LTS-SP3/everything
 if [ "$need_install" -eq 1 ]; then
     printf 'CI: 检测到缺失工具，yum 安装: %s\n' "${DEPS_RPMS[*]}" >&2
     if command -v yum >/dev/null 2>&1; then
-        sudo touch "$TARGET_REPO_FILE"
-        echo "" | sudo tee "$TARGET_REPO_FILE" > /dev/null
-        echo "$NEW_REPO_CONTENT" | sudo tee -a "$TARGET_REPO_FILE" > /dev/null
+        # This file is ours alone, so overwriting it is idempotent and keeps
+        # baseurl/gpgkey changes effective; the host's files are never touched.
+        printf '%s\n' "$NEW_REPO_CONTENT" | sudo tee "$CI_REPO_FILE" > /dev/null
         yum clean all
         yum makecache
-        sudo yum '--disablerepo=*' --enablerepo=openEuler-24.03LTSSP3 install -y "${DEPS_RPMS[@]}" >&2 || true
+        sudo yum '--disablerepo=*' --enablerepo=openEuler-24.03LTSSP3-xiaoo-ci install -y "${DEPS_RPMS[@]}" >&2 || true
     else
         printf 'CI: 警告：未找到 yum，跳过自动安装；缺失工具将由后续预检查报错\n' >&2
     fi
