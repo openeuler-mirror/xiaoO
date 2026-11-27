@@ -151,20 +151,136 @@ is absent from `allowed_agent_roles` deliberately skips recall and ingest.
 | `provider`, `model`, `api_key_env`, `api_base`, `kvcache_enabled`, `kvcache_debug_enabled` | ✅ | ✅ | ✅ |
 | `max_tokens` | ❌ | ✅ | ✅ |
 | `reasoning_effort` | ❌ | ✅ | ✅ (per-request HTTP field) |
-| `profiles`, `active_profile`, `context_window` | ❌ | ❌ | ✅ |
-| `rate_limit` | ❌ | ❌ | ✅ |
+| `profiles`, `active_profile`, `context_window` | ❌ | 🔄 (round-tripped, not consumed) | ✅ |
+| `models` (`[[llm.models]]` array) | ✅ | ✅ | ✅ |
+| `rate_limit` | ❌ | 🔄 (round-tripped, not consumed) | ✅ |
+
+> 🔄 = the TUI does not read the key, but a TUI rewrite of config.toml
+> (e.g. a `/connect` provider switch) re-serializes it verbatim instead of
+> dropping it, so a shared CLI/TUI/daemon config keeps working.
+
+### Ordered Model Entries: `[[llm.models]]` (CLI ✅ | TUI ✅ | Daemon ✅)
+
+The array form configures **multiple** model connections in file order.
+The **first entry (index 0) is the active one** — "first-wins" — and the
+remaining entries stay dormant in the config, reserved for a future TUI
+`/models` switch command (not implemented yet).
+
+```toml
+# ~/.config/xiaoo/config.toml
+
+[[llm.models]]                          # ← the first entry is active
+provider = "zai"
+model = "glm-5"
+api_key_env = "ZHIPU_API_KEY"           # keys still come from env / vault
+api_base = "https://open.bigmodel.cn/api/paas/v4"   # optional, provider default when omitted
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[[llm.models]]
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_base = "https://example.com/compatible-mode/v1"
+api_key_env = "QWEN_API_KEY"
+
+# Optional: custom gateway headers, attached to the MOST RECENT entry
+# [llm.models.request_header]
+# X-Gateway-Auth = "alpha"
+```
+
+Entry fields (`provider`, `model` required; `api_base`, `api_key_env`,
+`request_header` / `request_header_env` optional — semantics identical to
+the flat section, scoped to that entry). **Unknown keys are hard parse
+errors**: an entry carries connection identity only, so a misplaced key
+(e.g. `context_window`, which stays section-level) fails at load with an
+"unknown field" error instead of being silently ignored.
+
+**Mutual exclusion (hard error).** The array form cannot coexist with the
+flat connection keys (`llm.provider`, `llm.model`, `llm.api_key_env`,
+`llm.api_base`, `llm.request_header` / `llm.request_header_env`), nor with
+a non-empty `llm.profiles` table or a declared, non-blank
+`llm.active_profile` (rejected by all three frontends; an empty
+`[llm.profiles]` table and a blank `active_profile` read as unset, the
+same blank-after-trim rule as the flat keys).
+Mixed configurations fail at startup / `config validate` with an error
+naming the conflicting keys, never a silent precedence. Within an entry a
+missing or blank `provider` / `model` — in any entry, not only the first —
+is also a hard error at load, as is a `provider` name that does not
+resolve to a known provider (dormant entries included — the typo fails
+the whole config load instead of the first request through that entry),
+as are structurally invalid entry header
+tables (a non-OpenAI-compatible provider with custom headers, a reserved
+or duplicate header name, `request_header` next to `request_header_env`).
+A declared but empty `models = []` with no
+form to fall back to is likewise a hard error (an empty array next to
+usable flat keys, a non-empty `[llm.profiles]` table or a declared
+`llm.active_profile` is a no-op).
+
+**Section-level globals.** `max_tokens`, `reasoning_effort`,
+`kvcache_*`, `context_window` and `[llm.rate_limit]` remain section-global
+and apply to every entry; they do not switch with the entry.
+
+**Behavioral details.**
+
+- After load, entry 0's connection fields are normalized into the flat
+  positions internally, so all downstream consumers (status bar, context
+  probing, HTTP forwarding) behave exactly like the flat form.
+- The TUI's `/connect` dialog persists through **match-or-insert** rules:
+  an entry equivalent to the selection (provider case-insensitive, model
+  exact — model ids are case-sensitive; `api_base` equal after
+  default-resolution and trailing-slash normalization; `api_key_env`
+  equal after default-env resolution) is **promoted to index 0
+  untouched** (headers included),
+  while a new selection is **inserted at index 0** — inheriting the
+  previous entry-0 request headers only when the endpoint is unchanged.
+  The remaining entries keep their relative order, and the file stays in
+  pure array form. A flat-form config is converted to the array form the
+  same way (same selection → one entry; switch → new entry 0 plus the
+  flat history at 1) — unless the daemon-owned `llm.profiles` /
+  `llm.active_profile` keys are present, in which case the flat form is
+  kept (the daemon rejects the array next to profiles).
+- API keys are still resolved by `api_key_env` name; the
+  `llm_secrets.json` vault already stores multiple keys per env name, so
+  no migration is needed. The first-run env auto-save covers every
+  declared `api_key_env` (flat key, `[[llm.models]]` entries and
+  `[llm.profiles.*]` profiles alike).
+- TUI rewrites of config.toml round-trip the daemon-owned `[llm]` keys
+  (`context_window`, `[llm.rate_limit]`, `profiles`, `active_profile`)
+  verbatim instead of dropping them.
+- **One-way migration, plan for downgrade.** The first `/connect` after
+  upgrading converts a flat-form config.toml to the array form **in
+  place**: the flat connection keys are removed and only `[[llm.models]]`
+  is written. This is by design and not undone automatically — older
+  xiaoo versions cannot read the array form (they ignore the unknown
+  `models` key and then fail on the missing `[llm].provider`). If you
+  may need to roll back to an older version, copy config.toml before the
+  first `/connect`; to restore the flat form by hand, replace the
+  `[[llm.models]]` entries with one `[llm]` block built from entry 0.
+
+**Choosing between `models` and `profiles` (daemon).** Both express
+multiple models. Use `[[llm.models]]` for the ordered, first-wins form
+shared by all three frontends (and the future `/models` switch); keep
+`[llm.profiles]` for named per-request selection via `llm.profile_id`.
+Do not mix them. In the TUI, a config carrying `llm.profiles` /
+`llm.active_profile` keeps its flat form across `/connect` rewrites (see
+the behavioral details above).
 
 ### Native Model Profiles (Daemon only)
 
 > ⚠️ **Daemon-only**: `[llm.profiles.*]`, `llm.active_profile`, and
-> `llm.context_window` are read **only by the daemon**
-> (`apps/serverside/src/daemon_config.rs`). The CLI `[llm]` struct has
-> exactly six fields (`apps/endside/src/cli/config.rs`) and the TUI
-> `LlmConfig` has no profile or `context_window` field
-> (`apps/endside/src/support/config.rs`). In CLI and TUI these keys are
-> **silently ignored** — no error, no warning (see the unknown-keys warning
-> above). A CLI/TUI user who sets `active_profile` gets the `provider`/`model`
-> values instead, with no diagnostic.
+> `llm.context_window` are **consumed** only by the daemon
+> (`apps/serverside/src/daemon_config.rs`). The CLI `[llm]` struct
+> (`apps/endside/src/cli/config.rs`) has no profile or `context_window`
+> fields — the profile keys are silently ignored there (except next to a
+> non-empty `[[llm.models]]` array, where the mix is a hard error like in
+> the TUI and the daemon). The TUI parses
+> these keys only to round-trip them through its config.toml rewrites —
+> `/connect` never strips them — but never applies them: a TUI user who
+> sets `active_profile` still gets the `provider`/`model` values, with
+> no diagnostic.
 
 Use native profiles when more than one model is required. `active_profile`
 selects the startup/default profile; disabled profiles remain in the file but

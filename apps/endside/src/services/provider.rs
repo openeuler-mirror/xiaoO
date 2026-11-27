@@ -2,11 +2,12 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 use std::sync::Arc;
+use xiaoo_api::llm::LlmModelEntry;
 use xiaoo_shared::config_identity::ConfigFileIdentity;
 
 use crate::app_state::AppState;
 use crate::chat::ModelInfo;
-use crate::config::{save_llm_secret, Config};
+use crate::config::{non_empty_trimmed, save_llm_secret, Config};
 use crate::gateway::llm_assembly::{
     list_llm_models, LlmAssemblyError, LlmAssemblyInput, LlmModelSummary,
 };
@@ -14,6 +15,8 @@ use crate::provider_defaults::{
     api_key_env_for_provider, default_api_base_for_provider, default_api_key_env_for_provider,
 };
 
+/// `/connect` prefills: the flat fields when `provider` is active, its
+/// first `[[llm.models]]` entry, or the provider defaults.
 pub fn persisted_selection_settings(config: &Config, provider: &str) -> (Option<String>, String) {
     let default_api_key_env = default_api_key_env_for_provider(provider);
     let default_api_base = default_api_base_for_provider(provider);
@@ -25,22 +28,22 @@ pub fn persisted_selection_settings(config: &Config, provider: &str) -> (Option<
         } else {
             config.llm.api_base.clone()
         };
-        (api_key_env, api_base)
-    } else {
-        (default_api_key_env, default_api_base)
+        return (api_key_env, api_base);
     }
-}
-
-fn effective_api_base<'a>(provider: &str, api_base: &'a str) -> &'a str {
-    let api_base = api_base.trim();
-    let api_base = if api_base.is_empty() {
-        xiaoo_api::llm::resolve_provider_profile(provider)
-            .and_then(|profile| profile.default_base_url)
-            .unwrap_or_default()
-    } else {
-        api_base
-    };
-    api_base.trim_end_matches('/')
+    if let Some(entry) = config
+        .llm
+        .models
+        .iter()
+        .find(|entry| entry.provider.trim().eq_ignore_ascii_case(provider.trim()))
+    {
+        let api_key_env = entry.api_key_env.clone().or(default_api_key_env);
+        let api_base = match entry.api_base.as_deref().map(str::trim) {
+            Some(base) if !base.is_empty() => base.to_string(),
+            _ => default_api_base,
+        };
+        return (api_key_env, api_base);
+    }
+    (default_api_key_env, default_api_base)
 }
 
 pub fn persist_active_provider_selection(
@@ -60,18 +63,48 @@ fn persist_active_provider_selection_internal(
     api_key_env: Option<String>,
     api_base: String,
 ) {
-    let mut cfg = Config::load_from(&state.config_path).unwrap_or_default();
-    if !cfg.llm.provider.eq_ignore_ascii_case(&provider)
-        || effective_api_base(&cfg.llm.provider, &cfg.llm.api_base)
-            != effective_api_base(&provider, &api_base)
-    {
-        cfg.llm.request_headers = Default::default();
+    // Hold the config lock across load→mutate→save; the save then goes
+    // through `save_to_locked` (a nested `flock` would self-deadlock),
+    // falling back to `save_to` when the lock is unavailable.
+    let config_lock = match xiaoo_shared::config_lock::ConfigFileLock::acquire(&state.config_path) {
+        Ok(lock) => Some(lock),
+        Err(error) => {
+            tracing::warn!(
+                "proceeding without the config lock for {}: {error:#}",
+                state.config_path.display()
+            );
+            None
+        }
+    };
+    let mut cfg = if !state.config_path.exists() {
+        Config::default()
+    } else {
+        match Config::load_from(&state.config_path) {
+            Ok(cfg) => cfg,
+            Err(error) => {
+                // A broken file must not be rewritten from the default.
+                tracing::warn!(
+                    "skipping config rewrite — failed to load {}: {error:#}",
+                    state.config_path.display()
+                );
+                apply_runtime_only_selection(state, &provider, &model, api_key_env, &api_base);
+                return;
+            }
+        }
+    };
+    cfg.llm
+        .apply_active_selection(&provider, &model, api_key_env.clone(), &api_base);
+    if let Err(error) = LlmModelEntry::validate_entries(&cfg.llm.models) {
+        tracing::warn!("skipping config rewrite — invalid [[llm.models]] selection: {error}");
+        apply_runtime_only_selection(state, &provider, &model, api_key_env, &api_base);
+        return;
     }
-    cfg.llm.provider = provider.clone();
-    cfg.llm.model = model.clone();
-    cfg.llm.api_key_env = api_key_env.clone();
-    cfg.llm.api_base = api_base.clone();
-    match cfg.save_to(&state.config_path) {
+    let save_result = if config_lock.is_some() {
+        cfg.save_to_locked(&state.config_path)
+    } else {
+        cfg.save_to(&state.config_path)
+    };
+    match save_result {
         Ok(content) => {
             // Keep the snapshot in step with the rewrite, else /remote
             // compares the pre-switch digest.
@@ -82,15 +115,25 @@ fn persist_active_provider_selection_internal(
         }
         Err(error) => tracing::warn!("Failed to save config: {}", error),
     }
-
     let agent_config = Arc::make_mut(&mut state.agent_config);
-    agent_config.llm.request_headers = cfg.llm.request_headers;
-    agent_config.llm.provider = provider.clone();
-    agent_config.llm.model = model.clone();
-    agent_config.llm.api_key_env = api_key_env;
-    agent_config.llm.api_base = api_base;
+    agent_config.llm = cfg.llm.clone();
+    state
+        .status_panel
+        .set_provider(&cfg.llm.provider, &cfg.llm.model);
+}
 
-    state.status_panel.set_provider(&provider, &model);
+fn apply_runtime_only_selection(
+    state: &mut AppState,
+    provider: &str,
+    model: &str,
+    api_key_env: Option<String>,
+    api_base: &str,
+) {
+    let agent_config = Arc::make_mut(&mut state.agent_config);
+    agent_config
+        .llm
+        .apply_active_selection(provider, model, api_key_env, api_base);
+    state.status_panel.set_provider(provider, model);
 }
 
 pub fn validate_and_connect_api_key(
@@ -348,17 +391,12 @@ pub struct ProviderModelFetchOutcome {
     pub result: Result<Vec<ModelInfo>, ModelFetchError>,
 }
 
-/// Derive fetch parameters from the TUI config.
+/// Derive fetch parameters from the TUI config, reusing
+/// `persisted_selection_settings` — exactly the settings applied when
+/// the user presses Enter on the provider.
 ///
-/// Reuses `persisted_selection_settings`: when the target provider is the
-/// active one, the config's `api_base` / `api_key_env` apply (empty strings
-/// fall back to the default table), otherwise that provider's defaults —
-/// exactly the settings applied when the user presses Enter on it.
-///
-/// `api_key` is read from the environment variable named by `api_key_env`:
-/// the TUI already called `inject_llm_secrets_into_env` at startup and the
-/// API-key dialog also `set_var`s, so keys stored in the secret store are
-/// visible here.
+/// `api_key` comes from the env var named by `api_key_env` (already
+/// injected at startup or set by the API-key dialog).
 pub fn model_fetch_request(config: &Config, provider: &str) -> ProviderModelFetchRequest {
     let (api_key_env, api_base) = persisted_selection_settings(config, provider);
     let api_key = api_key_env
@@ -440,7 +478,7 @@ pub async fn fetch_provider_models(
         request_headers: Default::default(),
         provider: provider.clone(),
         model: String::new(),
-        api_base: non_empty(api_base),
+        api_base: non_empty_trimmed(&api_base),
         api_key,
         api_key_env,
         context_window_override: None,
@@ -690,17 +728,6 @@ fn map_model_fetch_error(error: LlmAssemblyError) -> ModelFetchError {
         }
         LlmAssemblyError::ModelCatalogUnsupported(_) => ModelFetchError::Unsupported,
         other => ModelFetchError::Failed(sanitize_external_message(&other.to_string())),
-    }
-}
-
-/// Empty / all-whitespace → `None`, letting the facade fall back to the
-/// provider profile's default base_url.
-fn non_empty(value: String) -> Option<String> {
-    let trimmed = value.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
     }
 }
 
