@@ -196,9 +196,16 @@ impl OperationExec for DirtyTrackedExec {
     }
 
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
-        let result = self.inner.exec().exec(request).await?;
+        // Mark dirty *before* awaiting the inner call. Once the request is
+        // dispatched the command can write files even when the call later
+        // fails (connection dropped, response lost, timeout) or when this
+        // future is cancelled mid-flight — neither path would reach a
+        // `mark_dirty` placed after the `await`. Reporting clean in those
+        // cases lets `checkpoint_backend` reuse the snapshot taken before the
+        // write and silently discard it. Over-reporting costs one extra
+        // checkpoint; under-reporting loses data.
         self.tracker.mark_dirty();
-        Ok(result)
+        self.inner.exec().exec(request).await
     }
 
     async fn exec_streaming(
