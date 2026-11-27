@@ -13,6 +13,7 @@ CLI is the simplest running mode, supporting all common configuration items, but
 | Configuration | CLI Support | Description |
 |--------|---------|------|
 | `[llm]` | ✅ | LLM provider configuration (`profiles`/`active_profile`/`context_window` are daemon-only) |
+| `[[llm.models]]` | ✅ | Ordered multi-model entries; the **first entry** is active (first-wins). Mutually exclusive with the flat `[llm]` connection keys and with `profiles`/`active_profile` — mixing them aborts the run with a hard error |
 | `[subagent]` | ✅ | Predefined subagent roles ⭐ |
 | `[skills]` | ✅ | Skills configuration (dirs/allow_scripts/disabled only) |
 | `[compact]` | ✅ | Context compression configuration |
@@ -77,6 +78,33 @@ default = "all"
 > is rejected by `config validate`.
 
 > Use `--context-window`, `--max-tokens`, and `--reasoning-effort` to configure a local CLI run. The CLI reads these settings from arguments. The daemon supports `llm.profiles`, `llm.active_profile`, and `llm.context_window` in TOML.
+
+### Multiple model connections: `[[llm.models]]`
+
+CLI ✅ — the array form lists several model api+key connections in file
+order; the **first entry is active**, the rest stay dormant:
+
+```toml
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+api_key_env = "ZHIPU_API_KEY"
+api_base = "https://open.bigmodel.cn/api/paas/v4"   # optional
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+```
+
+A malformed entry (missing or blank `provider`/`model`, or a `provider`
+name that is not a known provider — in any entry, dormant ones included)
+or a coexisting flat
+`llm.provider` / `llm.model` / `llm.api_key_env` / `llm.api_base` /
+header table aborts the run with a hard error — the array form never
+silently falls back to the default provider. Command-line flags
+(`--provider` / `--model` / `--api-base` / `--api-key`) still override the
+active entry. See [Configuration File Guide](./config_file_guide.md).
 
 ### Model request headers
 

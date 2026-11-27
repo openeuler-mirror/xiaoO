@@ -5,7 +5,10 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use xiaoo_api::chat::HookerRegistryConfig;
-use xiaoo_api::llm::{RateLimitSection, RequestHeadersConfig};
+use xiaoo_api::llm::{
+    FlatLlmConnection, FlatLlmConnectionTarget, LlmModelEntry, RateLimitSection,
+    RequestHeadersConfig,
+};
 use xiaoo_shared::gateway::MemoryAutomationConfig;
 use xiaoo_shared::mcp_support::{self, McpSection};
 pub use xiaoo_shared::skills_support::SkillsSection;
@@ -18,6 +21,9 @@ pub struct FileConfig {
     pub llm: Option<LlmSection>,
     #[serde(skip)]
     pub request_headers_error: Option<String>,
+    /// Deferred hard error for a malformed or conflicting models array.
+    #[serde(skip)]
+    pub llm_models_error: Option<String>,
     pub compact: Option<CompactSection>,
     pub skills: Option<SkillsSection>,
     #[serde(default)]
@@ -42,8 +48,28 @@ pub struct LlmSection {
     pub kvcache_enabled: Option<bool>,
     pub kvcache_debug_enabled: Option<bool>,
     pub rate_limit: Option<RateLimitSection>,
+    #[serde(default)]
+    pub models: Vec<LlmModelEntry>,
     #[serde(flatten)]
     pub request_headers: RequestHeadersConfig,
+}
+
+impl FlatLlmConnectionTarget for LlmSection {
+    fn set_provider(&mut self, provider: String) {
+        self.provider = Some(provider);
+    }
+    fn set_model(&mut self, model: String) {
+        self.model = Some(model);
+    }
+    fn set_api_base(&mut self, api_base: Option<String>) {
+        self.api_base = api_base;
+    }
+    fn set_api_key_env(&mut self, api_key_env: Option<String>) {
+        self.api_key_env = api_key_env;
+    }
+    fn set_request_headers(&mut self, request_headers: RequestHeadersConfig) {
+        self.request_headers = request_headers;
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -108,7 +134,7 @@ impl FileConfig {
         };
         let root = toml::from_str::<toml::Value>(&content)
             .map_err(|_| format!("invalid TOML in {}", path.display()))?;
-        let llm = parse_optional_section(&root, "llm", path);
+        let mut llm = parse_optional_section(&root, "llm", path);
         // A malformed model header table must fail a model run without
         // discarding the unrelated sections used by other CLI commands.
         let request_headers_error = if llm.is_none() {
@@ -125,12 +151,14 @@ impl FileConfig {
         } else {
             None
         };
+        let llm_models_error = normalize_llm_models_section(&mut llm, &root, path);
         if debug {
             eprintln!("[config] loaded {}", path.display());
         }
         Ok(Self {
             llm,
             request_headers_error,
+            llm_models_error,
             compact: parse_optional_section(&root, "compact", path),
             trace: parse_optional_section(&root, "trace", path),
             skills: parse_optional_section(&root, "skills", path),
@@ -181,6 +209,82 @@ where
             eprintln!("[config] parse error in {} [{}]", path.display(), key);
             None
         }
+    }
+}
+
+/// Activate the `[[llm.models]]` array via the shared rule; a
+/// declared-but-empty array is a no-op while another form can serve.
+fn normalize_llm_models_section(
+    llm: &mut Option<LlmSection>,
+    root: &toml::Value,
+    path: &std::path::Path,
+) -> Option<String> {
+    let llm_table = root.get("llm");
+    match llm {
+        // A `models` key is declared, so no silent fallback is possible.
+        None => llm_table
+            .filter(|llm| llm.get("models").is_some())
+            .map(|llm| llm_section_failure_message(llm, path)),
+        Some(section) => {
+            let declared = llm_table.is_some_and(|raw| raw.get("models").is_some());
+            let flat = flat_from_section(section, llm_table);
+            if section.models.is_empty() && (!declared || has_fallback_form(&flat)) {
+                return None;
+            }
+            match LlmModelEntry::activate_entry(&section.models, &flat) {
+                Ok(entry) => {
+                    entry.copy_into_flat(section);
+                    None
+                }
+                Err(error) => Some(format!("invalid llm config in {}: {error}", path.display())),
+            }
+        }
+    }
+}
+
+/// Flat or profile keys can still serve a declared-but-empty `models = []`.
+fn has_fallback_form(flat: &FlatLlmConnection) -> bool {
+    !flat.conflicting_keys_with_models().is_empty()
+        || flat.profiles_present
+        || flat.active_profile_present
+}
+
+/// Flat snapshot; the profile flags come from the raw table
+/// (`LlmSection` does not parse those keys).
+fn flat_from_section(section: &LlmSection, llm_table: Option<&toml::Value>) -> FlatLlmConnection {
+    let profile_entries = llm_table
+        .and_then(|llm| llm.get("profiles"))
+        .and_then(|profiles| profiles.as_table())
+        .map_or(0, |table| table.len());
+    let active_profile = llm_table
+        .and_then(|llm| llm.get("active_profile"))
+        .and_then(|value| value.as_str());
+    FlatLlmConnection::from_parts(
+        section.provider.clone(),
+        section.model.clone(),
+        section.api_key_env.clone(),
+        section.api_base.clone(),
+        section.request_headers.clone(),
+        profile_entries,
+        active_profile,
+    )
+}
+
+fn llm_section_failure_message(llm_table: &toml::Value, path: &std::path::Path) -> String {
+    let mut section = llm_table.clone();
+    if let Some(table) = section.as_table_mut() {
+        table.remove("models");
+    }
+    match section.try_into::<LlmSection>() {
+        Ok(_) => format!(
+            "invalid [[llm.models]] entries in {}: {}",
+            path.display(),
+            LlmModelEntry::entry_schema_hint()
+        ),
+        Err(_) => format!(
+            "invalid [llm] section in {}: the section failed to parse, and the declared [[llm.models]] array blocks a silent fallback to the default provider",
+            path.display()
+        ),
     }
 }
 

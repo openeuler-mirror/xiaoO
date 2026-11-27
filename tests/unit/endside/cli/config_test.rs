@@ -249,3 +249,150 @@ description = "Reviewer"
         assert!(config.subagent.contains_key("review"));
     }
 }
+
+// ── [[llm.models]] array form ────────────────────────────────────────────────
+
+#[test]
+fn llm_models_first_entry_is_normalized_into_flat_fields() {
+    let config = load_config(
+        r#"
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+api_base = "https://open.bigmodel.cn/api/paas/v4"
+api_key_env = "ZHIPU_API_KEY"
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[compact]
+summary_max_tokens = 128
+"#,
+    );
+
+    let llm = config.llm.expect("llm section should parse");
+    // First-wins: entry 0 fills the flat positions; the array is retained.
+    assert_eq!(llm.provider.as_deref(), Some("zai"));
+    assert_eq!(llm.model.as_deref(), Some("glm-5"));
+    assert_eq!(
+        llm.api_base.as_deref(),
+        Some("https://open.bigmodel.cn/api/paas/v4")
+    );
+    assert_eq!(llm.api_key_env.as_deref(), Some("ZHIPU_API_KEY"));
+    assert_eq!(llm.models.len(), 2);
+    assert_eq!(llm.models[1].provider, "deepseek");
+    assert!(config.llm_models_error.is_none());
+    assert_eq!(config.compact.unwrap().summary_max_tokens, Some(128));
+
+    // Omitted optionals stay unset (no provider-default fill-in).
+    let llm = load_config(
+        r#"
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+"#,
+    )
+    .llm
+    .expect("llm section should parse");
+    assert_eq!(llm.provider.as_deref(), Some("deepseek"));
+    assert_eq!(llm.model.as_deref(), Some("deepseek-chat"));
+    assert_eq!(llm.api_base, None);
+    assert_eq!(llm.api_key_env, None);
+}
+
+#[test]
+fn llm_models_entry_level_request_headers_normalize_to_flat_slot() {
+    let config = load_config(
+        r#"
+[[llm.models]]
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_base = "https://example.com/compatible-mode/v1"
+api_key_env = "QWEN_API_KEY"
+
+[llm.models.request_header]
+X-Gateway-Auth = "alpha"
+"#,
+    );
+
+    let llm = config.llm.expect("llm section should parse");
+    assert_eq!(
+        llm.request_headers
+            .request_header
+            .as_ref()
+            .and_then(|map| map.get("X-Gateway-Auth").map(String::as_str)),
+        Some("alpha")
+    );
+}
+
+#[test]
+fn llm_models_conflicting_with_flat_keys_is_a_hard_error() {
+    let config = load_config(
+        r#"
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+"#,
+    );
+
+    let error = config.llm_models_error.expect("conflict must be reported");
+    assert!(error.contains("mutually exclusive"));
+    assert!(error.contains("llm.provider"));
+    assert!(error.contains("llm.model"));
+}
+
+#[test]
+fn malformed_llm_models_array_is_a_hard_error_not_a_silent_fallback() {
+    // Missing provider; unrelated sections stay usable by other commands.
+    let temp = NamedTempFile::new().unwrap();
+    std::fs::write(
+        temp.path(),
+        r#"
+[[llm.models]]
+model = "glm-5"
+api_key_env = "ZHIPU_API_KEY"
+
+[subagent.review]
+description = "Reviewer"
+"#,
+    )
+    .unwrap();
+
+    let config = FileConfig::try_load_from_path(temp.path(), true).unwrap();
+    assert!(config.llm.is_none());
+    let error = config.llm_models_error.expect("malformed array must error");
+    assert!(error.contains("[[llm.models]]"));
+    assert!(config.subagent.contains_key("review"));
+
+    // A bodyless table header is one entry missing its required keys.
+    let temp = NamedTempFile::new().unwrap();
+    std::fs::write(temp.path(), "\n[[llm.models]]\n").unwrap();
+
+    let config = FileConfig::try_load_from_path(temp.path(), true).unwrap();
+    assert!(config.llm.is_none());
+    assert!(config.llm_models_error.is_some());
+}
+
+#[test]
+fn empty_llm_models_array_keeps_flat_behavior_unchanged() {
+    let config = load_config(
+        r#"
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+models = []
+"#,
+    );
+
+    let llm = config.llm.expect("llm section should parse");
+    assert_eq!(llm.provider.as_deref(), Some("anthropic"));
+    assert_eq!(llm.model.as_deref(), Some("claude-sonnet-4-20250514"));
+    assert!(llm.models.is_empty());
+    assert!(config.llm_models_error.is_none());
+}

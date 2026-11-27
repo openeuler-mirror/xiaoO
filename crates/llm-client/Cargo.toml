@@ -31,3 +31,4 @@ tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 mockito = "1"
 temp-env = "0.3"
+toml.workspace = true
