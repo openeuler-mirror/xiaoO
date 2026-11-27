@@ -51,12 +51,7 @@ fn env_trimmed(name: &str) -> Option<String> {
 }
 
 fn trimmed_non_empty(value: String) -> Option<String> {
-    let trimmed = value.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
+    crate::text_utils::non_blank_trimmed(Some(&value)).map(str::to_string)
 }
 
 #[cfg(test)]

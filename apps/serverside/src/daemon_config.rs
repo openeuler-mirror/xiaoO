@@ -22,6 +22,7 @@ use xiaoo_shared::mcp_support::{
 };
 use xiaoo_shared::skills_support::SkillsConfig;
 pub use xiaoo_shared::skills_support::SkillsSection;
+use xiaoo_shared::toml_errors::locate_toml_error;
 
 const DEFAULT_OUTPUT_TOKENS: usize = 16384;
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.txt");
@@ -484,8 +485,12 @@ impl DaemonConfig {
         let config_path = path.as_ref().to_path_buf();
         let content = fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read config {}", config_path.display()))?;
-        let mut app: AppConfig = toml::from_str(&content).map_err(|_| {
-            anyhow::anyhow!("invalid TOML or config fields in {}", config_path.display())
+        let mut app: AppConfig = toml::from_str(&content).map_err(|error| {
+            anyhow::anyhow!(
+                "invalid TOML or config fields in {}{}",
+                config_path.display(),
+                locate_toml_error(&content, &error)
+            )
         })?;
         app.llm
             .activate_profile(None)
