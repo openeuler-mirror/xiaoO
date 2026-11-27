@@ -44,7 +44,17 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
         Err(error) => return ConfigValidationReport::from_error(config_path, error),
     };
     let mut errors = Vec::new();
-    if config.app.llm.profiles.is_empty() {
+    if !config.app.llm.models.is_empty() {
+        for (index, entry) in config.app.llm.models.iter().enumerate() {
+            validate_profile(
+                &format!("llm.models[{index}]"),
+                &LlmProfileConfig::from_model_entry(entry),
+                config_path,
+                &mut errors,
+                index > 0,
+            );
+        }
+    } else if config.app.llm.profiles.is_empty() {
         validate_profile(
             "llm",
             &LlmProfileConfig {
@@ -62,6 +72,7 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
             },
             config_path,
             &mut errors,
+            false,
         );
     } else {
         for (profile_id, profile) in &config.app.llm.profiles {
@@ -71,6 +82,7 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
                     profile,
                     config_path,
                     &mut errors,
+                    false,
                 );
             }
         }
@@ -268,11 +280,14 @@ fn validate_trace(config: &DaemonConfig, errors: &mut Vec<ConfigValidationIssue>
     }
 }
 
+/// `dormant` marks a non-active models entry: its headers are validated
+/// without reading env vars.
 fn validate_profile(
     path: &str,
     profile: &LlmProfileConfig,
     config_path: &Path,
     errors: &mut Vec<ConfigValidationIssue>,
+    dormant: bool,
 ) {
     if profile.provider.trim().is_empty() {
         push_error(
@@ -318,10 +333,16 @@ fn validate_profile(
         return;
     };
 
-    if let Err(error) = profile
-        .request_headers
-        .validate_for_provider(&profile.provider)
-    {
+    let header_validation = if dormant {
+        profile
+            .request_headers
+            .validate_structure_for_provider(&profile.provider)
+    } else {
+        profile
+            .request_headers
+            .validate_for_provider(&profile.provider)
+    };
+    if let Err(error) = header_validation {
         let field = if profile.request_headers.request_header.is_some() {
             "request_header"
         } else {

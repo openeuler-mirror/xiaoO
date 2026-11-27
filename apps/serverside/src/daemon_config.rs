@@ -11,7 +11,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xiaoo_api::chat::{HookerRegistryConfig, ReasoningEffort};
-use xiaoo_api::llm::{apply_global_settings, RateLimitSection};
+use xiaoo_api::llm::{
+    apply_global_settings, FlatLlmConnection, FlatLlmConnectionTarget, LlmModelEntry,
+    RateLimitSection, RequestHeadersConfig,
+};
 use xiaoo_shared::backend::GatewayBackendConfig;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_shared::cron::{CronExpression, CronJobConfig};
@@ -80,6 +83,9 @@ pub struct LlmConfig {
     pub active_profile: Option<String>,
     #[serde(default)]
     pub profiles: BTreeMap<String, LlmProfileConfig>,
+    /// Ordered `[[llm.models]]` entries; entry 0 is active.
+    #[serde(default)]
+    pub models: Vec<LlmModelEntry>,
     #[serde(default)]
     pub provider: String,
     #[serde(default)]
@@ -105,6 +111,8 @@ pub struct LlmConfig {
     /// [`RateLimitSection`].
     #[serde(default)]
     pub rate_limit: Option<RateLimitSection>,
+    #[serde(skip)]
+    models_normalized: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -131,6 +139,24 @@ pub struct LlmProfileConfig {
     pub kvcache_debug_enabled: Option<bool>,
 }
 
+impl LlmProfileConfig {
+    pub(crate) fn from_model_entry(entry: &LlmModelEntry) -> Self {
+        Self {
+            enabled: true,
+            provider: entry.provider.clone(),
+            api_base: entry.api_base.clone(),
+            api_key_env: entry.api_key_env.clone(),
+            request_headers: entry.request_headers.clone(),
+            model: entry.model.clone(),
+            context_window: None,
+            max_tokens: None,
+            reasoning_effort: Default::default(),
+            kvcache_enabled: None,
+            kvcache_debug_enabled: None,
+        }
+    }
+}
+
 impl LlmConfig {
     pub fn profile(&self, profile_id: &str) -> Result<&LlmProfileConfig> {
         let profile_id = profile_id.trim();
@@ -148,6 +174,16 @@ impl LlmConfig {
     }
 
     pub fn activate_profile(&mut self, requested: Option<&str>) -> Result<Option<String>> {
+        if !self.models.is_empty() {
+            // The array form has no named profiles to select.
+            if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+                bail!(
+                    "profile selection ('{requested}') is not supported in the [[llm.models]] form; reorder the entries or use [llm.profiles] instead"
+                );
+            }
+            return self.activate_first_model_entry();
+        }
+
         if self.profiles.is_empty() {
             if self.provider.trim().is_empty() {
                 bail!("llm.provider is required when llm.profiles is empty");
@@ -182,6 +218,43 @@ impl LlmConfig {
         self.kvcache_debug_enabled = profile.kvcache_debug_enabled;
         self.active_profile = Some(profile_id.clone());
         Ok(Some(profile_id))
+    }
+
+    fn activate_first_model_entry(&mut self) -> Result<Option<String>> {
+        if self.models_normalized {
+            return Ok(None);
+        }
+        let flat = FlatLlmConnection::from_parts(
+            Some(self.provider.clone()),
+            Some(self.model.clone()),
+            self.api_key_env.clone(),
+            self.api_base.clone(),
+            self.request_headers.clone(),
+            self.profiles.len(),
+            self.active_profile.as_deref(),
+        );
+        let entry = LlmModelEntry::activate_entry(&self.models, &flat)?;
+        entry.copy_into_flat(self);
+        self.models_normalized = true;
+        Ok(None)
+    }
+}
+
+impl FlatLlmConnectionTarget for LlmConfig {
+    fn set_provider(&mut self, provider: String) {
+        self.provider = provider;
+    }
+    fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+    fn set_api_base(&mut self, api_base: Option<String>) {
+        self.api_base = api_base;
+    }
+    fn set_api_key_env(&mut self, api_key_env: Option<String>) {
+        self.api_key_env = api_key_env;
+    }
+    fn set_request_headers(&mut self, request_headers: RequestHeadersConfig) {
+        self.request_headers = request_headers;
     }
 }
 
