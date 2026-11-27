@@ -7,12 +7,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 的 console URL 探测与 install.sh 共用同一份逻辑，防止两边漂移。
 source "${SCRIPT_DIR}/plugins/hookers/agent_moss/probe.sh"
 
-# Check if called from project root.
-# `$SCRIPT_DIR/Cargo.toml` is the script's OWN directory and always exists, so it
-# could never catch the case this guard is for. What matters is the working
-# directory: `cargo build` and the plugin installer below both run in `$PWD`.
-if [ ! -f Cargo.toml ]; then
-    echo "Error: build.sh must be run from the project root directory (no Cargo.toml in $PWD)" >&2
+# Workspace members and unrelated Rust projects also have a Cargo.toml.
+if [[ ! . -ef "$SCRIPT_DIR" || ! -f Cargo.toml ]]; then
+    echo "Error: build.sh must be run from the project root directory ($SCRIPT_DIR) with its Cargo.toml present" >&2
     exit 1
 fi
 
