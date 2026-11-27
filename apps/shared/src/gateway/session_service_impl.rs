@@ -1336,20 +1336,22 @@ impl CoreBackedSessionService {
             self.session_store.clone(),
         )
         .await?;
-        if let Err(error) = crate::gateway::finalize_e2b_runtime(
-            &mut resolved,
-            backend_lease.backend(),
-            self.runtime_resolver.skills_listing_limit(),
-        )
-        .await
-        {
-            if is_new_session {
-                self.backend_manager
-                    .release_session(&request.session_id)
-                    .await
-                    .ok();
+        if !self.backend_manager.is_controlled() {
+            if let Err(error) = crate::gateway::finalize_e2b_runtime(
+                &mut resolved,
+                backend_lease.backend(),
+                self.runtime_resolver.skills_listing_limit(),
+            )
+            .await
+            {
+                if is_new_session {
+                    self.backend_manager
+                        .release_session(&request.session_id)
+                        .await
+                        .ok();
+                }
+                return Err(error);
             }
-            return Err(error);
         }
         seed_session.runtime.system_prompt = resolved.descriptor.system_prompt.clone();
         seed_session.runtime.workspace_root = resolved.descriptor.workspace_root.clone();
@@ -1541,20 +1543,22 @@ impl CoreBackedSessionService {
             self.session_store.clone(),
         )
         .await?;
-        if let Err(error) = crate::gateway::finalize_e2b_runtime(
-            &mut resolved,
-            backend_lease.backend(),
-            self.runtime_resolver.skills_listing_limit(),
-        )
-        .await
-        {
-            if is_new_session {
-                self.backend_manager
-                    .release_session(&request.session_id)
-                    .await
-                    .ok();
+        if !self.backend_manager.is_controlled() {
+            if let Err(error) = crate::gateway::finalize_e2b_runtime(
+                &mut resolved,
+                backend_lease.backend(),
+                self.runtime_resolver.skills_listing_limit(),
+            )
+            .await
+            {
+                if is_new_session {
+                    self.backend_manager
+                        .release_session(&request.session_id)
+                        .await
+                        .ok();
+                }
+                return Err(error);
             }
-            return Err(error);
         }
         session.runtime.system_prompt = resolved.descriptor.system_prompt.clone();
         session.runtime.workspace_root = resolved.descriptor.workspace_root.clone();

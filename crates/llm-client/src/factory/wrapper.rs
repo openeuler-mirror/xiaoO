@@ -15,6 +15,7 @@ use agent_types::llm::{
 use async_trait::async_trait;
 use hook::{resolve_hook_point_category, HookPointCategory};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use super::trace::{
     begin_trace_span, effective_request_trace_fields, end_trace_span, error_trace_fields,
@@ -22,6 +23,7 @@ use super::trace::{
     stream_trace_fields, trace_outcome_for_error, update_trace_span, StreamTraceStats,
 };
 
+#[derive(Clone)]
 pub struct LlmProviderWrapper {
     inner: Arc<dyn LlmProvider>,
     /// Present only when hooks are enabled.
@@ -30,6 +32,7 @@ pub struct LlmProviderWrapper {
     trace_redactor: Option<Arc<crate::error::ErrorRedactor>>,
     protocol: Option<ProtocolFamily>,
     output_limit: Option<usize>,
+    completion_cancel: Option<CancellationToken>,
 }
 
 /// Retry-budget profile for a non-streaming completion.
@@ -65,6 +68,7 @@ impl LlmProviderWrapper {
             trace_redactor: None,
             protocol: None,
             output_limit: None,
+            completion_cancel: None,
         }
     }
 
@@ -90,6 +94,16 @@ impl LlmProviderWrapper {
             trace_redactor: self.trace_redactor.clone(),
             protocol: self.protocol,
             output_limit: self.output_limit,
+            completion_cancel: self.completion_cancel.clone(),
+        }
+    }
+
+    /// Bind non-streaming completions, including summary requests and their
+    /// retry waits, to the lifetime of a caller-owned turn.
+    pub fn with_completion_cancel(&self, cancel: CancellationToken) -> Self {
+        Self {
+            completion_cancel: Some(cancel),
+            ..self.clone()
         }
     }
 
@@ -818,10 +832,17 @@ impl LlmProviderWrapper {
 
         let outcome = match (output_validation, call) {
             (Err(error), _) => ScopedCallOutcome::Response(Err(error)),
-            (Ok(()), ScopedCall::Complete { budget }) => ScopedCallOutcome::Response(
-                self.complete_with_retry(effective_request_ref, budget)
-                    .await,
-            ),
+            (Ok(()), ScopedCall::Complete { budget }) => {
+                let completion = self.complete_with_retry(effective_request_ref, budget);
+                match self.completion_cancel.as_ref() {
+                    Some(cancel) => tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => ScopedCallOutcome::Cancelled,
+                        result = completion => ScopedCallOutcome::Response(result),
+                    },
+                    None => ScopedCallOutcome::Response(completion.await),
+                }
+            }
             (Ok(()), ScopedCall::StreamWithCancel { on_chunk, cancel }) => {
                 let traced_on_chunk = |chunk: StreamChunk| {
                     if let Some(stats) = stream_stats.as_ref() {
@@ -927,7 +948,7 @@ impl LlmProviderWrapper {
                             "pre_hook_error": pre_hook_error,
                             "recovered": false,
                             "error_kind": "cancelled",
-                            "error_message": "llm stream cancelled mid-flight",
+                            "error_message": if is_stream { "llm stream cancelled mid-flight" } else { "llm completion cancelled mid-flight" },
                         }),
                         stream_stats
                             .as_ref()

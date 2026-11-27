@@ -12,6 +12,7 @@ name = "xiaoo"
 path = "src/main.rs"
 
 [dependencies]
+agent-client-protocol = { version = "=3.4.0", default-features = false }
 anyhow.workspace = true
 arboard = { workspace = true }
 async-trait.workspace = true
@@ -29,8 +30,8 @@ shellexpand.workspace = true
 # `sync` 显式声明：模型列表拉取用 tokio::sync::mpsc 回传结果。此前
 # tokio::sync 能编译只是靠 workspace 特征联合（xiaoo-api / xiaoo-shared 开了
 # sync），这里不再隐式依赖上游；显式声明也让特性开关变化时不会突然编译失败。
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util.workspace = true
+tokio = { workspace = true, features = ["io-std", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["compat"] }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
@@ -42,11 +43,18 @@ textwrap = "0.16"
 xiaoo-api = { path = "../../crates/xiaoo-api" }            # runtime SDK 门面（冻结面）
 xiaoo-shared = { path = "../shared" }                      # 应用装配门面
 
+[build-dependencies]
+semver = "1"
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["io-util", "process", "test-util"] }
 tempfile.workspace = true
 # 模型列表拉取的 HTTP 级测试：起本地假 `/models` 端点，覆盖成功 / 401 /
 # 空列表 / 缺 key 四条路径。仅测试依赖；外部 crate 不受 check-facade.sh
 # 的 [APP-DEPS] 约束（该检查只比对仓内底层 crate），与既有 tempfile 同理。
 mockito = "1"
 xiaoo-shared = { path = "../shared", features = ["test-support"] }
+
+[[test]]
+name = "acp_stdio"
+path = "../../tests/system/acp/stdio_test.rs"

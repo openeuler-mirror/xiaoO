@@ -275,6 +275,9 @@ The following software is distributed under the Apache License, Version 2.0 (SPD
 | # | Software | Version | Copyright Notice |
 |---|----------|---------|------------------|
 | 15 | [similar](https://crates.io/crates/similar) | 2.7.0 | Copyright (c) 2021-2024 Pierre-Henri Symoneaux |
+| 44 | [agent-client-protocol](https://crates.io/crates/agent-client-protocol/3.4.0) | 3.4.0 | Copyright 2025 Zed Industries, Inc. and contributors |
+| 45 | [agent-client-protocol-derive](https://crates.io/crates/agent-client-protocol-derive/3.4.0) | 3.4.0 | Copyright 2025 Zed Industries, Inc. and contributors |
+| 46 | [agent-client-protocol-schema](https://crates.io/crates/agent-client-protocol-schema/1.12.0) | 1.12.0 | Copyright 2025 Zed Industries, Inc. and contributors |
 
 ---
 
@@ -365,6 +368,9 @@ The following software is distributed under dual licensing — you may choose ei
 | 41 | dirs | v5.0.1 / v6.0.0 | MIT OR Apache-2.0 | https://crates.io/crates/dirs |
 | 42 | async-stream | v0.3.6 | MIT OR Apache-2.0 | https://crates.io/crates/async-stream |
 | 43 | regex-lite | v0.1.9 | MIT OR Apache-2.0 | https://crates.io/crates/regex-lite |
+| 44 | agent-client-protocol | v3.4.0 | Apache-2.0 | https://crates.io/crates/agent-client-protocol/3.4.0 |
+| 45 | agent-client-protocol-derive | v3.4.0 | Apache-2.0 | https://crates.io/crates/agent-client-protocol-derive/3.4.0 |
+| 46 | agent-client-protocol-schema | v1.12.0 | Apache-2.0 | https://crates.io/crates/agent-client-protocol-schema/1.12.0 |
 
 ---
 

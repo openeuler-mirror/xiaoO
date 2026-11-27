@@ -93,7 +93,7 @@ RUN cargo fetch
 # Full source tree (.dockerignore keeps target/, .git/, config.toml out).
 COPY . .
 
-# Build all three binaries. Without buildx cache mounts, target/ is rebuilt
+# Build the application binaries. Without buildx cache mounts, target/ is rebuilt
 # from scratch each docker build — but fetch above ensures deps are already
 # downloaded, so only compilation work remains.
 RUN cargo build --release -p xiaoo-endside -p xiaoo-serverside -p moirai

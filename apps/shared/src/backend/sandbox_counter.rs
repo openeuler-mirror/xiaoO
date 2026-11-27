@@ -213,11 +213,19 @@ pub(crate) fn load_global_max_sandbox_cnt() -> Option<usize> {
 
 pub(crate) struct SandboxCounter {
     storage_path: PathBuf,
-    lock_path: PathBuf,
+    lock_path: Option<PathBuf>,
     max_per_key: usize,
 }
 
 impl SandboxCounter {
+    pub(super) fn disabled() -> Self {
+        Self {
+            storage_path: PathBuf::new(),
+            lock_path: None,
+            max_per_key: 0,
+        }
+    }
+
     /// Construct with an explicit storage directory. The counter and lock
     /// files are derived from `dir`, so callers (notably tests) can isolate
     /// from the shared `~/.xiaoo/` files by pointing at a fresh temporary
@@ -226,7 +234,7 @@ impl SandboxCounter {
         std::fs::create_dir_all(&dir).ok();
         Self {
             storage_path: dir.join("sandbox_counts.json"),
-            lock_path: dir.join("sandbox_counts.lock"),
+            lock_path: Some(dir.join("sandbox_counts.lock")),
             max_per_key,
         }
     }
@@ -421,6 +429,12 @@ impl SandboxCounter {
     }
 
     fn acquire_lock(&self) -> Result<File, SandboxCounterError> {
+        let path = self
+            .lock_path
+            .as_ref()
+            .ok_or_else(|| SandboxCounterError::LockError {
+                message: "shared backend storage is disabled".to_string(),
+            })?;
         let lock_file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -428,7 +442,7 @@ impl SandboxCounter {
             // contents are never read or written — so state the truncate
             // intent explicitly instead of leaving it implied.
             .truncate(false)
-            .open(&self.lock_path)
+            .open(path)
             .map_err(|e| SandboxCounterError::LockError {
                 message: format!("failed to create lock file: {}", e),
             })?;

@@ -81,7 +81,14 @@ impl AppRuntimeFactory {
         existing_tool_manifest: Option<Vec<ToolSpecSnapshot>>,
         operation_backend: Arc<dyn OperationBackend>,
         cancel_token: Option<CancellationToken>,
+        controlled: bool,
     ) -> Result<AppRuntimeAssembly, AppRuntimeFactoryError> {
+        let llm_provider = match cancel_token.as_ref() {
+            Some(cancel) if controlled => {
+                Arc::new(resolved.llm_provider.with_completion_cancel(cancel.clone()))
+            }
+            _ => Arc::clone(&resolved.llm_provider),
+        };
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl);
         // Defense-in-depth: every code path that resolves a session runtime
         // should have already injected a real `ContextManager` (daemon:
@@ -94,7 +101,7 @@ impl AppRuntimeFactory {
         let compression_pipeline: Arc<dyn CompressionPipeline> =
             match resolved.compression_pipeline.clone() {
                 Some(pipeline) => pipeline,
-                None => build_context_manager(None, Arc::clone(&resolved.llm_provider))?,
+                None => build_context_manager(None, Arc::clone(&llm_provider))?,
             };
         let tool_registry: Arc<dyn ToolRegistry> = resolved
             .tool_registry
@@ -108,24 +115,26 @@ impl AppRuntimeFactory {
             CompactionPolicy::from_budget(&resolved.descriptor.token_budget),
         );
         let is_channel_session = session.channel.is_some();
-        let tool_manifest = existing_tool_manifest.unwrap_or_else(|| {
-            snapshot_tool_specs(
-                tool_registry
-                    .filter_for(&resolved.descriptor.agent_id)
-                    .visible_tools()
-                    .into_iter()
-                    .filter(|spec| {
-                        // Hide channel-only tools when not in a channel session.
-                        if !is_channel_session {
-                            let name = spec.name().0.as_str();
-                            if CHANNEL_ONLY_TOOLS.contains(&name) {
-                                return false;
+        let tool_manifest = existing_tool_manifest
+            .filter(|_| !controlled)
+            .unwrap_or_else(|| {
+                snapshot_tool_specs(
+                    tool_registry
+                        .filter_for(&resolved.descriptor.agent_id)
+                        .visible_tools()
+                        .into_iter()
+                        .filter(|spec| {
+                            // Hide channel-only tools when not in a channel session.
+                            if !is_channel_session {
+                                let name = spec.name().0.as_str();
+                                if CHANNEL_ONLY_TOOLS.contains(&name) {
+                                    return false;
+                                }
                             }
-                        }
-                        true
-                    }),
-            )
-        });
+                            true
+                        }),
+                )
+            });
         let visible_tools = tool_specs_from_snapshot(&tool_manifest);
 
         let runtime_view = {
@@ -169,6 +178,7 @@ impl AppRuntimeFactory {
                 ToolStateStoreBuilderImpl::new()
                     .with_config(tool_state_store_config_for_entry_kind(
                         resolved.entry_kind.as_ref(),
+                        controlled,
                     ))
                     .build()?,
                 Box::new(SharedToolEventSink::new(
@@ -192,7 +202,7 @@ impl AppRuntimeFactory {
         };
 
         let mut builder = Runtime::builder()
-            .llm_provider(Arc::clone(&resolved.llm_provider))
+            .llm_provider(llm_provider)
             .compression_pipeline(compression_pipeline)
             .prompt_builder(prompt_builder)
             .system_prompt(resolved.descriptor.system_prompt.clone())
@@ -219,10 +229,16 @@ impl AppRuntimeFactory {
 
 fn tool_state_store_config_for_entry_kind(
     entry_kind: Option<&GatewayEntryKind>,
+    controlled: bool,
 ) -> ToolStateStoreConfig {
-    let backend = match entry_kind {
-        Some(GatewayEntryKind::Tui | GatewayEntryKind::Cli) => "noop",
-        _ => "stdout",
+    let backend = if controlled
+        || matches!(
+            entry_kind,
+            Some(GatewayEntryKind::Tui | GatewayEntryKind::Cli)
+        ) {
+        "noop"
+    } else {
+        "stdout"
     };
 
     ToolStateStoreConfig {

@@ -19,6 +19,7 @@ use xiaoo_api::runtime::{
 };
 
 pub(crate) struct SessionWorkerInput {
+    pub controlled: bool,
     pub runtime_input: SessionRuntimeBuildInput,
     pub resolved_runtime: ResolvedSessionRuntime,
     pub session: SessionRecord,
@@ -124,6 +125,7 @@ impl SessionWorker {
             input.tool_manifest.clone(),
             input.operation_backend.clone(),
             input.cancellation_token.clone(),
+            input.controlled,
         )
         .await?;
         let tool_manifest = assembly.tool_manifest.clone();

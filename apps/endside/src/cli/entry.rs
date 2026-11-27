@@ -207,7 +207,7 @@ where
     let mcp_config_path = args.mcp_config;
 
     if args.version {
-        println!("{}", env!("CARGO_PKG_VERSION"));
+        crate::build_identity::print_version(false);
         std::process::exit(0);
     }
 

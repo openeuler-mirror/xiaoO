@@ -13,6 +13,15 @@ pub(super) async fn lease_session_backend(
     resolved: &ResolvedSessionRuntime,
     session_store: Arc<dyn crate::gateway::SessionStore>,
 ) -> Result<BackendLease, SessionServiceError> {
+    if backend_manager.is_controlled() {
+        return backend_manager
+            .lease_bound_session(&session.session_id)
+            .await
+            .map_err(|_| SessionServiceError::RuntimeBuild {
+                message: "controlled session has no operation backend binding".to_string(),
+            });
+    }
+
     // The freshly leased backend is about to run a turn. Register it as
     // "running" with queue_depth=1 so the shared registry does not treat
     // it as evictable while the turn is in flight. This closes the race
