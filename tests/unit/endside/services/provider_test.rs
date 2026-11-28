@@ -24,15 +24,499 @@ fn persist_active_provider_selection_writes_llm_to_app_config_path() {
     );
 
     let saved = Config::load_from(&config_path).expect("load saved config");
-    assert_eq!(saved.llm.provider, "openai");
-    assert_eq!(saved.llm.model, "gpt-4o");
-    assert_eq!(saved.llm.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
-    assert_eq!(saved.llm.api_base, "https://api.openai.com/v1");
+    // First run: the selection becomes the only entry, in pure array form.
+    assert_eq!(saved.llm.models.len(), 1);
+    assert_eq!(saved.llm.models[0].provider, "openai");
+    assert_eq!(saved.llm.models[0].model, "gpt-4o");
+    assert_eq!(
+        saved.llm.models[0].api_key_env.as_deref(),
+        Some("OPENAI_API_KEY")
+    );
+    assert_eq!(
+        saved.llm.models[0].api_base.as_deref(),
+        Some("https://api.openai.com/v1")
+    );
 }
 
-/// `persisted_selection_settings` decision table: switching to another
-/// provider adopts that provider's defaults; staying on the active
-/// provider preserves the configured key/base (private-gateway setups).
+// ── [[llm.models]] array form: /connect edits the active entry ──────────────
+
+const MODELS_FORM_CONFIG: &str = r#"
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+api_base = "https://open.bigmodel.cn/api/paas/v4"
+api_key_env = "ZHIPU_API_KEY"
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+"#;
+
+/// Custom headers require an OpenAI-compatible provider.
+const MODELS_FORM_WITH_HEADERS_CONFIG: &str = r#"
+[[llm.models]]
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_base = "https://example.com/compatible-mode/v1"
+api_key_env = "QWEN_API_KEY"
+
+[llm.models.request_header]
+X-Gateway-Auth = "alpha"
+"#;
+
+const FLAT_FORM_CONFIG: &str = r#"
+[llm]
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_key_env = "QWEN_API_KEY"
+api_base = "https://example.com/compatible-mode/v1"
+max_tokens = 8192
+
+[llm.request_header]
+X-Gateway-Auth = "alpha"
+"#;
+
+fn state_with_config(content: &str) -> (TempDir, AppState) {
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let config_path = temp_dir.path().join("config.toml");
+    std::fs::write(&config_path, content).expect("write config");
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    let state = AppState::new(config_path, workspace).expect("create app state");
+    (temp_dir, state)
+}
+
+fn models_form_state() -> (TempDir, AppState) {
+    state_with_config(MODELS_FORM_CONFIG)
+}
+
+fn models_form_state_with_headers() -> (TempDir, AppState) {
+    state_with_config(MODELS_FORM_WITH_HEADERS_CONFIG)
+}
+
+/// A new selection is inserted as entry 0; existing entries keep their order.
+#[test]
+fn persist_active_provider_selection_inserts_new_selection_as_entry_zero() {
+    let (_temp_dir, mut state) = models_form_state();
+    let config_path = state.config_path.clone();
+
+    persist_active_provider_selection(
+        &mut state,
+        "openai".to_string(),
+        "gpt-4o".to_string(),
+        Some("OPENAI_API_KEY".to_string()),
+        "https://api.openai.com/v1".to_string(),
+    );
+
+    assert_eq!(state.agent_config.llm.provider, "openai");
+    assert_eq!(state.agent_config.llm.model, "gpt-4o");
+
+    let saved = Config::load_from(&config_path).expect("load saved config");
+    assert_eq!(saved.llm.models.len(), 3);
+    assert_eq!(saved.llm.models[0].provider, "openai");
+    assert_eq!(saved.llm.models[0].model, "gpt-4o");
+    assert_eq!(
+        saved.llm.models[0].api_base.as_deref(),
+        Some("https://api.openai.com/v1")
+    );
+    assert_eq!(
+        saved.llm.models[0].api_key_env.as_deref(),
+        Some("OPENAI_API_KEY")
+    );
+    assert_eq!(saved.llm.models[1].provider, "zai");
+    assert_eq!(saved.llm.models[1].model, "glm-5");
+    assert_eq!(saved.llm.models[2].provider, "deepseek");
+    assert_eq!(
+        saved.llm.models[2].api_key_env.as_deref(),
+        Some("DEEPSEEK_API_KEY")
+    );
+
+    let persisted: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("read"))
+            .expect("parse persisted config");
+    assert!(persisted["llm"].get("provider").is_none());
+    assert!(persisted["llm"].get("model").is_none());
+}
+
+/// A matching entry moves to index 0; spellings are normalized (provider
+/// case, trailing slash, omitted base/env), so no duplicates appear.
+#[test]
+fn matched_entry_moves_to_index_zero_without_duplicates() {
+    {
+        let (_temp_dir, mut state) = models_form_state();
+        let config_path = state.config_path.clone();
+
+        persist_active_provider_selection(
+            &mut state,
+            "deepseek".to_string(),
+            "deepseek-chat".to_string(),
+            Some("DEEPSEEK_API_KEY".to_string()),
+            "https://api.deepseek.com/v1".to_string(),
+        );
+
+        let saved = Config::load_from(&config_path).expect("load saved config");
+        // No duplicate insert: the dormant entry was promoted.
+        assert_eq!(saved.llm.models.len(), 2);
+        assert_eq!(saved.llm.models[0].provider, "deepseek");
+        assert_eq!(saved.llm.models[0].model, "deepseek-chat");
+        assert_eq!(saved.llm.models[1].provider, "zai");
+        assert_eq!(saved.llm.models[1].model, "glm-5");
+    }
+
+    {
+        let (_temp_dir, mut state) = state_with_config(
+            r#"
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+"#,
+        );
+        let config_path = state.config_path.clone();
+
+        persist_active_provider_selection(
+            &mut state,
+            "ZAI".to_string(),
+            "glm-5".to_string(),
+            Some("ZHIPU_API_KEY".to_string()),
+            "https://open.bigmodel.cn/api/paas/v4/".to_string(),
+        );
+
+        let saved = Config::load_from(&config_path).expect("load saved config");
+        assert_eq!(
+            saved.llm.models.len(),
+            2,
+            "the zai entry must match, not duplicate"
+        );
+        assert_eq!(saved.llm.models[0].provider, "zai");
+        assert_eq!(saved.llm.models[0].model, "glm-5");
+        // The matched entry keeps its original spelling.
+        assert_eq!(saved.llm.models[0].api_base, None);
+        assert_eq!(saved.llm.models[0].api_key_env, None);
+        assert_eq!(saved.llm.models[1].provider, "deepseek");
+    }
+}
+
+/// A custom `api_key_env` never matches the provider default env.
+#[test]
+fn custom_key_env_does_not_match_default_env() {
+    let (_temp_dir, mut state) = state_with_config(
+        r#"
+[[llm.models]]
+provider = "openai"
+model = "gpt-4o"
+api_key_env = "CUSTOM_OPENAI_KEY"
+"#,
+    );
+    let config_path = state.config_path.clone();
+
+    persist_active_provider_selection(
+        &mut state,
+        "openai".to_string(),
+        "gpt-4o".to_string(),
+        Some("OPENAI_API_KEY".to_string()),
+        String::new(),
+    );
+
+    let saved = Config::load_from(&config_path).expect("load saved config");
+    assert_eq!(saved.llm.models.len(), 2);
+    assert_eq!(
+        saved.llm.models[0].api_key_env.as_deref(),
+        Some("OPENAI_API_KEY")
+    );
+    assert_eq!(
+        saved.llm.models[1].api_key_env.as_deref(),
+        Some("CUSTOM_OPENAI_KEY")
+    );
+}
+
+/// Headers on insert: inherited on the same endpoint, clean on a different
+/// one; a matched entry moves with its own headers.
+#[test]
+fn models_entry_headers_follow_match_or_insert_policy() {
+    // Same endpoint, different model → inherit.
+    {
+        let (_temp_dir, mut state) = models_form_state_with_headers();
+        let config_path = state.config_path.clone();
+
+        persist_active_provider_selection(
+            &mut state,
+            "openai-compatible".to_string(),
+            "qwen3.7-turbo".to_string(),
+            Some("QWEN_API_KEY".to_string()),
+            "https://example.com/compatible-mode/v1".to_string(),
+        );
+
+        let persisted: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).expect("read"))
+                .expect("parse persisted config");
+        assert_eq!(
+            persisted["llm"]["models"][0]["request_header"]["X-Gateway-Auth"],
+            toml::Value::String("alpha".to_string()),
+            "new entry on the same endpoint inherits the gateway headers"
+        );
+        assert_eq!(
+            persisted["llm"]["models"][1]["request_header"]["X-Gateway-Auth"],
+            toml::Value::String("alpha".to_string())
+        );
+    }
+
+    // Different endpoint → the new entry starts clean.
+    {
+        let (_temp_dir, mut state) = models_form_state_with_headers();
+        let config_path = state.config_path.clone();
+
+        persist_active_provider_selection(
+            &mut state,
+            "deepseek".to_string(),
+            "deepseek-chat".to_string(),
+            Some("DEEPSEEK_API_KEY".to_string()),
+            "https://api.deepseek.com/v1".to_string(),
+        );
+
+        let persisted: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).expect("read"))
+                .expect("parse persisted config");
+        assert!(
+            persisted["llm"]["models"][0]
+                .get("request_header")
+                .is_none(),
+            "new entry on a different endpoint must not inherit headers"
+        );
+        assert_eq!(
+            persisted["llm"]["models"][1]["request_header"]["X-Gateway-Auth"],
+            toml::Value::String("alpha".to_string()),
+            "the displaced active entry keeps its headers"
+        );
+    }
+
+    // A matched dormant entry moves with its own headers.
+    {
+        let (_temp_dir, mut state) = state_with_config(
+            r#"
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+api_key_env = "ZHIPU_API_KEY"
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[llm.models.request_header]
+X-Gateway-Auth = "beta"
+"#,
+        );
+        let config_path = state.config_path.clone();
+
+        persist_active_provider_selection(
+            &mut state,
+            "deepseek".to_string(),
+            "deepseek-chat".to_string(),
+            Some("DEEPSEEK_API_KEY".to_string()),
+            "https://api.deepseek.com/v1".to_string(),
+        );
+
+        let persisted: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).expect("read"))
+                .expect("parse persisted config");
+        assert_eq!(
+            persisted["llm"]["models"][0]["request_header"]["X-Gateway-Auth"],
+            toml::Value::String("beta".to_string()),
+            "the promoted entry carries its own headers"
+        );
+        assert!(
+            persisted["llm"]["models"][1]
+                .get("request_header")
+                .is_none(),
+            "the displaced entry keeps its (absent) headers"
+        );
+    }
+}
+
+// ── Flat→array conversion ───────────────────────────────────────────────────
+
+/// A flat form converts to the array form on /connect: re-selecting the
+/// same connection materializes one entry, switching keeps the flat
+/// history as entry 1.
+#[test]
+fn flat_form_converts_to_array_on_connect() {
+    // Same selection → single entry, section-level keys survive.
+    {
+        let (_temp_dir, mut state) = state_with_config(FLAT_FORM_CONFIG);
+        let config_path = state.config_path.clone();
+
+        persist_active_provider_selection(
+            &mut state,
+            "openai-compatible".to_string(),
+            "qwen3.7-plus".to_string(),
+            Some("QWEN_API_KEY".to_string()),
+            "https://example.com/compatible-mode/v1".to_string(),
+        );
+
+        let saved = Config::load_from(&config_path).expect("load saved config");
+        assert_eq!(saved.llm.models.len(), 1);
+        assert_eq!(saved.llm.models[0].provider, "openai-compatible");
+        assert_eq!(saved.llm.models[0].model, "qwen3.7-plus");
+        assert_eq!(saved.llm.max_tokens, 8192);
+        assert_eq!(
+            saved.llm.models[0]
+                .request_headers
+                .request_header
+                .as_ref()
+                .and_then(|headers| headers.get("X-Gateway-Auth")),
+            Some(&"alpha".to_string())
+        );
+
+        let persisted: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).expect("read"))
+                .expect("parse persisted config");
+        assert!(persisted["llm"].get("provider").is_none());
+        assert!(persisted["llm"].get("model").is_none());
+        assert!(persisted["llm"].get("request_header").is_none());
+        assert_eq!(
+            persisted["llm"]["models"][0]["request_header"]["X-Gateway-Auth"],
+            toml::Value::String("alpha".to_string())
+        );
+    }
+
+    // Switched selection → two entries; the new one (different endpoint)
+    // starts clean, the seeded old one keeps its headers.
+    {
+        let (_temp_dir, mut state) = state_with_config(FLAT_FORM_CONFIG);
+        let config_path = state.config_path.clone();
+
+        persist_active_provider_selection(
+            &mut state,
+            "deepseek".to_string(),
+            "deepseek-chat".to_string(),
+            Some("DEEPSEEK_API_KEY".to_string()),
+            "https://api.deepseek.com/v1".to_string(),
+        );
+
+        let saved = Config::load_from(&config_path).expect("load saved config");
+        assert_eq!(saved.llm.models.len(), 2);
+        assert_eq!(saved.llm.models[0].provider, "deepseek");
+        assert_eq!(saved.llm.models[1].provider, "openai-compatible");
+        assert_eq!(saved.llm.models[1].model, "qwen3.7-plus");
+        assert!(saved.llm.models[0].request_headers.is_empty());
+        assert!(!saved.llm.models[1].request_headers.is_empty());
+    }
+}
+
+/// Daemon-owned `[llm.profiles]` present → /connect keeps the flat form.
+#[test]
+fn profiles_guard_keeps_flat_form() {
+    let (_temp_dir, mut state) = state_with_config(
+        r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+api_base = "https://api.openai.com/v1"
+active_profile = "qwen"
+context_window = 131072
+
+[llm.profiles.qwen]
+enabled = true
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_base = "https://example.com/compatible-mode/v1"
+api_key_env = "QWEN_API_KEY"
+"#,
+    );
+    let config_path = state.config_path.clone();
+
+    persist_active_provider_selection(
+        &mut state,
+        "deepseek".to_string(),
+        "deepseek-chat".to_string(),
+        Some("DEEPSEEK_API_KEY".to_string()),
+        "https://api.deepseek.com/v1".to_string(),
+    );
+
+    let saved = Config::load_from(&config_path).expect("load saved config");
+    assert!(
+        saved.llm.models.is_empty(),
+        "profiles guard: the flat form must be kept, not converted"
+    );
+    assert_eq!(saved.llm.provider, "deepseek");
+    assert_eq!(saved.llm.model, "deepseek-chat");
+    assert_eq!(saved.llm.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+
+    let persisted: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("read"))
+            .expect("parse persisted config");
+    assert_eq!(
+        persisted["llm"]["provider"],
+        toml::Value::String("deepseek".to_string())
+    );
+    assert!(persisted["llm"].get("models").is_none());
+    assert_eq!(
+        persisted["llm"]["profiles"]["qwen"]["model"],
+        toml::Value::String("qwen3.7-plus".to_string())
+    );
+    assert_eq!(
+        persisted["llm"]["active_profile"],
+        toml::Value::String("qwen".to_string())
+    );
+    assert_eq!(
+        persisted["llm"]["context_window"],
+        toml::Value::Integer(131072)
+    );
+}
+
+/// A broken config file stays untouched; only the runtime mirror updates.
+#[test]
+fn broken_config_file_keeps_file_and_updates_runtime_only() {
+    let original = "not = valid toml {{{";
+    let (_temp_dir, mut state) = state_with_config(original);
+    let config_path = state.config_path.clone();
+
+    persist_active_provider_selection(
+        &mut state,
+        "openai".to_string(),
+        "gpt-4o".to_string(),
+        Some("OPENAI_API_KEY".to_string()),
+        "https://api.openai.com/v1".to_string(),
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("read"),
+        original
+    );
+    assert_eq!(state.agent_config.llm.provider, "openai");
+    assert_eq!(state.agent_config.llm.model, "gpt-4o");
+    assert_eq!(state.agent_config.llm.models.len(), 1);
+    assert_eq!(state.agent_config.llm.models[0].model, "gpt-4o");
+}
+
+/// Active provider reads entry 0's key/base; a dormant one its own entry's
+/// env plus the default base.
+#[test]
+fn persisted_selection_settings_reads_normalized_first_entry() {
+    // AppState::new does not load the file; load it like the TUI does.
+    let (_temp_dir, state) = models_form_state();
+    let agent_config = Config::load_from(&state.config_path).expect("load models config");
+
+    let (key_env, base) = persisted_selection_settings(&agent_config, "zai");
+    assert_eq!(key_env.as_deref(), Some("ZHIPU_API_KEY"));
+    assert_eq!(base, "https://open.bigmodel.cn/api/paas/v4");
+
+    let (key_env, base) = persisted_selection_settings(&agent_config, "deepseek");
+    assert_eq!(key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+    assert_eq!(base, "https://api.deepseek.com/v1");
+}
+
+/// `persisted_selection_settings` decision table for a flat-form config
+/// (no `[[llm.models]]` entries): switching to another provider adopts
+/// that provider's defaults; staying on the active provider preserves
+/// the configured key/base (private-gateway setups).
 #[test]
 fn persisted_selection_settings_switch_defaults_or_keep_active_config() {
     // (configured key env, configured base, target, expected key, expected base)

@@ -20,6 +20,69 @@ fn tui_bootstrap_requires_config_file() {
     );
 }
 
+/// A TUI rewrite must not strip the daemon-owned `[llm]` keys.
+#[test]
+fn save_preserves_daemon_owned_llm_section_keys() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+api_base = "https://api.openai.com/v1"
+max_tokens = 16384
+active_profile = "qwen"
+context_window = 131072
+
+[llm.rate_limit]
+rpm = 60
+
+[llm.profiles.qwen]
+enabled = true
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_base = "https://example.com/compatible-mode/v1"
+api_key_env = "QWEN_API_KEY"
+"#,
+    )
+    .expect("write config");
+
+    let mut config = Config::load_from(&path).expect("load config");
+    config.llm.model = "gpt-4.1".to_string();
+    config.save_to(&path).expect("save config");
+
+    let persisted: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&path).expect("read persisted config"))
+            .expect("parse persisted config");
+    assert_eq!(
+        persisted["llm"]["context_window"],
+        toml::Value::Integer(131072)
+    );
+    assert_eq!(
+        persisted["llm"]["rate_limit"]["rpm"],
+        toml::Value::Integer(60)
+    );
+    assert_eq!(
+        persisted["llm"]["profiles"]["qwen"]["model"],
+        toml::Value::String("qwen3.7-plus".to_string())
+    );
+    assert_eq!(
+        persisted["llm"]["profiles"]["qwen"]["api_key_env"],
+        toml::Value::String("QWEN_API_KEY".to_string())
+    );
+    assert_eq!(
+        persisted["llm"]["active_profile"],
+        toml::Value::String("qwen".to_string())
+    );
+    assert_eq!(
+        persisted["llm"]["model"],
+        toml::Value::String("gpt-4.1".to_string())
+    );
+}
+
 #[test]
 fn resolve_context_window_falls_back_to_provider_default() {
     let mut config = valid_config();
@@ -572,4 +635,163 @@ kind = "local"
 
     assert!(!Config::default().daemon_uses_e2b_backend());
     assert!(!Config::default().agent_workspace_is_pinned("main"));
+}
+
+// ── [[llm.models]] array form ────────────────────────────────────────────────
+
+const MODELS_FORM_CONFIG: &str = r#"
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+api_base = "https://open.bigmodel.cn/api/paas/v4"
+api_key_env = "ZHIPU_API_KEY"
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[llm.models.request_header]
+X-Gateway-Auth = "alpha"
+"#;
+
+fn load_tui_config(content: &str) -> Config {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    std::fs::write(&path, content).expect("write config");
+    Config::load_from(&path).expect("load config")
+}
+
+/// Load-time normalization: entry 0 fills the flat positions while the
+/// array stays.
+#[test]
+fn load_normalizes_first_models_entry_into_flat_fields() {
+    let config = load_tui_config(MODELS_FORM_CONFIG);
+
+    assert_eq!(config.llm.provider, "zai");
+    assert_eq!(config.llm.model, "glm-5");
+    assert_eq!(config.llm.api_base, "https://open.bigmodel.cn/api/paas/v4");
+    assert_eq!(config.llm.api_key_env.as_deref(), Some("ZHIPU_API_KEY"));
+    // The entry-level table attaches to the most recent entry (deepseek).
+    assert!(config.llm.request_headers.is_empty());
+    assert_eq!(config.llm.models.len(), 2);
+    assert_eq!(config.llm.models[1].provider, "deepseek");
+    assert!(config.llm.models[0].request_headers.is_empty());
+    assert_eq!(
+        config.llm.models[1]
+            .request_headers
+            .request_header
+            .as_ref()
+            .and_then(|map| map.get("X-Gateway-Auth").map(String::as_str)),
+        Some("alpha")
+    );
+}
+
+/// A mix of array form and flat connection keys is rejected at load.
+#[test]
+fn load_rejects_models_array_mixed_with_flat_connection_keys() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[llm]
+provider = "anthropic"
+
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+"#,
+    )
+    .expect("write config");
+
+    let error = Config::load_from(&path).expect_err("conflict must fail load");
+    assert!(
+        format!("{error:#}").contains("mutually exclusive"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        format!("{error:#}").contains("llm.provider"),
+        "error must name the conflicting key: {error:#}"
+    );
+}
+
+/// `save_to` round-trip: the array survives and no flat connection keys
+/// leak into the file.
+#[test]
+fn save_round_trip_preserves_models_and_omits_flat_connection_fields() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    std::fs::write(&path, MODELS_FORM_CONFIG).expect("write config");
+
+    let mut config = Config::load_from(&path).expect("load config");
+    config.tui.agent_order = vec!["main".to_string()];
+    config.save_to(&path).expect("save config");
+
+    let persisted: toml::Value = toml::from_str(&std::fs::read_to_string(&path).expect("read"))
+        .expect("parse persisted config");
+    let llm = &persisted["llm"];
+    assert!(llm.get("provider").is_none());
+    assert!(llm.get("model").is_none());
+    assert!(llm.get("api_base").is_none());
+    assert!(llm.get("api_key_env").is_none());
+    assert!(llm.get("request_header").is_none());
+    assert!(llm.get("request_header_env").is_none());
+    let models = llm["models"].as_array().expect("models array");
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["provider"].as_str(), Some("zai"));
+    assert_eq!(models[0]["api_key_env"].as_str(), Some("ZHIPU_API_KEY"));
+    assert_eq!(
+        models[1]["request_header"]["X-Gateway-Auth"].as_str(),
+        Some("alpha")
+    );
+    assert_eq!(
+        persisted["tui"]["agent_order"]
+            .as_array()
+            .and_then(|order| order.first())
+            .and_then(toml::Value::as_str),
+        Some("main")
+    );
+    // The file reloads without tripping the conflict rule.
+    let reloaded = Config::load_from(&path).expect("reload config");
+    assert_eq!(reloaded.llm.provider, "zai");
+    assert_eq!(reloaded.llm.models.len(), 2);
+}
+
+/// A normalized models form passes bootstrap; a flat+models mix fails; a
+/// pure array form is normalized by bootstrap itself.
+#[test]
+fn bootstrap_accepts_normalized_models_and_rejects_conflicting_state() {
+    let config = load_tui_config(MODELS_FORM_CONFIG);
+    let bootstrapped = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
+        .expect("models form should bootstrap");
+    assert_eq!(bootstrapped.llm.provider, "zai");
+
+    let mut conflicting = valid_config();
+    conflicting.llm.models = vec![xiaoo_api::llm::LlmModelEntry {
+        provider: "zai".to_string(),
+        model: "glm-5".to_string(),
+        api_base: None,
+        api_key_env: None,
+        request_headers: Default::default(),
+    }];
+    let error = require_tui_bootstrap_config(Some(conflicting), Path::new("/tmp/config.toml"))
+        .expect_err("flat + models mix must fail bootstrap");
+    assert!(
+        format!("{error:#}").contains("mutually exclusive"),
+        "unexpected error: {error:#}"
+    );
+
+    let mut config = Config::default();
+    config.llm.models = vec![xiaoo_api::llm::LlmModelEntry {
+        provider: "deepseek".to_string(),
+        model: "deepseek-chat".to_string(),
+        api_base: None,
+        api_key_env: None,
+        request_headers: Default::default(),
+    }];
+    let bootstrapped = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
+        .expect("pure array form should bootstrap");
+    assert_eq!(bootstrapped.llm.provider, "deepseek");
+    assert_eq!(bootstrapped.llm.model, "deepseek-chat");
 }

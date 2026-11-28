@@ -124,7 +124,7 @@ The complete slash-command set (canonical names, `Tab`-completable):
 | `/remote off` | Disconnect and return to local mode |
 | `/remote close` | Close the current remote session on the daemon |
 | `/sessions [session_id]` | List sessions on the connected daemon in a dialog, or switch directly to `session_id` |
-| `/connect` | Open the provider/model selection dialog; the model list is fetched live from the provider's official model-list endpoint |
+| `/connect` | Open the provider/model selection dialog; the model list is fetched live from the provider's official model-list endpoint; the selection persists through the `[[llm.models]]` match-or-insert rules (see below) |
 | `/new` | Clear the current conversation context and create a new session |
 | `/mcp` | List configured MCP servers |
 | `/skills` | List available skills |
@@ -223,6 +223,58 @@ orchestration `apps/endside/src/app/core.rs` (`start_model_fetch`,
 `page_down` / `select_first` / `select_last`); rendering
 `apps/endside/src/render/overlay.rs` (`render_provider_dialog` writes
 `page_height` and picks the key-hint row variant for the available width).
+
+#### `/connect` persistence (match-or-insert)
+
+Applying a selection rewrites config.toml's `[llm]` connection data in
+`[[llm.models]]` form (`persist_active_provider_selection`,
+`apps/endside/src/services/provider.rs`):
+
+- **Match → promote.** The first entry equivalent to the selection
+  (provider case-insensitive, model exact — model ids are
+  case-sensitive; `api_base` equal after default-resolution and
+  trailing-slash normalization; `api_key_env`
+  equal after default-env resolution — a custom env name never matches
+  the provider default, because a different key means a different
+  connection) is moved to index 0 **untouched**, headers included. The
+  other entries keep their relative order.
+- **No match → insert.** A new entry is built at index 0. It inherits
+  the previous entry-0 request headers only when the endpoint (provider
+  + effective base) is unchanged; headers tied to a different endpoint
+  never leak to the new one.
+- **Flat form converts (one-way).** A config written in the flat form
+  is seeded with one entry built from its flat fields first, then the
+  rules above run against it — re-selecting the same connection yields a
+  single-entry array; switching yields a two-entry array (new entry 0,
+  flat history at 1). Section-level keys (`max_tokens`,
+  `reasoning_effort`, `kvcache_*`) apply to every entry and survive
+  unchanged. The conversion rewrites config.toml in place and is
+  **not undone automatically**: older xiaoo versions cannot read the
+  array form (they fail on the missing `[llm].provider`), so back up
+  config.toml before upgrading if you plan to downgrade — see the
+  [Configuration File Guide](./config_file_guide.md) for the recovery
+  recipe.
+- **Profiles guard.** When the daemon-owned `llm.profiles` /
+  `llm.active_profile` keys are declared (a non-empty profiles table or
+  a non-blank active_profile — empty/blank spellings read as unset), the
+  flat form is kept and only its flat fields are edited — the daemon
+  rejects `[[llm.models]]` coexisting with profiles, so `/connect` must
+  not convert such a file.
+- Non-LLM sections round-trip untouched (unknown top-level sections via
+  the `extra` map, `[[agents.list]]` daemon fields, MCP, TUI settings,
+  …), and the daemon-owned `[llm]` keys (`context_window`,
+  `[llm.rate_limit]`, `profiles`, `active_profile`) are re-serialized
+  verbatim instead of being dropped.
+- A broken config file is never overwritten: only the runtime selection
+  switches, applying the same rules to the in-memory snapshot.
+- The rewrite is crash-safe: the new content lands in a uniquely named
+  hidden sibling temp file first and is renamed into place atomically
+  (concurrent saves in one process each own their temp file, and the
+  swap preserves the file's existing permissions — a `chmod 600`
+  config stays 0600, a fresh file is created 0600), and the whole
+  load→mutate→save cycle runs under a cross-process advisory lock
+  (`.config.toml.lock`), so concurrent cooperating writers cannot lose
+  each other's updates.
 
 ---
 
@@ -557,6 +609,19 @@ api_key_env = "OPENROUTER_API_KEY"
 max_tokens = 128000
 reasoning_effort = "default"
 
+# Alternative: ordered multi-model entries — the FIRST entry is active
+# (mutually exclusive with the flat [llm] connection keys above).
+# [[llm.models]]
+# provider = "zai"
+# model = "glm-5"
+# api_key_env = "ZHIPU_API_KEY"
+# api_base = "https://open.bigmodel.cn/api/paas/v4"
+#
+# [[llm.models]]
+# provider = "deepseek"
+# model = "deepseek-chat"
+# api_key_env = "DEEPSEEK_API_KEY"
+
 # Predefined subagent roles (common configuration)
 # Note: Tools configuration supports two formats. See config_file_guide.md for details.
 [subagent.code_reviewer]
@@ -676,13 +741,31 @@ The TUI argument parser accepts **only** `--config` / `-c`, `--mcp-config`,
 ### Q: What configurations does TUI support?
 
 **A**: TUI supports:
-- ✅ Common configurations it actually parses: llm, subagent, skills, trace, hooker
+- ✅ Common configurations it actually parses: llm (including the
+  `[[llm.models]]` ordered array form), subagent, skills, trace, hooker
 - ❌ `[compact]` — **not read by the TUI**; it is CLI/Daemon only (see the note above)
 - ✅ TUI-specific configurations (`tui`, `tui.remote`, `lsp`, `agent`, `agents`)
 
 The TUI `Config` struct has no `compact` field
 (`apps/endside/src/support/config.rs`), so a `[compact]` section in a
 TUI-parsed file has no effect in local TUI mode.
+
+### Q: How do multiple model connections (`[[llm.models]]`) work in the TUI?
+
+**A**: The **first entry is the active one**; the rest stay dormant for a
+future `/models` switch command. The array form is mutually exclusive with
+the flat `llm.provider` / `llm.model` / `llm.api_key_env` / `llm.api_base` /
+header keys and with the daemon-owned `llm.profiles` / `llm.active_profile`
+— a mixed config fails at startup with a hard error naming the
+conflicting keys (the same mix the daemon rejects). `/connect` persists
+through **match-or-insert** rules: an
+already-present entry is promoted to index 0 untouched, a new selection is
+inserted at index 0 (headers inherited only on an unchanged endpoint), and
+the remaining entries keep their relative order — the file always stays in
+pure array form, never leaking flat connection keys (unless the
+daemon-owned `llm.profiles` guard keeps the flat form). Section-level keys
+(`max_tokens`, `reasoning_effort`, `kvcache_*`) apply to every entry. See
+[Configuration File Guide](./config_file_guide.md).
 
 ### Q: What's the difference between Agent and Subagent?
 
