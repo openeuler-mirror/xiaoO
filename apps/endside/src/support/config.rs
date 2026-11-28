@@ -250,8 +250,14 @@ impl Config {
     pub fn load_from_with_content(path: &Path) -> Result<(Self, String)> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read config file {}", path.display()))?;
-        let config = toml::from_str(&content)
-            .map_err(|_| anyhow::anyhow!("invalid TOML or config fields in {}", path.display()))?;
+        let config: Config = toml::from_str(&content).map_err(|error| {
+            // The raw message may quote secrets; keep the location only.
+            anyhow::anyhow!(
+                "invalid TOML or config fields in {}{}",
+                path.display(),
+                xiaoo_shared::toml_errors::locate_toml_error(&content, &error)
+            )
+        })?;
         Ok((config, content))
     }
 

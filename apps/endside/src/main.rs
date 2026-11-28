@@ -48,6 +48,7 @@ pub(crate) use state::selection;
 pub(crate) use support::config;
 pub(crate) use support::debug_log;
 pub(crate) use support::error_log;
+pub(crate) use support::provider_defaults;
 
 const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 const CLI_SWITCH: &str = "--cli";

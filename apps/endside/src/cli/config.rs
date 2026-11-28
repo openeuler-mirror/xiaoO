@@ -177,6 +177,7 @@ where
     match section.try_into() {
         Ok(value) => Some(value),
         Err(_) => {
+            // The raw error may quote values that carry secrets.
             eprintln!("[config] parse error in {} [{}]", path.display(), key);
             None
         }
