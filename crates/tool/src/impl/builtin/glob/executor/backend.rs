@@ -75,6 +75,7 @@ impl GlobToolExecutor {
         paths: &[BackendPath],
         truncated: bool,
         duration_ms: u64,
+        client: bool,
     ) -> Result<String, String> {
         let filenames: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
         let num_files = filenames.len() as u64;
@@ -94,7 +95,8 @@ impl GlobToolExecutor {
             truncation_note,
         };
 
-        serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {}", e))
+        super::super::super::result_json(&output, client)
+            .map_err(|e| format!("Failed to serialize output: {}", e))
     }
 }
 
@@ -152,8 +154,13 @@ impl ToolExecutor for GlobToolExecutor {
 
         let truncated = result.len() >= GLOB_LIMIT;
 
-        let output = Self::format_output(&result, truncated, duration_ms)
-            .map_err(|message| ToolExecutionError::ExecutionFailed { message })?;
+        let output = Self::format_output(
+            &result,
+            truncated,
+            duration_ms,
+            backend.requires_text_files(),
+        )
+        .map_err(|message| ToolExecutionError::ExecutionFailed { message })?;
 
         Ok(ToolExecutorOutput::Completed {
             raw_outcome: RawToolOutcome::Success { output },

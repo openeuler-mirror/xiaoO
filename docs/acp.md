@@ -1,7 +1,8 @@
-# ACP text sessions
+# ACP sessions
 
 `xiaoo acp` is the xiaoO subcommand for Agent Client Protocol v1 over stdio.
-The controlled text profile uses a configuration provided by the launcher.
+The launcher provides the configuration. The default profile supports text
+conversations. The launcher can enable client-side workspace tools.
 
 ## Start the agent
 
@@ -42,7 +43,8 @@ process lifecycle, snapshots and branching, cleanup, and scheduling.
 
 Call `initialize` before session methods and proceed if the client supports the
 returned `protocolVersion: 1`. Agent capabilities advertise the
-`org.openeuler.xiaoo/acp` extension with mode `controlled-text` and version 1.
+`org.openeuler.xiaoo/acp` extension with version 1 and mode `controlled-text` or
+`controlled-coding`.
 
 | Method | Behavior |
 | --- | --- |
@@ -56,9 +58,8 @@ If the provider restarts or replaces text already queued for delivery, the
 prompt returns an error. Clients should discard the failed prompt's partial
 updates.
 
-The controlled profile has an empty tool registry. All nonempty MCP server
-lists are rejected, including the stdio MCP configuration that general ACP v1
-agents support. File and terminal callbacks, custom system prompts, extra
+Both profiles reject nonempty MCP server lists, including the stdio MCP
+configuration that general ACP v1 agents support. Custom system prompts, extra
 workspace roots, and persistent session loading are unsupported.
 
 Prompt responses carry `_meta["org.openeuler.xiaoo/usage"]` with `version: 1`,
@@ -68,6 +69,67 @@ provider includes it. `complete` indicates observed counts for completed
 requests, `partial` indicates an incomplete observation and `unavailable`
 uses null counts. When a prompt fails, usage is attached to the JSON-RPC
 error as `error.data.usage`.
+
+## Client workspace tools
+
+Omit the `[delegation]` table or use `permission = "deny"` for text mode and
+an empty tool registry. For coding mode, configure the launcher as follows.
+
+```toml
+[delegation]
+permission = "ask"
+exclusive_writer = true
+```
+
+`ask` sends `session/request_permission` for each workspace tool call with
+`allow_once` and `reject_once` options. A rejection or an unanswered request
+fails the call. Use `preauthorized` when the launcher delegates approval
+entirely to a trusted client. The client applies its own policy to every
+callback in both modes. The in-memory tools do not request workspace access.
+
+| Tool | Required client capabilities |
+| --- | --- |
+| `bash`, `glob`, `grep` | `terminal` |
+| `file_read` | `terminal` and `fs.readTextFile` |
+| `file_write`, `file_edit` | `terminal`, `fs.readTextFile`, `fs.writeTextFile`, and launcher setting `exclusive_writer = true` |
+| `todo_write`, `ask_user_question` | Coding mode |
+
+`_org.openeuler.xiaoo/tools/list` accepts `{ "sessionId": "..." }` and
+returns the session's active tool names and sources as
+`{ "tools": [{ "name": "...", "source": "builtin" }] }`.
+Tool progress and todo plans use `session/update`. An actual
+`ask_user_question` call ends the prompt with `interaction_required`.
+Interactive elicitation is unavailable.
+
+The session's absolute `cwd` identifies a logical root in the client's Linux
+workspace. The agent resolves paths lexically and rejects traversal above
+that root. The client owns real-path and symlink validation, filesystem and
+process isolation, per-command permissions, and terminal environment policy.
+The agent does not inherit its own environment into client terminals.
+Workspace calls fail if the corresponding client method is unavailable or
+denied. Workspace and home-directory tool discovery are disabled.
+
+Files use the client's UTF-8 text methods with a 1 MiB content limit. Terminal
+callbacks run Bash and Linux filesystem utilities for commands, stat, directory
+creation and search. Glob filtering uses GNU grep with PCRE support.
+Content search uses ripgrep with a GNU grep fallback when ripgrep
+is unavailable. Multiline searches and file-type filters require ripgrep.
+Truncated terminal output makes a filesystem query or search fail. Bash
+reports the client's combined stream in `stdout` and preserves the client
+truncation flag.
+
+Enable `exclusive_writer` only when the client can enforce exclusive writes
+from validation through the file callback. The protocol supplies no atomic
+overwrite or compare-and-swap operation. A lost write acknowledgement is
+never retried automatically.
+
+On cancellation the agent stops admitting operations for that prompt and
+kills and releases an in-flight terminal. Terminal cleanup and outstanding
+write confirmation have a five-second settlement budget. If the agent cannot
+confirm cleanup or the result of a dispatched mutation, the prompt returns
+`operation_result_unknown` and the session rejects further prompts. The
+client must reconcile its workspace and release resources for the disconnected
+session, including any terminal for which the create response was lost.
 
 ## Build identity
 

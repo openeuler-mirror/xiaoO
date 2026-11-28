@@ -30,6 +30,7 @@ pub(crate) struct LocalExec {
 
 fn spawn_wait_timed_out() -> ExecResult {
     ExecResult {
+        output: Default::default(),
         stdout: Vec::new(),
         stderr: Vec::new(),
         exit_code: None,
@@ -295,6 +296,7 @@ impl OperationExec for LocalExec {
         let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(|e| e.into_inner()));
 
         Ok(ExecResult {
+            output: Default::default(),
             stdout: Vec::new(),
             stderr,
             exit_code,

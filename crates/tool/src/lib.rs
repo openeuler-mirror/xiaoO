@@ -18,7 +18,7 @@ pub use r#impl::reqwest_util;
 pub use r#impl::{checkpoint_todos, open_todo_lines, restore_checkpoint_todos, CheckpointTodoItem};
 pub use r#impl::{
     declarative_tool_catalog, load_tool_sources, load_tool_sources_with_services,
-    render_declarative_tool, test_declarative_tool, DeclarativeToolCatalog,
+    render_declarative_tool, test_declarative_tool, BuiltinToolSource, DeclarativeToolCatalog,
     DeclarativeToolDirectory, DeclarativeToolDraft, DeclarativeToolDraftEffect,
     DeclarativeToolEffect, DeclarativeToolRenderReport, DeclarativeToolSummary,
     DeclarativeToolTestReport, McpToolSource, SubagentRoleConfig, ToolRuntimeServices,

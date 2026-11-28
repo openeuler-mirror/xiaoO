@@ -13,6 +13,7 @@ struct MockExec {
 impl OperationExec for MockExec {
     async fn exec(&self, _request: ExecRequest) -> Result<ExecResult, OperationError> {
         Ok(ExecResult {
+            output: Default::default(),
             stdout: self.stdout.clone(),
             stderr: Vec::new(),
             exit_code: Some(0),

@@ -168,12 +168,15 @@ impl AppRuntimeFactory {
             let interaction_handle: Arc<dyn InteractionHandle> = Arc::new(
                 SharedInteractionHandle::new(resolved.bindings.interaction_handle.clone()),
             );
-            let operation_backend: Arc<dyn OperationBackend> =
+            let operation_backend: Arc<dyn OperationBackend> = if controlled {
+                operation_backend
+            } else {
                 Arc::new(PermissionAwareOperationBackend::new(
                     operation_backend,
                     Arc::clone(&interaction_handle),
                     operation_backend_exec_isolation(resolved.operation_backend.as_ref()),
-                ));
+                ))
+            };
             let inner = BasicRuntimeView::new(
                 ToolStateStoreBuilderImpl::new()
                     .with_config(tool_state_store_config_for_entry_kind(

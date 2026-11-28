@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use agent_contracts::backend::capability::exec::ExecRequest;
+use agent_contracts::backend::capability::exec::{ExecOutput, ExecRequest};
 use agent_contracts::backend::capability::filesystem::{
     TempPathKind, TempPathRequest, WriteBytesRequest, WriteMode,
 };
@@ -64,6 +64,18 @@ impl BashExecutor {
         result: &agent_contracts::backend::capability::exec::ExecResult,
         session: &str,
     ) -> BashOutput {
+        if let ExecOutput::Combined { truncated } = result.output {
+            let mut stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+            let display_truncated = truncate_client_stdout(&mut stdout);
+            return BashOutput {
+                stdout,
+                stdout_truncated: truncated || display_truncated,
+                stderr: String::new(),
+                stderr_truncated: false,
+                exit_code: result.exit_code,
+                interrupted: result.timed_out,
+            };
+        }
         let (stdout, stdout_truncated) = window_stream(backend, session, &result.stdout).await;
         let (stderr, stderr_truncated) = window_stream(backend, session, &result.stderr).await;
 
@@ -76,6 +88,15 @@ impl BashExecutor {
             interrupted: result.timed_out,
         }
     }
+}
+
+// Budget the escaped stdout field and reserve space for the result metadata.
+fn truncate_client_stdout(stdout: &mut String) -> bool {
+    const BUDGET: usize = super::super::super::CLIENT_RESULT_LIMIT - 512;
+    let end = super::super::super::json_string_prefix(stdout, BUDGET);
+    let truncated = end < stdout.len();
+    stdout.truncate(end);
+    truncated
 }
 
 const SPILL_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);

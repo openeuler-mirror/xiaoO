@@ -13,7 +13,7 @@ use agent_client_protocol::{
 };
 use serde_json::{json, Map, Value};
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::{mpsc, oneshot, Mutex},
     task::JoinHandle,
 };
 use tokio_util::{
@@ -24,9 +24,15 @@ use xiaoo_api::{
     chat::AgentId,
     events::{LoopEndSummary, LoopEventSink, ToolResultEvent},
 };
-use xiaoo_shared::gateway::{controlled_session::ControlledTextSession, TurnOutcome};
+use xiaoo_shared::gateway::{
+    controlled_delegation::ClientOperationCapabilities, controlled_session::ControlledSession,
+    TurnOutcome,
+};
 
-use super::Config;
+use super::{
+    delegation::{Delegation, DelegationOutcome},
+    Config,
+};
 use crate::build_identity::{COMMIT, VERSION};
 
 const PROFILE_META: &str = "org.openeuler.xiaoo/acp";
@@ -34,6 +40,15 @@ const BUILD_META: &str = "org.openeuler.xiaoo/build";
 const USAGE_META: &str = "org.openeuler.xiaoo/usage";
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const UPDATE_BUFFER: usize = 256;
+
+#[derive(
+    Clone, Debug, serde::Deserialize, serde::Serialize, agent_client_protocol::JsonRpcRequest,
+)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[request(method = "_org.openeuler.xiaoo/tools/list", response = Value)]
+struct ToolsListRequest {
+    session_id: acp::SessionId,
+}
 
 struct Server {
     config: Config,
@@ -43,7 +58,8 @@ struct Server {
 }
 
 struct Session {
-    runtime: ControlledTextSession,
+    runtime: ControlledSession,
+    delegation: Option<Arc<Delegation>>,
     state: Mutex<SessionState>,
 }
 
@@ -84,14 +100,16 @@ impl Server {
             return Err(Error::new(-32600, "connection is already initialized"));
         }
 
+        let mode = if self.config.delegation.enabled() {
+            "controlled-coding"
+        } else {
+            "controlled-text"
+        };
         let capabilities = acp::AgentCapabilities::new()
             .session_capabilities(
                 acp::SessionCapabilities::new().close(acp::SessionCloseCapabilities::new()),
             )
-            .meta(meta(
-                PROFILE_META,
-                json!({"mode": "controlled-text", "version": 1}),
-            ));
+            .meta(meta(PROFILE_META, json!({"mode": mode, "version": 1})));
         Ok(acp::InitializeResponse::new(ProtocolVersion::V1)
             .agent_capabilities(capabilities)
             .agent_info(acp::Implementation::new("xiaoo", VERSION))
@@ -132,6 +150,7 @@ impl Server {
     async fn new_session(
         &self,
         request: acp::NewSessionRequest,
+        connection: ConnectionTo<Client>,
     ) -> Result<acp::NewSessionResponse, Error> {
         self.require_initialize()?;
         if !request.mcp_servers.is_empty() {
@@ -163,14 +182,47 @@ impl Server {
             .get(profile)
             .ok_or_else(|| invalid("unknown model profile"))?;
         let id = uuid::Uuid::new_v4().to_string();
-        let runtime = ControlledTextSession::open(id.clone(), request.cwd, configured)
-            .await
+        let session_id = acp::SessionId::new(id.clone());
+        let (runtime, delegation) = if self.config.delegation.enabled() {
+            let client = self
+                .client_capabilities
+                .get()
+                .expect("connection initialized");
+            let capabilities = ClientOperationCapabilities {
+                read: client.fs.read_text_file,
+                write: client.fs.write_text_file && self.config.delegation.exclusive_writer,
+                terminal: client.terminal,
+            };
+            let delegation = Arc::new(Delegation::new(
+                connection,
+                session_id.clone(),
+                self.config.delegation.permission,
+            ));
+            (
+                ControlledSession::open_delegated(
+                    id,
+                    request.cwd,
+                    configured,
+                    capabilities,
+                    delegation.clone(),
+                )
+                .await,
+                Some(delegation),
+            )
+        } else {
+            (
+                ControlledSession::open(id, request.cwd, configured).await,
+                None,
+            )
+        };
+        let runtime = runtime
             .map_err(|_| Error::new(-32000, "session model or runtime could not be initialized"))?;
-        let id = acp::SessionId::new(id);
+        let id = session_id;
         self.sessions.lock().await.insert(
             id.clone(),
             Arc::new(Session {
                 runtime,
+                delegation,
                 state: Mutex::new(SessionState {
                     profile: profile.clone(),
                     active: None,
@@ -230,6 +282,13 @@ impl Server {
         if let Err(error) = require_idle(&state) {
             return responder.respond_with_error(error);
         }
+        if session
+            .delegation
+            .as_ref()
+            .is_some_and(|delegation| delegation.is_uncertain())
+        {
+            return responder.respond_with_error(Error::new(-32000, "operation_result_unknown"));
+        }
         let cancel = self.disconnect.child_token();
         let task_session = Arc::clone(&session);
         let task_cancel = cancel.clone();
@@ -249,6 +308,17 @@ impl Server {
         });
         state.active = Some(ActivePrompt { cancel, task });
         Ok(())
+    }
+
+    async fn tools_list(&self, request: ToolsListRequest) -> Result<Value, Error> {
+        let session = self.session(&request.session_id).await?;
+        let tools = session
+            .runtime
+            .tool_names()
+            .into_iter()
+            .map(|name| json!({"name": name, "source": "builtin"}))
+            .collect::<Vec<_>>();
+        Ok(json!({"tools": tools}))
     }
 
     async fn cancel(&self, id: &acp::SessionId) -> Result<(), Error> {
@@ -334,21 +404,47 @@ fn prompt_text(blocks: Vec<acp::ContentBlock>) -> Result<String, Error> {
     Ok(text)
 }
 
-struct TurnOutput {
-    updates: mpsc::Sender<acp::SessionUpdate>,
-    cancel: CancellationToken,
-    delivery_failed: Arc<AtomicBool>,
-    text: SyncMutex<String>,
-    reasoning: SyncMutex<String>,
+enum QueuedUpdate {
+    Notification(acp::SessionUpdate),
+    Flush(oneshot::Sender<()>),
 }
 
-impl TurnOutput {
-    fn emit(&self, update: acp::SessionUpdate) {
-        if let Err(mpsc::error::TrySendError::Full(_)) = self.updates.try_send(update) {
-            self.delivery_failed.store(true, Ordering::Release);
-            self.cancel.cancel();
+#[derive(Clone)]
+pub(crate) struct TurnUpdates {
+    sender: mpsc::Sender<QueuedUpdate>,
+    cancel: CancellationToken,
+    delivery_failed: Arc<AtomicBool>,
+}
+
+impl TurnUpdates {
+    fn fail(&self) {
+        self.delivery_failed.store(true, Ordering::Release);
+        self.cancel.cancel();
+    }
+
+    pub fn emit(&self, update: acp::SessionUpdate) -> Result<(), ()> {
+        self.sender
+            .try_send(QueuedUpdate::Notification(update))
+            .map_err(|_| self.fail())
+    }
+
+    pub async fn flush(&self) -> Result<(), ()> {
+        let (flushed, done) = oneshot::channel();
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(()),
+            result = async {
+                self.sender.send(QueuedUpdate::Flush(flushed)).await.map_err(|_| ())?;
+                done.await.map_err(|_| ())
+            } => result,
         }
     }
+}
+
+struct TurnOutput {
+    updates: TurnUpdates,
+    text: SyncMutex<String>,
+    reasoning: SyncMutex<String>,
 }
 
 impl TurnOutput {
@@ -361,14 +457,15 @@ impl TurnOutput {
         let mut previous = previous.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(delta) = current.strip_prefix(previous.as_str()) {
             if !delta.is_empty() {
-                self.emit(update(acp::ContentChunk::new(delta.into())));
+                let _ = self
+                    .updates
+                    .emit(update(acp::ContentChunk::new(delta.into())));
                 previous.push_str(delta);
             }
         } else {
             // ACP updates append text. A provider retry cannot replace what was
             // already sent to the client.
-            self.delivery_failed.store(true, Ordering::Release);
-            self.cancel.cancel();
+            self.updates.fail();
         }
     }
 }
@@ -407,23 +504,33 @@ async fn run_prompt(
     connection: &ConnectionTo<Client>,
 ) -> Result<acp::PromptResponse, Error> {
     let (sender, mut receiver) = mpsc::channel(UPDATE_BUFFER);
-    let delivery_failed = Arc::new(AtomicBool::new(false));
-    let output = Arc::new(TurnOutput {
-        updates: sender,
+    let updates = TurnUpdates {
+        sender,
         cancel: cancel.clone(),
-        delivery_failed: delivery_failed.clone(),
+        delivery_failed: Arc::new(AtomicBool::new(false)),
+    };
+    let output = Arc::new(TurnOutput {
+        updates: updates.clone(),
         text: SyncMutex::default(),
         reasoning: SyncMutex::default(),
     });
+    if let Some(delegation) = &session.delegation {
+        delegation.start(cancel.clone(), updates.clone());
+    }
     let turn = session.runtime.prompt(text, output, cancel.clone());
     tokio::pin!(turn);
 
-    let emit = |update| {
-        if connection
-            .send_notification(acp::SessionNotification::new(id.clone(), update))
-            .is_err()
-        {
-            cancel.cancel();
+    let emit = |queued| match queued {
+        QueuedUpdate::Notification(update) => {
+            if connection
+                .send_notification(acp::SessionNotification::new(id.clone(), update))
+                .is_err()
+            {
+                updates.fail();
+            }
+        }
+        QueuedUpdate::Flush(flushed) => {
+            let _ = flushed.send(());
         }
     };
     let (result, usage) = loop {
@@ -436,7 +543,21 @@ async fn run_prompt(
         emit(update);
     }
     let usage = serde_json::to_value(usage).map_err(|_| Error::internal_error())?;
-    if delivery_failed.load(Ordering::Acquire) {
+    if let Some(delegation) = &session.delegation {
+        let outcome = delegation.settle().await;
+        while let Ok(update) = receiver.try_recv() {
+            emit(update);
+        }
+        let message = match outcome {
+            DelegationOutcome::Settled => None,
+            DelegationOutcome::InteractionRequired => Some("interaction_required"),
+            DelegationOutcome::Uncertain => Some("operation_result_unknown"),
+        };
+        if let Some(message) = message {
+            return Err(Error::new(-32000, message).data(json!({"usage": usage})));
+        }
+    }
+    if updates.delivery_failed.load(Ordering::Acquire) {
         return Err(
             Error::new(-32000, "prompt output could not be delivered in order")
                 .data(json!({"usage": usage})),
@@ -462,6 +583,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let prompt = Arc::clone(&server);
     let cancel = Arc::clone(&server);
     let close = Arc::clone(&server);
+    let tools_list = Arc::clone(&server);
     let agent = Agent
         .builder()
         .name("xiaoo")
@@ -474,8 +596,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .on_receive_request(
             async move |request: acp::NewSessionRequest,
                         responder: Responder<acp::NewSessionResponse>,
-                        _| {
-                responder.respond_with_result(new.new_session(request).await)
+                        connection| {
+                responder.respond_with_result(new.new_session(request, connection).await)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -492,6 +614,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                         responder: Responder<acp::PromptResponse>,
                         connection| {
                 prompt.prompt(request, responder, connection).await
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ToolsListRequest, responder: Responder<Value>, _| {
+                responder.respond_with_result(tools_list.tools_list(request).await)
             },
             agent_client_protocol::on_receive_request!(),
         )

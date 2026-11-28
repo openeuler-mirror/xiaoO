@@ -16,20 +16,23 @@ use agent_contracts::backend::{
     BackendProviderKind, OperationBackend, OperationBackendCapabilities, OperationError, PathStat,
     SharedExportedFileHandle,
 };
+use agent_contracts::tool::ToolRegistry;
 use agent_contracts::{LlmProvider, LoopEventSink, ProviderCapabilities};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
 use agent_types::{LlmError, LlmRequest, LlmResponse, StreamChunk};
 use async_trait::async_trait;
 use llm_client::LlmProviderWrapper;
+use operation_backend::ClientBackend;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tool::EmptyToolRegistry;
+use tool::{restore_checkpoint_todos, EmptyToolRegistry};
 use xiaoo_api::chat::AgentId;
 
 use crate::backend::BackendManager;
 
+use super::controlled_delegation::{registry, ClientOperationCapabilities, ControlledToolClient};
 use super::llm_assembly::{build_llm_provider, LlmAssemblyInput};
 use super::{
     AppBootstrap, GatewayEntryContext, InMemorySessionStore, ResolvedSessionRuntime,
@@ -196,7 +199,7 @@ impl LlmProvider for MeteredProvider {
         let attempt = self.attempt();
         let result = self.inner.complete(request).await;
         attempt.finish(&result);
-        result
+        check_tool_names(result)
     }
 
     async fn complete_stream(
@@ -207,7 +210,7 @@ impl LlmProvider for MeteredProvider {
         let attempt = self.attempt();
         let result = self.inner.complete_stream(request, on_chunk).await;
         attempt.finish(&result);
-        result
+        check_tool_names(result)
     }
 
     fn capabilities(&self) -> &ProviderCapabilities {
@@ -215,9 +218,25 @@ impl LlmProvider for MeteredProvider {
     }
 }
 
+fn check_tool_names(result: Result<LlmResponse, LlmError>) -> Result<LlmResponse, LlmError> {
+    let response = result?;
+    if response
+        .message
+        .tool_calls
+        .iter()
+        .any(|call| call.tool_name.len() > 128)
+    {
+        return Err(LlmError::ParseError(
+            "model tool name exceeds 128 bytes".into(),
+        ));
+    }
+    Ok(response)
+}
+
 struct ControlledResolver {
     model: RwLock<ResolvedModel>,
     cwd: PathBuf,
+    tools: Arc<dyn ToolRegistry>,
 }
 
 fn no_hooks() -> HookerRegistryConfig {
@@ -235,16 +254,19 @@ impl SessionRuntimeResolver for ControlledResolver {
         _existing: Option<&SessionRecord>,
     ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
         let model = self.model.read().await;
+        let has_tools = self.tools.spec_count() != 0;
         Ok(ResolvedSessionRuntime {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: AgentId("main".to_string()),
                 model: model.name.clone(),
                 llm: None,
-                system_prompt:
+                system_prompt: if has_tools {
+                    "You are xiaoO. Use the available client tools to help the user in their workspace."
+                } else {
                     "You are xiaoO in a text conversation. Respond to the user directly."
-                        .to_string(),
+                }.to_string(),
                 feature_flags: FeatureFlags {
-                    tool_execution: false,
+                    tool_execution: has_tools,
                     skill_matching: false,
                     skill_discovery: false,
                     kvcache_debug_enabled: false,
@@ -262,7 +284,7 @@ impl SessionRuntimeResolver for ControlledResolver {
             },
             entry_kind: None,
             llm_provider: model.provider.clone(),
-            tool_registry: Some(Arc::new(EmptyToolRegistry::new())),
+            tool_registry: Some(self.tools.clone()),
             skill_registry: None,
             bindings: SessionRuntimeBindings::default(),
             compression_pipeline: None,
@@ -277,7 +299,7 @@ impl SessionRuntimeResolver for ControlledResolver {
     }
 }
 
-pub struct ControlledTextSession {
+pub struct ControlledSession {
     entry: SessionOpenRequest,
     resolver: Arc<ControlledResolver>,
     service: Arc<dyn SessionService>,
@@ -285,18 +307,63 @@ pub struct ControlledTextSession {
     usage: Arc<Mutex<TurnUsage>>,
 }
 
-impl ControlledTextSession {
+impl ControlledSession {
     pub async fn open(
         session_id: String,
         cwd: PathBuf,
         profile: &ControlledModelProfile,
     ) -> anyhow::Result<Self> {
-        let backend_manager = Arc::new(BackendManager::new_controlled());
         let workspace = cwd
             .to_str()
             .filter(|_| cwd.is_absolute())
             .ok_or_else(|| anyhow::anyhow!("cwd must be an absolute UTF-8 path"))?;
         let root = BackendPath::from_raw(workspace);
+        let backend = Arc::new(TextOnlyBackend {
+            session_id: session_id.clone(),
+            root,
+        });
+        Self::open_bound(
+            session_id,
+            cwd,
+            profile,
+            backend,
+            Arc::new(EmptyToolRegistry::new()),
+        )
+        .await
+    }
+
+    pub async fn open_delegated(
+        session_id: String,
+        cwd: PathBuf,
+        profile: &ControlledModelProfile,
+        capabilities: ClientOperationCapabilities,
+        client: Arc<dyn ControlledToolClient>,
+    ) -> anyhow::Result<Self> {
+        let backend = Arc::new(ClientBackend::new(
+            session_id.clone(),
+            &cwd,
+            capabilities,
+            client.clone(),
+        )?);
+        let cwd = PathBuf::from(backend.paths().workspace_root().native());
+        Self::open_bound(
+            session_id,
+            cwd,
+            profile,
+            backend,
+            registry(capabilities, client)?,
+        )
+        .await
+    }
+
+    async fn open_bound(
+        session_id: String,
+        cwd: PathBuf,
+        profile: &ControlledModelProfile,
+        backend: Arc<dyn OperationBackend>,
+        tools: Arc<dyn ToolRegistry>,
+    ) -> anyhow::Result<Self> {
+        let backend_manager = Arc::new(BackendManager::new_controlled());
         let now = agent_types::current_time_ms();
         let instance = BackendInstance {
             backend_id: BackendId(session_id.clone()),
@@ -304,7 +371,7 @@ impl ControlledTextSession {
             instance_id: BackendInstanceId(session_id.clone()),
             session_id: session_id.clone(),
             state: BackendLifecycleState::Active,
-            workspace_root: root.clone(),
+            workspace_root: backend.paths().workspace_root().clone(),
             endpoint: None,
             snapshot: None,
             capabilities: Default::default(),
@@ -313,16 +380,8 @@ impl ControlledTextSession {
             created_at_ms: now,
             updated_at_ms: now,
         };
-        backend_manager
-            .bind_controlled(
-                instance,
-                Arc::new(TextOnlyBackend {
-                    session_id: session_id.clone(),
-                    root,
-                }),
-            )
-            .await?;
-        Self::open_with_backend_manager(session_id, cwd, profile, backend_manager).await
+        backend_manager.bind_controlled(instance, backend).await?;
+        Self::open_with_backend_manager(session_id, cwd, profile, backend_manager, tools).await
     }
 
     async fn open_with_backend_manager(
@@ -330,12 +389,14 @@ impl ControlledTextSession {
         cwd: PathBuf,
         profile: &ControlledModelProfile,
         backend_manager: Arc<BackendManager>,
+        tools: Arc<dyn ToolRegistry>,
     ) -> anyhow::Result<Self> {
         let usage = Arc::new(Mutex::new(TurnUsage::default()));
         let model = profile.resolve(usage.clone()).await?;
         let resolver = Arc::new(ControlledResolver {
             model: RwLock::new(model),
             cwd: cwd.clone(),
+            tools,
         });
         let entry = SessionOpenRequest {
             session_id: session_id.clone(),
@@ -367,6 +428,19 @@ impl ControlledTextSession {
             control: app.session_control_plane,
             usage,
         })
+    }
+
+    pub fn tool_names(&self) -> Vec<String> {
+        let mut names = self
+            .resolver
+            .tools
+            .filter_for(&AgentId("main".into()))
+            .visible_tools()
+            .into_iter()
+            .map(|spec| spec.name().0.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
     }
 
     pub async fn select_model(&self, profile: &ControlledModelProfile) -> anyhow::Result<()> {
@@ -409,8 +483,11 @@ impl ControlledTextSession {
     pub async fn close(&self) -> Result<(), super::SessionServiceError> {
         self.control
             .force_close_session(&self.entry.session_id)
-            .await
-            .map(|_| ())
+            .await?;
+        if self.resolver.tools.spec_count() != 0 {
+            restore_checkpoint_todos(&self.entry.session_id, Vec::new());
+        }
+        Ok(())
     }
 }
 
