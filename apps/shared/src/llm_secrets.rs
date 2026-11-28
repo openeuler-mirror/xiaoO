@@ -1,3 +1,4 @@
+use crate::text_utils::non_blank_trimmed;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -137,10 +138,8 @@ pub fn delete_llm_secret(config_path: &Path, env_name: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Persist an env-provided API key on first startup only: if the store
-/// already holds an entry for `llm.api_key_env` (saved via `set-secret` or
-/// the TUI popup), the env value is ignored so a lingering exported variable
-/// cannot silently roll an explicitly rotated key back.
+/// Persist env-provided API keys on first startup only; an existing
+/// store entry wins over a lingering exported variable.
 pub fn auto_save_from_env(config_path: &Path) -> Result<()> {
     let config_content = match fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -152,21 +151,7 @@ pub fn auto_save_from_env(config_path: &Path) -> Result<()> {
         Err(_) => return Ok(()),
     };
 
-    let api_key_env = config_value
-        .get("llm")
-        .and_then(|llm| llm.get("api_key_env"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-
-    let Some(env_name) = api_key_env else {
-        return Ok(());
-    };
-
-    let api_key = match std::env::var(env_name) {
-        Ok(v) if !v.trim().is_empty() => v,
-        Ok(_) => return Ok(()),
-        Err(_) => return Ok(()),
-    };
+    let env_names = declared_api_key_envs(&config_value);
 
     let secrets_path = llm_secrets_path(config_path);
     ensure_secrets_dir(&secrets_path)?;
@@ -177,22 +162,62 @@ pub fn auto_save_from_env(config_path: &Path) -> Result<()> {
     // a concurrent `set-secret` between them could still be clobbered.
     let _guard = StoreLock::acquire(&secrets_path)?;
     let mut store = load_secrets_store(&secrets_path, use_sdf)?;
-    if store.api_keys.contains_key(env_name) || store.tokens.contains_key(env_name) {
-        tracing::debug!(
-            "secret for env {} already persisted; skipping env auto-save",
-            env_name
-        );
+
+    let mut saved: Vec<&str> = Vec::new();
+    for env_name in env_names {
+        let api_key = match std::env::var(env_name) {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => continue,
+        };
+        if store.api_keys.contains_key(env_name) || store.tokens.contains_key(env_name) {
+            tracing::debug!(
+                "secret for env {} already persisted; skipping env auto-save",
+                env_name
+            );
+            continue;
+        }
+        store.api_keys.insert(env_name.to_string(), api_key);
+        saved.push(env_name);
+    }
+    if saved.is_empty() {
         return Ok(());
     }
-    store.api_keys.insert(env_name.to_string(), api_key);
     save_encrypted_store(&secrets_path, &store, use_sdf)?;
-
     tracing::info!(
-        "auto saved API key from env {} to llm_secrets.json",
-        env_name
+        "auto saved API key(s) from env {} to llm_secrets.json",
+        saved.join(", ")
     );
 
     Ok(())
+}
+
+/// Non-blank `api_key_env` names declared in the `[llm]` section.
+fn declared_api_key_envs(config: &toml::Value) -> Vec<&str> {
+    let Some(llm) = config.get("llm") else {
+        return Vec::new();
+    };
+    fn entry_env(table: &toml::Value) -> Option<&str> {
+        non_blank_trimmed(table.get("api_key_env").and_then(|v| v.as_str()))
+    }
+    let mut names = Vec::new();
+    names.extend(non_blank_trimmed(
+        llm.get("api_key_env").and_then(|v| v.as_str()),
+    ));
+    names.extend(
+        llm.get("models")
+            .and_then(|models| models.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(entry_env),
+    );
+    names.extend(
+        llm.get("profiles")
+            .and_then(|profiles| profiles.as_table())
+            .into_iter()
+            .flat_map(|table| table.values())
+            .filter_map(entry_env),
+    );
+    names
 }
 
 /// Startup path for LLM secrets: migrate a legacy v1 store, auto-save a
