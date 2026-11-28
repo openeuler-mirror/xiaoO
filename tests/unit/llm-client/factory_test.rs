@@ -1,6 +1,138 @@
 use super::config::LlmProviderConfig;
 use super::create::create_llm_provider;
 
+mod model_entry_tests {
+    use super::super::config::LlmModelEntry;
+
+    #[test]
+    fn model_entry_parses_full_and_partial_forms() {
+        let full: LlmModelEntry = toml::from_str(
+            r#"
+            provider = "zai"
+            model = "glm-5"
+            api_base = "https://open.bigmodel.cn/api/paas/v4"
+            api_key_env = "ZHIPU_API_KEY"
+            "#,
+        )
+        .expect("full entry should parse");
+        assert_eq!(full.provider, "zai");
+        assert_eq!(full.model, "glm-5");
+        assert_eq!(
+            full.api_base.as_deref(),
+            Some("https://open.bigmodel.cn/api/paas/v4")
+        );
+        assert_eq!(full.api_key_env.as_deref(), Some("ZHIPU_API_KEY"));
+
+        let minimal: LlmModelEntry = toml::from_str(
+            r#"
+            provider = "deepseek"
+            model = "deepseek-chat"
+            "#,
+        )
+        .expect("minimal entry should parse");
+        assert_eq!(minimal.provider, "deepseek");
+        assert_eq!(minimal.model, "deepseek-chat");
+        assert_eq!(minimal.api_base, None);
+        assert_eq!(minimal.api_key_env, None);
+        assert!(minimal.request_headers.is_empty());
+    }
+
+    #[test]
+    fn model_entry_missing_required_keys_is_a_hard_error() {
+        for broken in [
+            "model = \"glm-5\"",               // missing provider
+            "provider = \"zai\"",              // missing model
+            "api_key_env = \"ZHIPU_API_KEY\"", // missing both
+        ] {
+            let result = toml::from_str::<LlmModelEntry>(broken);
+            assert!(
+                result.is_err(),
+                "entry without required keys must not deserialize silently: {broken:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_entry_round_trips_through_toml() {
+        let entry = LlmModelEntry {
+            provider: "openai-compatible".to_string(),
+            model: "qwen3.7-plus".to_string(),
+            api_base: Some("https://example.com/compatible-mode/v1".to_string()),
+            api_key_env: Some("QWEN_API_KEY".to_string()),
+            request_headers: crate::RequestHeadersConfig {
+                request_header: Some(
+                    [("X-Gateway-Auth".to_string(), "alpha".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                request_header_env: None,
+            },
+        };
+        let serialized = toml::to_string_pretty(&entry).expect("serialize entry");
+        let restored: LlmModelEntry = toml::from_str(&serialized).expect("round-trip should parse");
+        assert_eq!(restored, entry);
+
+        let minimal = LlmModelEntry {
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            api_base: None,
+            api_key_env: None,
+            request_headers: crate::RequestHeadersConfig::default(),
+        };
+        let serialized = toml::to_string_pretty(&minimal).expect("serialize minimal entry");
+        // Optional keys are omitted, not placeholders.
+        assert!(!serialized.contains("api_base"));
+        assert!(!serialized.contains("api_key_env"));
+        assert!(!serialized.contains("request_header"));
+    }
+
+    #[test]
+    fn models_array_parses_inside_section_with_flattened_fields() {
+        use serde::Deserialize;
+
+        #[derive(Debug, Deserialize)]
+        struct Section {
+            #[serde(default)]
+            models: Vec<LlmModelEntry>,
+            #[serde(flatten)]
+            request_headers: crate::RequestHeadersConfig,
+        }
+
+        let section: Section = toml::from_str(
+            r#"
+            [[models]]
+            provider = "zai"
+            model = "glm-5"
+            api_key_env = "ZHIPU_API_KEY"
+
+            [[models]]
+            provider = "deepseek"
+            model = "deepseek-chat"
+            api_base = "https://api.deepseek.com/v1"
+
+            [models.request_header]
+            X-Gateway-Auth = "alpha"
+            "#,
+        )
+        .expect("section should parse");
+        assert_eq!(section.models.len(), 2);
+        assert_eq!(section.models[0].provider, "zai");
+        assert_eq!(section.models[1].provider, "deepseek");
+        // The header table attaches to the most recent entry, not the
+        // section-level flatten slot.
+        assert!(section.request_headers.is_empty());
+        assert_eq!(
+            section.models[1]
+                .request_headers
+                .request_header
+                .as_ref()
+                .and_then(|map| map.get("X-Gateway-Auth").map(String::as_str)),
+            Some("alpha")
+        );
+        assert!(section.models[0].request_headers.is_empty());
+    }
+}
+
 #[test]
 fn config_builder_sets_provider_key_and_model() {
     let config = LlmProviderConfig::new("openai", "gpt-4o").with_api_key("test-key");
