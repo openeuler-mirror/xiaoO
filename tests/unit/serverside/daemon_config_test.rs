@@ -1,4 +1,5 @@
 use super::{resolve_config_path, AppConfig, DaemonConfig};
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn daemon_from_toml(content: &str) -> DaemonConfig {
@@ -6,6 +7,13 @@ fn daemon_from_toml(content: &str) -> DaemonConfig {
         app: toml::from_str(content).expect("config should parse"),
         config_path: "config.toml".into(),
     }
+}
+
+fn write_daemon_config(content: &str) -> (TempDir, PathBuf) {
+    let temp = TempDir::new().expect("tempdir");
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(&config_path, content).expect("write config");
+    (temp, config_path)
 }
 
 #[test]
@@ -724,4 +732,151 @@ requests_per_minute = 90
     // Restore defaults: the gate is process-global and this test binary shares
     // it with every other case that assembles providers.
     xiaoo_api::llm::apply_global_settings(xiaoo_api::llm::RateLimitSettings::default());
+}
+
+// ── [[llm.models]] array form ────────────────────────────────────────────────
+
+#[test]
+fn loads_models_array_and_activates_first_entry() {
+    let (_temp, config_path) = write_daemon_config(
+        r#"
+[[llm.models]]
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_base = "https://example.com/compatible-mode/v1"
+api_key_env = "QWEN_API_KEY"
+
+[llm.models.request_header]
+X-Gateway-Auth = "alpha"
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+"#,
+    );
+
+    let config = DaemonConfig::load_from(&config_path).expect("load models config");
+    // First-wins; no active_profile in the array form.
+    assert_eq!(config.app.llm.provider, "openai-compatible");
+    assert_eq!(config.app.llm.model, "qwen3.7-plus");
+    assert_eq!(
+        config.app.llm.api_base.as_deref(),
+        Some("https://example.com/compatible-mode/v1")
+    );
+    assert_eq!(config.app.llm.api_key_env.as_deref(), Some("QWEN_API_KEY"));
+    // Entry-level headers normalize into the flat slot.
+    assert_eq!(
+        config
+            .app
+            .llm
+            .request_headers
+            .request_header
+            .as_ref()
+            .and_then(|map| map.get("X-Gateway-Auth").map(String::as_str)),
+        Some("alpha")
+    );
+    assert_eq!(config.app.llm.active_profile, None);
+    assert_eq!(config.app.llm.models.len(), 2);
+    // Section-level globals keep their defaults.
+    assert_eq!(config.max_output_tokens(), 16384);
+}
+
+#[test]
+fn models_array_rejects_coexistence_with_flat_keys_profiles_and_active_profile() {
+    for (extra, expected) in [
+        (
+            r#"
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+"#,
+            "llm.provider",
+        ),
+        (
+            r#"
+[llm]
+active_profile = "qwen"
+
+[llm.profiles.qwen]
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_base = "https://example.com/v1"
+api_key_env = "QWEN_API_KEY"
+"#,
+            "[llm.profiles]",
+        ),
+    ] {
+        let (_temp, config_path) = write_daemon_config(&format!(
+            "{extra}\n[[llm.models]]\nprovider = \"zai\"\nmodel = \"glm-5\"\n"
+        ));
+
+        let error = DaemonConfig::load_from(&config_path).expect_err("conflict must be rejected");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("mutually exclusive") && message.contains(expected),
+            "unexpected error: {message}"
+        );
+    }
+}
+
+#[test]
+fn models_array_rejects_blank_first_entry_provider_or_model() {
+    for (entry, expected) in [
+        (
+            "provider = \"\"\nmodel = \"glm-5\"",
+            "llm.models[0].provider is required",
+        ),
+        (
+            "provider = \"zai\"\nmodel = \"\"",
+            "llm.models[0].model is required",
+        ),
+    ] {
+        let (_temp, config_path) = write_daemon_config(&format!("[[llm.models]]\n{entry}\n"));
+
+        let error = DaemonConfig::load_from(&config_path).expect_err("blank must be rejected");
+        let message = format!("{error:#}");
+        assert!(message.contains(expected), "unexpected error: {message}");
+    }
+}
+
+/// Agent resolution falls back to the normalized flat `llm.model`.
+#[test]
+fn models_array_agent_resolution_falls_back_to_normalized_model() {
+    let (_temp, config_path) = write_daemon_config(
+        r#"
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+
+[[agents.list]]
+id = "main"
+"#,
+    );
+
+    let config = DaemonConfig::load_from(&config_path).expect("load models config");
+    let agent = config.resolve_agent().expect("resolve default agent");
+    assert_eq!(agent.id, "main");
+    assert_eq!(agent.profile_id, None);
+    assert_eq!(agent.model, "glm-5");
+}
+
+/// An agent pinning a missing `profile_id` stays an explicit error.
+#[test]
+fn models_array_agent_pinned_profile_stays_an_explicit_error() {
+    let (_temp, config_path) = write_daemon_config(
+        r#"
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+
+[[agents.list]]
+id = "pinned"
+profile_id = "missing"
+"#,
+    );
+
+    let error = DaemonConfig::load_from(&config_path)
+        .expect_err("pinning a missing profile must stay an error");
+    assert!(format!("{error:#}").contains("does not exist"));
 }

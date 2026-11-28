@@ -90,6 +90,24 @@ pub fn inspect_config_file(
 }
 
 fn inspect_profiles(config_path: &Path, config: &DaemonConfig) -> Vec<InspectedProfile> {
+    if !config.app.llm.models.is_empty() {
+        // Array form: every entry is listed, entry 0 is the active one.
+        return config
+            .app
+            .llm
+            .models
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                profile_summary(
+                    config_path,
+                    &format!("models[{index}]"),
+                    index == 0,
+                    &LlmProfileConfig::from_model_entry(entry),
+                )
+            })
+            .collect();
+    }
     if config.app.llm.profiles.is_empty() {
         return vec![profile_summary(
             config_path,

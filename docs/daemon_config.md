@@ -624,6 +624,52 @@ profiles uses `[llm.request_header_env]` or `[llm.request_header]`. See the
 [CLI configuration guide](./cli_config.md#model-request-headers) for the shared
 validation rules.
 
+## Ordered model entries: `[[llm.models]]` (Daemon ✅)
+
+Besides the named `[llm.profiles]` mechanism, the daemon supports the
+cross-frontend ordered array form: **the first entry is the active model**
+(first-wins), the remaining entries stay dormant for a future TUI `/models`
+switch. Both forms express multiple models — pick one:
+
+- `[[llm.models]]` — ordered, first-wins, shared by CLI / TUI / Daemon,
+  reserved for the future `/models` entry switch;
+- `[llm.profiles.*]` — named, selected via `llm.active_profile` or
+  `[[agents.list]].profile_id`, per-request selectable over the HTTP API.
+
+```toml
+[[llm.models]]
+provider = "zai"
+model = "glm-5"
+api_base = "https://open.bigmodel.cn/api/paas/v4"   # optional, provider default when omitted
+api_key_env = "ZHIPU_API_KEY"
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+```
+
+`config validate` / `config inspect` cover every entry (`llm.models[0]`,
+`llm.models[1]`, …) with the same rules as profiles (model set, api base
+resolvable, api key available). A dormant entry's header tables are
+validated structurally, mirroring the load-time rule — an
+env-referenced header value may legitimately be unset until the entry
+becomes active — an unknown `provider` name, in any
+entry (dormant ones included), is rejected by the shared load-time rule
+and surfaces as a config-load error. Entry-level header tables
+(`[llm.models.request_header]`) attach to the most recent entry. Entries
+accept exactly `provider` / `model` (required) and `api_base` /
+`api_key_env` / `request_header` / `request_header_env` (optional) — any
+other key inside an entry is a hard parse error.
+
+**Hard errors** — the array form is mutually exclusive with
+`llm.profiles` / `llm.active_profile` and with the flat connection keys
+(`llm.provider`, `llm.model`, `llm.api_key_env`, `llm.api_base`,
+`llm.request_header` / `llm.request_header_env`); a mixed config aborts at
+startup. `config test-model --profile <id>` does not apply to the array form
+(a per-entry switch flag may be added later); agents pinning a `profile_id`
+keep the existing explicit error since no profiles exist in this form.
+
 ## Complete Daemon Configuration Example
 
 Here is a complete example containing both common configuration and Daemon-specific configuration:

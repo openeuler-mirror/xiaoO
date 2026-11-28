@@ -114,3 +114,35 @@ x-engine-task-id = "{secret}"
     );
     assert!(!serde_json::to_string(&report).unwrap().contains(secret));
 }
+
+#[test]
+fn inspect_lists_every_models_array_entry_with_first_one_active() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[llm.models]]
+provider = "ollama"
+model = "qwen"
+
+[[llm.models]]
+provider = "deepseek"
+model = "deepseek-chat"
+"#,
+    )
+    .expect("write config");
+
+    let report = inspect_config_file(&path, &ConfigInspectOverrides::default());
+
+    assert!(report.valid, "{:?}", report.errors);
+    assert_eq!(report.profiles.len(), 2);
+    assert_eq!(report.profiles[0].id, "models[0]");
+    assert!(report.profiles[0].active);
+    assert_eq!(report.profiles[0].provider, "ollama");
+    assert_eq!(report.profiles[0].api_key_status, "not_required");
+    assert_eq!(report.profiles[1].id, "models[1]");
+    assert!(!report.profiles[1].active);
+    assert_eq!(report.profiles[1].provider, "deepseek");
+    assert_eq!(report.profiles[1].model, "deepseek-chat");
+}

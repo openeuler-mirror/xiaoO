@@ -219,3 +219,88 @@ fn rejects_unknown_trace_backend_and_empty_database_path() {
         .iter()
         .any(|issue| issue.path == "trace.db_path" && issue.code == "required"));
 }
+
+// ── [[llm.models]] array form ────────────────────────────────────────────────
+
+#[test]
+fn validates_every_models_array_entry() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[llm.models]]
+provider = "ollama"
+model = "qwen"
+
+[[llm.models]]
+provider = "local"
+model = "other"
+
+[[llm.models]]
+provider = "openai-compatible"
+model = "gw-model"
+api_key_env = "XIAOO_VALIDATION_MODELS_MISSING_KEY_42"
+"#,
+    )
+    .expect("write config");
+
+    let report = validate_config_file(&path);
+    assert!(!report.valid);
+    // Entry 2 (known provider, no base) reports the missing base and key;
+    // the keyless entries 0 and 1 stay clean.
+    assert!(report.errors.iter().any(|issue| {
+        issue.path == "llm.models[2].api_base" && issue.code == "missing_api_base"
+    }));
+    assert!(report.errors.iter().any(|issue| {
+        issue.path == "llm.models[2].api_key_env" && issue.code == "missing_api_key"
+    }));
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|issue| issue.path.starts_with("llm.models[0]")),
+        "entry 0 (ollama) should be valid: {:?}",
+        report.errors
+    );
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|issue| issue.path.starts_with("llm.models[1]")),
+        "entry 1 (local) should be valid: {:?}",
+        report.errors
+    );
+
+    // An unknown provider (dormant entries included) fails the load itself.
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[llm.models]]
+provider = "ollama"
+model = "qwen"
+
+[[llm.models]]
+provider = "not-a-provider"
+model = "other"
+"#,
+    )
+    .expect("write config");
+
+    let report = validate_config_file(&path);
+    assert!(!report.valid);
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.errors[0].code, "config_load_failed");
+    assert!(
+        report.errors[0].message.contains("llm.models[1].provider"),
+        "unexpected error: {}",
+        report.errors[0].message
+    );
+    assert!(
+        report.errors[0].message.contains("not-a-provider"),
+        "unexpected error: {}",
+        report.errors[0].message
+    );
+}
